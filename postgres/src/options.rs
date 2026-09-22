@@ -16,6 +16,7 @@ use crate::udfs::MAX_TOKEN_BYTES;
 
 const TOKENIZER_UNICODE: i32 = 0;
 const TOKENIZER_WHITESPACE: i32 = 1;
+const TOKENIZER_JIEBA: i32 = 2;
 const FOLDING_PRESERVE: i32 = 0;
 const FOLDING_FOLD: i32 = 1;
 const LONG_TRUNCATE: i32 = 0;
@@ -51,7 +52,8 @@ macro_rules! enum_members {
 enum_members!(
     TOKENIZERS,
     ("unicode", TOKENIZER_UNICODE),
-    ("whitespace", TOKENIZER_WHITESPACE)
+    ("whitespace", TOKENIZER_WHITESPACE),
+    ("jieba", TOKENIZER_JIEBA)
 );
 enum_members!(
     FOLDINGS,
@@ -373,6 +375,7 @@ pub unsafe fn tokenizer_spec(index: pg_sys::Relation) -> TokenizerPipelineSpec {
     TokenizerPipelineSpec {
         tokenizer: match options.tokenizer {
             TOKENIZER_WHITESPACE => TokenizerSpec::Whitespace,
+            TOKENIZER_JIEBA => TokenizerSpec::Jieba,
             _ => TokenizerSpec::Unicode,
         },
         case_folding: decode_folding(options.case_folding),
@@ -410,6 +413,7 @@ pub fn encode_spec(spec: &TokenizerPipelineSpec) -> [u8; SPEC_BYTES] {
     out[0] = match spec.tokenizer {
         TokenizerSpec::Unicode => TOKENIZER_UNICODE,
         TokenizerSpec::Whitespace => TOKENIZER_WHITESPACE,
+        TokenizerSpec::Jieba => TOKENIZER_JIEBA,
     } as u8;
     out[1] = folding(spec.case_folding);
     out[2] = folding(spec.accent_folding);
@@ -441,6 +445,7 @@ pub fn decode_spec(bytes: &[u8; SPEC_BYTES]) -> Option<TokenizerPipelineSpec> {
         tokenizer: match i32::from(bytes[0]) {
             TOKENIZER_UNICODE => TokenizerSpec::Unicode,
             TOKENIZER_WHITESPACE => TokenizerSpec::Whitespace,
+            TOKENIZER_JIEBA => TokenizerSpec::Jieba,
             _ => return None,
         },
         case_folding: folding(bytes[1])?,
@@ -524,6 +529,11 @@ mod tests {
             position_gaps: PositionGapMode::Collapse,
         };
         assert_eq!(decode_spec(&encode_spec(&spec)), Some(spec));
+        let jieba = TokenizerPipelineSpec {
+            tokenizer: TokenizerSpec::Jieba,
+            ..spec
+        };
+        assert_eq!(decode_spec(&encode_spec(&jieba)), Some(jieba));
         let default = TokenizerPipelineSpec::stannum_default();
         assert_eq!(decode_spec(&encode_spec(&default)), Some(default));
         assert_eq!(decode_spec(&[9, 0, 0, 0, 0, 1, 0, 0]), None);

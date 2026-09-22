@@ -507,6 +507,41 @@ mod tests {
         );
     }
 
+    // A single jieba dictionary word stays one index term; a sequence of
+    // words becomes an adjacent phrase, so Chinese queries match at word
+    // granularity without phrase syntax.
+    #[test]
+    fn jieba_pipeline_rewrites_word_sequences_to_adjacent_phrases() {
+        let mut spec = TokenizerPipelineSpec::stannum_default();
+        spec.tokenizer = TokenizerSpec::Jieba;
+        let pipeline = spec.compile().unwrap();
+        assert_eq!(
+            sub_tokenize(Expr::Term("数据库".into()), &pipeline).unwrap(),
+            Expr::Term("数据库".into())
+        );
+        assert_eq!(
+            sub_tokenize(Expr::Term("开源数据库".into()), &pipeline).unwrap(),
+            Expr::Phrase {
+                elements: vec![
+                    PhraseElement::Term("开源".into()),
+                    PhraseElement::Term("数据库".into()),
+                ],
+                slop: None,
+            }
+        );
+        // Mixed Chinese/English terms rewrite the same way.
+        assert_eq!(
+            sub_tokenize(Expr::Term("PostgreSQL数据库".into()), &pipeline).unwrap(),
+            Expr::Phrase {
+                elements: vec![
+                    PhraseElement::Term("postgresql".into()),
+                    PhraseElement::Term("数据库".into()),
+                ],
+                slop: None,
+            }
+        );
+    }
+
     // Zero-token fuzzy obeys the same rule.
     #[test]
     fn zero_token_fuzzy_rewrites_to_match_nothing() {

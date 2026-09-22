@@ -21,7 +21,7 @@ version or script; the exact Stannum behavior and remaining uncertainty follow.
 
 | Option | TIN accepted values; default | Meaning | Stannum values; default | Status / decision |
 | --- | --- | --- | --- | --- |
-| `tokenizer` | `unicode`, `whitespace`; `unicode` | Word boundaries or whitespace fields | Same | Matches documented modes; test punctuation, URLs, numerics, apostrophes, mixed scripts |
+| `tokenizer` | `unicode`, `whitespace`; `unicode` | Word boundaries or whitespace fields | Same, plus Stannum-specific `jieba` | Matches documented modes; test punctuation, URLs, numerics, apostrophes, mixed scripts. `jieba` is a Stannum addition beyond the TIN surface: dictionary word segmentation for Chinese via the embedded jieba dictionary (see below) |
 | `case_folding` | `fold`, `preserve`; `fold` | Case-insensitive or original-case terms | Same | Surface matches; Stannum lowercases Unicode scalars, not full Unicode case folding (`ß` stays `ß`); TIN docs do not specify an algorithm |
 | `accent_folding` | `fold`, `preserve`; `fold` | Remove or retain accents | Same | Surface matches; Stannum uses canonical decomposition, removes combining marks, recomposes; TIN algorithm unspecified |
 | `long_tokens` | `split`, `truncate`, `discard`; `split` | Handle terms beyond byte ceiling after folding | Same | Matches documented modes; chunks prefer grapheme boundaries, oversized clusters fall back to bounded scalar chunks |
@@ -53,6 +53,23 @@ matching without a TIN contract. `score_stop_words` remains scoring-only. The
 [settings reference](https://planetscale.com/docs/postgres/search/reference/settings)
 contains server/session GUCs, not additional `WITH` index options; they are
 outside this table and are not accepted as reloptions.
+
+## Stannum-specific `jieba` tokenizer
+
+`tokenizer = 'jieba'` is a Stannum extension with no TIN counterpart, for
+corpora mixing Chinese and English. It segments text with the jieba
+dictionary segmenter (maximum-probability path over the embedded dictionary,
+HMM fallback for out-of-dictionary Han runs), so `开源数据库` analyzes as the
+two terms `开源` and `数据库` instead of four per-character tokens, and a
+query term that spans several words rewrites to an adjacent phrase exactly as
+the `unicode` tokenizer's multi-token terms do. Non-Han runs analyze as whole
+jieba segments, which differs from UAX#29 for punctuation-bridged ASCII
+(`can't` splits into `can` and `t`); both sides of every query use the same
+pipeline, so matching remains consistent. The `graphemes` option has no
+effect under `jieba` (the segmenter emits no standalone emoji/symbol tokens).
+Determinism follows from the pinned jieba-rs version in `Cargo.lock`; a
+version bump can change segmentation for some inputs, so reindex after
+upgrading it.
 
 Tokenization changes require REINDEX for stored rows, as the public reference
 states. Stannum binds matching and highlighting to the index's persisted

@@ -53,8 +53,9 @@ fn parse_tokenizer(value: &str) -> Result<TokenizerSpec, String> {
     match value {
         "unicode" => Ok(TokenizerSpec::Unicode),
         "whitespace" => Ok(TokenizerSpec::Whitespace),
+        "jieba" => Ok(TokenizerSpec::Jieba),
         _ => Err(format!(
-            "invalid tokenizer value {value:?}; expected unicode or whitespace"
+            "invalid tokenizer value {value:?}; expected unicode, whitespace, or jieba"
         )),
     }
 }
@@ -219,6 +220,25 @@ mod tests {
         assert_eq!(
             collect_tokens("Beer JALAPEÑO", TokenizerPipelineSpec::stannum_default()),
             ["beer", "jalapeno"]
+        );
+    }
+
+    #[test]
+    fn jieba_tokens_segment_chinese_words() {
+        let spec = TokenizeOptions {
+            tokenizer: "jieba",
+            case_folding: "fold",
+            accent_folding: "fold",
+            long_tokens: "split",
+            max_token_bytes: 256,
+            graphemes: "emoji",
+            position_gaps: "preserve",
+        }
+        .into_spec()
+        .unwrap();
+        assert_eq!(
+            collect_tokens("PostgreSQL 是开源数据库", spec),
+            ["postgresql", "是", "开源", "数据库"]
         );
     }
 

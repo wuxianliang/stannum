@@ -73,6 +73,12 @@ impl TokenizerPipelineSpec {
 pub enum TokenizerSpec {
     Unicode,
     Whitespace,
+    /// Word-level segmentation via the embedded jieba dictionary, for mixed
+    /// Chinese/English corpora. Chinese text is segmented into dictionary
+    /// words; non-Han runs are emitted as jieba segments. Deterministic for a
+    /// pinned jieba-rs version, so index-time and query-time analysis agree
+    /// by construction.
+    Jieba,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

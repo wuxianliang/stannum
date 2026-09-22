@@ -7,7 +7,7 @@ use crate::folder::{CompiledFolder, lowercase_ascii_from};
 use crate::long_tokens::LongTokenIter;
 use crate::spec::{GraphemeMode, TokenizerPipelineSpec, TokenizerSpec};
 use crate::tokenizers::{
-    DiscardGraphemes, EmojiGraphemes, RetainGraphemes, UnicodeIter, WhitespaceIter,
+    DiscardGraphemes, EmojiGraphemes, JiebaIter, RetainGraphemes, UnicodeIter, WhitespaceIter,
 };
 use crate::{Classification, Token, Tokenizer};
 use unicode_normalization::char::is_combining_mark;
@@ -35,6 +35,7 @@ impl CompiledTokenizerPipeline {
                     GraphemeMode::Retain => CompiledPipelineKind::UnicodeRetain(stages),
                 },
                 TokenizerSpec::Whitespace => CompiledPipelineKind::Whitespace(stages),
+                TokenizerSpec::Jieba => CompiledPipelineKind::Jieba(stages),
             }
         };
         Self { spec, kind }
@@ -72,6 +73,7 @@ enum CompiledPipelineKind {
     UnicodeEmoji(CompiledStages),
     UnicodeRetain(CompiledStages),
     Whitespace(CompiledStages),
+    Jieba(CompiledStages),
 }
 
 struct FolderIter<I, const DEFAULT: bool> {
@@ -187,6 +189,9 @@ impl<'text> CompiledTokenIter<'text> {
             CompiledPipelineKind::Whitespace(stages) => CompiledTokenIterKind::Whitespace(
                 PipelineIter::new(WhitespaceIter::new(text), stages),
             ),
+            CompiledPipelineKind::Jieba(stages) => {
+                CompiledTokenIterKind::Jieba(PipelineIter::new(JiebaIter::new(text), stages))
+            }
         };
         Self { inner }
     }
@@ -705,6 +710,7 @@ impl<'text> Iterator for CompiledTokenIter<'text> {
             CompiledTokenIterKind::UnicodeEmoji(iter) => iter.next(),
             CompiledTokenIterKind::UnicodeRetain(iter) => iter.next(),
             CompiledTokenIterKind::Whitespace(iter) => iter.next(),
+            CompiledTokenIterKind::Jieba(iter) => iter.next(),
         }
     }
 }
@@ -716,12 +722,35 @@ enum CompiledTokenIterKind<'text> {
     UnicodeEmoji(PipelineIter<'text, UnicodeIter<'text, EmojiGraphemes>, false>),
     UnicodeRetain(PipelineIter<'text, UnicodeIter<'text, RetainGraphemes>, false>),
     Whitespace(PipelineIter<'text, WhitespaceIter<'text>, false>),
+    Jieba(PipelineIter<'text, JiebaIter<'text>, false>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn jieba_pipeline_segments_words_and_folds_case() {
+        let spec = TokenizerPipelineSpec {
+            tokenizer: TokenizerSpec::Jieba,
+            ..TokenizerPipelineSpec::stannum_default()
+        };
+        let pipeline = spec.compile().unwrap();
+        let tokens: Vec<(String, u32)> = pipeline
+            .tokenize("PostgreSQL 是开源数据库")
+            .map(|token| (token.text.into_owned(), token.pos))
+            .collect();
+        assert_eq!(
+            tokens,
+            vec![
+                ("postgresql".into(), 0),
+                ("是".into(), 1),
+                ("开源".into(), 2),
+                ("数据库".into(), 3),
+            ]
+        );
+    }
 
     #[test]
     fn latin1_alphabetic_mask_matches_is_alphabetic() {

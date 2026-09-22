@@ -11,6 +11,9 @@ license.workspace = true
 
 [dependencies]
 emojis = "0.6"
+# Word-level segmenter for the `jieba` tokenizer preset (embedded dictionary,
+# deterministic for a pinned jieba-rs version).
+jieba-rs = "0.7"
 thiserror.workspace = true
 # tinyvec 1.13.0 fails to compile with unicode-normalization's alloc-only features.
 tinyvec = "=1.12.0"

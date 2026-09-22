@@ -29,3 +29,14 @@
 - VACUUM deferred merges and deletion rewrites use validated direct posting
   merges, with interruptible construction and unchanged stale-input publication
   checks. All-dead inputs leave no empty successor.
+- Optional `tokenizer = 'jieba'` index option (also accepted by
+  `stannum.tokenize`): word-level Chinese segmentation through the embedded
+  jieba dictionary (jieba-rs, pinned in `Cargo.lock`), for mixed
+  Chinese/English corpora. Dictionary words index as single terms and
+  out-of-dictionary Han runs fall back to HMM segmentation; the same pipeline
+  analyzes at index, query, score, and highlight time, so matching stays
+  symmetric. The default `unicode` tokenizer keeps its per-character Han
+  behavior. The dictionary is parsed once per backend process on first use
+  (one-time pause of roughly a hundred milliseconds and several megabytes of
+  RSS). Reindex after upgrading the pinned jieba-rs version, because
+  segmentation can change.

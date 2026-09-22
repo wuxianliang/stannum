@@ -29,7 +29,7 @@ use crate::spec::{
     TokenizerSpec,
 };
 use crate::tokenizers::{
-    DiscardGraphemes, EmojiGraphemes, RetainGraphemes, UnicodeIter, WhitespaceIter,
+    DiscardGraphemes, EmojiGraphemes, JiebaIter, RetainGraphemes, UnicodeIter, WhitespaceIter,
 };
 use crate::{CompiledTokenizerPipeline, Token, Tokenizer};
 use std::borrow::Cow;
@@ -67,6 +67,7 @@ enum BaseIter<'text> {
     UnicodeEmoji(UnicodeIter<'text, EmojiGraphemes>),
     UnicodeRetain(UnicodeIter<'text, RetainGraphemes>),
     Whitespace(WhitespaceIter<'text>),
+    Jieba(JiebaIter<'text>),
 }
 
 impl<'text> Iterator for BaseIter<'text> {
@@ -78,6 +79,7 @@ impl<'text> Iterator for BaseIter<'text> {
             Self::UnicodeEmoji(iter) => iter.next(),
             Self::UnicodeRetain(iter) => iter.next(),
             Self::Whitespace(iter) => iter.next(),
+            Self::Jieba(iter) => iter.next(),
         }
     }
 }
@@ -100,6 +102,7 @@ impl<'text> SourceSpanIter<'text> {
                 GraphemeMode::Retain => BaseIter::UnicodeRetain(UnicodeIter::new(text)),
             },
             TokenizerSpec::Whitespace => BaseIter::Whitespace(WhitespaceIter::new(text)),
+            TokenizerSpec::Jieba => BaseIter::Jieba(JiebaIter::new(text)),
         };
         Self {
             base,
