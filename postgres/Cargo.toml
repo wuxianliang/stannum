@@ -22,6 +22,7 @@ pg_test = ["dep:serde_json"]
 
 [dependencies]
 pgrx = "=0.19.1"
+siphasher = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 rustc-hash.workspace = true

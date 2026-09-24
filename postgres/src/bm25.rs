@@ -96,18 +96,37 @@ impl DenseRatio {
 }
 
 #[derive(Debug)]
-pub(crate) struct ScoreStopWords<'a> {
-    terms: FxHashSet<&'a str>,
+pub(crate) struct ScoreStopWords {
+    terms: FxHashSet<String>,
 }
 
-impl<'a> ScoreStopWords<'a> {
+impl ScoreStopWords {
     #[must_use]
-    pub(crate) fn from_csv(csv: &'a str) -> Option<Self> {
-        let terms = csv
-            .split(',')
-            .map(str::trim)
-            .filter(|term| !term.is_empty())
-            .collect::<FxHashSet<_>>();
+    pub(crate) fn from_reloption(
+        csv: &str,
+        analyze_preset: impl Fn(&str) -> Vec<String>,
+    ) -> Option<Self> {
+        let mut terms = FxHashSet::default();
+        for entry in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let lower = entry.to_ascii_lowercase();
+            let preset = match lower.as_str() {
+                "auto" => Some("auto"),
+                "auto:zh" => Some("zh"),
+                "auto:en" => Some("en"),
+                _ => None,
+            };
+            if let Some(preset) = preset {
+                for word in crate::stopwords::words(preset) {
+                    let analyzed = analyze_preset(word);
+                    if analyzed.len() == 1 {
+                        terms.extend(analyzed);
+                    }
+                }
+            } else {
+                // Historical CSV entries are literal, not analyzed or folded.
+                terms.insert(entry.to_owned());
+            }
+        }
         (!terms.is_empty()).then_some(Self { terms })
     }
 
@@ -227,7 +246,7 @@ impl ScoringTerm {
 pub(crate) fn compile_scoring_terms<'query>(
     query_terms: impl IntoIterator<Item = ScoringTermInput<'query>>,
     edit: &TermSetEdit,
-    stop_words: Option<&ScoreStopWords<'_>>,
+    stop_words: Option<&ScoreStopWords>,
 ) -> Vec<ScoringTerm> {
     let mut terms = BTreeMap::<String, ScoringTerm>::new();
 
@@ -419,6 +438,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stop_word_presets_analyze_only_source_words() {
+        use tokenizer::{Tokenizer, TokenizerPipelineSpec, TokenizerSpec};
+        for kind in [
+            TokenizerSpec::Unicode,
+            TokenizerSpec::Jieba,
+            TokenizerSpec::Whitespace,
+        ] {
+            let pipeline = TokenizerPipelineSpec {
+                tokenizer: kind,
+                ..Default::default()
+            }
+            .compile()
+            .unwrap();
+            let analyze = |s: &str| pipeline.tokenize(s).map(|t| t.text.into_owned()).collect();
+            let stop = ScoreStopWords::from_reloption("AuTo:ZH, LITERAL,We", analyze).unwrap();
+            assert!(stop.contains("的"));
+            assert!(stop.contains("LITERAL"));
+            assert!(!stop.contains("literal"));
+            assert!(stop.contains("We"));
+            assert_eq!(stop.contains("我们"), kind != TokenizerSpec::Unicode);
+            let csv = crate::stopwords::reloption("auto", kind == TokenizerSpec::Jieba);
+            let stop = ScoreStopWords::from_reloption(&csv, analyze).unwrap();
+            assert!(stop.contains("the"));
+            assert_eq!(stop.contains("的"), kind == TokenizerSpec::Jieba);
+            let stop = ScoreStopWords::from_reloption("AUTO:EN", analyze).unwrap();
+            assert!(stop.contains("the"));
+            assert!(!stop.contains("的"));
+        }
+    }
+
+    #[test]
     fn validates_parameter_and_override_domains() {
         assert_eq!(Bm25Params::default(), Bm25Params { k1: 1.2, b: 0.75 });
         assert!(Bm25Params { k1: 0.0, b: 0.0 }.is_valid());
@@ -491,12 +541,14 @@ mod tests {
 
     #[test]
     fn stop_words_are_exact_trimmed_and_deduplicated() {
-        let words = ScoreStopWords::from_csv(" the,rare , ,\twalnut\n,the ").unwrap();
+        let words =
+            ScoreStopWords::from_reloption(" the,rare , ,\twalnut\n,the ", |_| unreachable!())
+                .unwrap();
         assert!(words.contains("the"));
         assert!(words.contains("rare"));
         assert!(words.contains("walnut"));
         assert!(!words.contains("Rare"));
-        assert!(ScoreStopWords::from_csv(" , \t,\n").is_none());
+        assert!(ScoreStopWords::from_reloption(" , \t,\n", |_| unreachable!()).is_none());
     }
 
     #[test]
@@ -525,7 +577,7 @@ mod tests {
     #[test]
     fn policy_applies_multiplicity_pins_edits_and_stop_words() {
         let stop_csv = "stopped,blocked";
-        let stop = ScoreStopWords::from_csv(stop_csv).unwrap();
+        let stop = ScoreStopWords::from_reloption(stop_csv, |_| unreachable!()).unwrap();
         let query = [
             ScoringTermInput {
                 text: "rare",

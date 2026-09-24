@@ -157,7 +157,8 @@ pub fn stannum_text_cmpfunc_indexed(document: &str, query: indexed_query) -> boo
     };
     crate::udfs::validate_stannum_index(&index, "indexed_query");
     let spec = unsafe { crate::storage::spec_by_oid(pg_sys::Oid::from(query.index)) };
-    let tokenizer = crate::storage::tokenizer_for(&spec);
+    let tokenizer =
+        crate::storage::tokenizer_for(&spec, crate::storage::dictionary_fingerprint(&spec));
     evaluate_with(document, &query.query, spec, &tokenizer)
         .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}"))
 }

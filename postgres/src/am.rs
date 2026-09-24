@@ -30,6 +30,7 @@ pub(crate) fn amhandler(_fcinfo: pg_sys::FunctionCallInfo) -> PgBox<pg_sys::Inde
     routine.amcanmulticol = false;
     routine.amsearcharray = false;
     routine.amkeytype = pg_sys::InvalidOid;
+    routine.ambuildphasename = Some(crate::progress::ambuildphasename);
     routine.amvalidate = Some(amvalidate);
     routine.ambuild = Some(ambuild);
     routine.ambuildempty = Some(ambuildempty);
@@ -61,6 +62,11 @@ unsafe extern "C-unwind" fn ambuild(
     index: pg_sys::Relation,
     index_info: *mut pg_sys::IndexInfo,
 ) -> *mut pg_sys::IndexBuildResult {
+    // Only from here on may this backend publish create-index progress; the
+    // heap scan below already advances core's tuple and block counters, and
+    // insert-path folds must never report. See `progress`.
+    let _progress = crate::progress::enter_build();
+    crate::progress::update_subphase(crate::progress::SUBPHASE_HEAP_SCAN);
     unsafe { crate::operator::warn_about_search_predicate(index) };
     unsafe { crate::storage::build_empty(index) };
     let mut state = BuildState {
@@ -218,7 +224,9 @@ unsafe extern "C-unwind" fn amrescan(
     }
     let selective = unsafe { selective(scan) };
     let spec = selective.then(|| unsafe { crate::storage::index_spec((*scan).indexRelation) });
-    let tokenizer = spec.as_ref().map(crate::storage::tokenizer_for);
+    let tokenizer = spec.as_ref().map(|spec| {
+        crate::storage::tokenizer_for(spec, crate::storage::dictionary_fingerprint(spec))
+    });
     let mut queries = Vec::with_capacity(keys.len());
     for key in keys {
         if key.sk_flags != 0 {

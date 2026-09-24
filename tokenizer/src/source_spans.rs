@@ -32,8 +32,10 @@ use crate::tokenizers::{
     DiscardGraphemes, EmojiGraphemes, JiebaIter, RetainGraphemes, UnicodeIter, WhitespaceIter,
 };
 use crate::{CompiledTokenizerPipeline, Token, Tokenizer};
+use jieba_rs::Jieba;
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Position-aligned source-span view of a [`CompiledTokenizerPipeline`].
@@ -58,7 +60,7 @@ impl Tokenizer for SourceSpans<'_> {
         &'tokenizer self,
         text: &'text str,
     ) -> Self::Iter<'tokenizer, 'text> {
-        SourceSpanIter::new(*self.0.spec(), text)
+        SourceSpanIter::new(*self.0.spec(), text, self.0.jieba_snapshot())
     }
 }
 
@@ -94,7 +96,7 @@ pub struct SourceSpanIter<'text> {
 }
 
 impl<'text> SourceSpanIter<'text> {
-    fn new(spec: TokenizerPipelineSpec, text: &'text str) -> Self {
+    fn new(spec: TokenizerPipelineSpec, text: &'text str, jieba: Option<&Arc<Jieba>>) -> Self {
         let base = match spec.tokenizer {
             TokenizerSpec::Unicode => match spec.graphemes {
                 GraphemeMode::Discard => BaseIter::UnicodeDiscard(UnicodeIter::new(text)),
@@ -102,7 +104,10 @@ impl<'text> SourceSpanIter<'text> {
                 GraphemeMode::Retain => BaseIter::UnicodeRetain(UnicodeIter::new(text)),
             },
             TokenizerSpec::Whitespace => BaseIter::Whitespace(WhitespaceIter::new(text)),
-            TokenizerSpec::Jieba => BaseIter::Jieba(JiebaIter::new(text)),
+            TokenizerSpec::Jieba => BaseIter::Jieba(JiebaIter::new_borrowed(
+                text,
+                jieba.expect("Jieba source spans require a dictionary snapshot"),
+            )),
         };
         Self {
             base,

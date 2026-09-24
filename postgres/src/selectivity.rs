@@ -68,7 +68,7 @@ pub unsafe fn estimate_query(index_oid: pg_sys::Oid, query: &str) -> Option<Esti
         let tokenizer = crate::storage::index_tokenizer(index);
         pg_sys::index_close(index, pg_sys::AccessShareLock as _);
         let query = tinql::runtime::parse_tinql_to_query(query, tokenizer.as_ref()).ok()?;
-        let view = crate::storage::view(index_oid);
+        let view = crate::storage::estimate_view(index_oid);
         let statistics = IndexStatistics {
             sources: view
                 .sources

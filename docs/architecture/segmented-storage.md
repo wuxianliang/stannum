@@ -56,6 +56,33 @@ per record, the byte limit now folds roughly 365 documents rather than roughly
 1,460. Short documents hit the 512-document limit. Smaller folds also reduce
 the amount a fresh reader must index before its first query.
 
+### Build progress
+
+`CREATE INDEX` and `REINDEX` report through core's
+`pg_stat_progress_create_index`. Core owns the command's lifecycle: it
+holds the phase at `building index` for the whole build and, because the
+heap scan runs with `progress = true`, core itself advances
+`tuples_done`/`tuples_total` and the block columns while scanning. Stannum
+never writes those tuple columns (a second writer would double-count) and
+never maps its own stages onto core's lock-wait or validation phase
+numbers. It reports one thing: the access-method subphase slot, projected
+by the view as `building index: <name>`.
+
+| Subphase | Name | Block columns mean |
+| ---: | --- | --- |
+| 1 | `heap scan` | heap blocks (core's counter) |
+| 2 | `segment flush` | blob pages of the run being written |
+| 3 | `final merge-finish` | blob pages of the last runs and merges |
+
+**The denominator switches mid-command.** While subphase 1 runs,
+`blocks_done`/`blocks_total` count heap blocks; from subphase 2 on, the same
+columns count blob pages, resetting per run the writer is filling. A
+dashboard watching only the block columns sees the unit change; the
+subphase (visible in the `phase` text) is the signal for which unit is
+current. Insert-path folds and VACUUM merges share the run writer with
+builds but never publish: progress updates are gated on a build guard that
+only `ambuild` holds.
+
 ### Insert preparation
 
 An insert captures the index identity and persisted tokenizer settings under a

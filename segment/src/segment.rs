@@ -43,7 +43,7 @@ use crate::forward::{ForwardRecord, ForwardTerm};
 use crate::payload::{Payload, PayloadBuilder};
 use crate::postings::{Postings, PostingsBuilder, PostingsCursor};
 use crate::set::Cursor as _;
-use crate::source::Source;
+use crate::source::{Area, Source};
 use crate::tf_bucket::TfBucket;
 use crate::{Error, Result, Tid, varint};
 
@@ -404,6 +404,22 @@ const LENGTH_CHUNK: u64 = 4096;
 /// A segment held entirely in memory.
 pub type Segment<'a> = Reader<&'a [u8]>;
 
+/// The dictionary extent `(at, len)` of a segment whose blob begins with
+/// `header` (the first bytes of the run, at least the fixed header). Lets a
+/// caller compute dictionary page coverage from a single page read instead
+/// of opening the whole segment.
+pub fn dictionary_extent(header: &[u8]) -> Result<(u64, u32)> {
+    let mut reader = crate::reader::Reader::new(header);
+    let magic = reader.take(4)?;
+    if Format::from_magic(magic).is_none() {
+        return Err(Error::Corrupt("segment magic"));
+    }
+    let _doc_count = reader.varint_u32()?;
+    let _total_length = reader.varint()?;
+    let dictionary_len = reader.varint_u32()?;
+    Ok((reader.position() as u64, dictionary_len))
+}
+
 impl<'a> Reader<&'a [u8]> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         Self::new(bytes)
@@ -413,6 +429,9 @@ impl<'a> Reader<&'a [u8]> {
 impl<S: Source> Reader<S> {
     pub fn new(source: S) -> Result<Self> {
         let total = source.len();
+        // The header probe is read before any area is known, so it is noted
+        // as `Other` and counts as nothing in observers.
+        source.note_area(Area::Other);
         let head = source.read(0, (total.min(64)) as usize)?;
         let mut reader = crate::reader::Reader::new(&head);
         let magic = reader.take(4)?;
@@ -454,6 +473,25 @@ impl<S: Source> Reader<S> {
         })
     }
 
+    /// The section a byte offset falls in, so a fetched region can be
+    /// attributed to the area it reads.
+    fn area_of(&self, offset: u64) -> Area {
+        let header = &self.header;
+        if offset >= header.lengths_at {
+            Area::Lengths
+        } else if offset >= header.docs_at {
+            Area::Docs
+        } else if offset >= header.payload_at {
+            Area::Payload
+        } else if offset >= header.postings_at {
+            Area::Postings
+        } else if offset >= header.dictionary_at {
+            Area::Dictionary
+        } else {
+            Area::Other
+        }
+    }
+
     /// Bytes held in the arena, for cache budgeting.
     pub fn cached_bytes(&self) -> usize {
         self.arena_bytes.get()
@@ -470,6 +508,7 @@ impl<S: Source> Reader<S> {
             // SAFETY: as below; the box stays in the arena for `self`'s life.
             return Ok(unsafe { &*pointer });
         }
+        self.source.note_area(self.area_of(offset));
         let bytes = self.source.read(offset, len)?.into_boxed_slice();
         let pointer: *const [u8] = &*bytes;
         self.arena_bytes.set(self.arena_bytes.get() + bytes.len());

@@ -26,8 +26,8 @@
 use std::ffi::{CStr, c_void};
 
 use pgrx::{
-    FromDatum, GucContext, GucFlags, GucRegistry, GucSetting, PgList, PgMemoryContexts, pg_guard,
-    pg_sys,
+    FromDatum, GucContext, GucFlags, GucRegistry, GucSetting, PgList, PgMemoryContexts, PgRelation,
+    pg_guard, pg_sys,
 };
 use rustc_hash::FxHashSet;
 use segment::Tid;
@@ -131,8 +131,11 @@ unsafe extern "C-unwind" fn executor_start_hook(
     query_desc: *mut pg_sys::QueryDesc,
     eflags: std::ffi::c_int,
 ) {
-    crate::score::note_executor_start();
-    crate::selectivity::note_executor_start();
+    if !crate::dict::internal_spi() {
+        crate::score::note_executor_start();
+        crate::dict::note_executor_start();
+        crate::selectivity::note_executor_start();
+    }
     unsafe {
         match PREVIOUS_EXECUTOR_START {
             Some(previous) => previous(query_desc, eflags),
@@ -481,6 +484,25 @@ impl Private {
     }
 }
 
+/// Worker dictionary policy also covers competing core paths for this relation.
+unsafe fn dictionary_parallel_policy(
+    root: *mut pg_sys::PlannerInfo,
+    rel: *mut pg_sys::RelOptInfo,
+    index: pg_sys::Oid,
+) -> bool {
+    unsafe {
+        let safe = crate::dict::parallel_safe(index, root);
+        if !safe {
+            (*rel).consider_parallel = false;
+            (*rel).partial_pathlist = std::ptr::null_mut();
+            for candidate in PgList::<pg_sys::Path>::from_pg((*rel).pathlist).iter_ptr() {
+                (*candidate).parallel_safe = false;
+            }
+        }
+        safe
+    }
+}
+
 #[pg_guard]
 unsafe extern "C-unwind" fn rel_pathlist_hook(
     root: *mut pg_sys::PlannerInfo,
@@ -492,8 +514,7 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         if let Some(previous) = PREVIOUS_REL_HOOK {
             previous(root, rel, rti, rte);
         }
-        if !ENABLE.get()
-            || (*rel).reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
+        if (*rel).reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
             || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION
             || byte((*rte).relkind) != b'r'
             || !(*rel).lateral_relids.is_null()
@@ -503,6 +524,12 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         let Some(mut found) = find_match(rel, rte, true) else {
             return;
         };
+        // Apply even when custom scans are disabled or the parameterized
+        // clause cannot make a custom path: bitmap alternatives analyze too.
+        let mut dictionary_parallel_safe = dictionary_parallel_policy(root, rel, found.index_oid);
+        if !ENABLE.get() {
+            return;
+        }
         let mut ordering = find_ordering(root, rel, &found);
         // A parameter that cannot supply this ordering must not hide an
         // existing constant-clause path in a query with multiple restrictions.
@@ -510,6 +537,10 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
             let Some(constant) = find_match(rel, rte, false) else {
                 return;
             };
+            if found.index_oid != constant.index_oid {
+                dictionary_parallel_safe =
+                    dictionary_parallel_policy(root, rel, constant.index_oid);
+            }
             found = constant;
             ordering = find_ordering(root, rel, &found);
         }
@@ -528,7 +559,8 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         // An unordered scan keeps no state outside its own process, so a
         // worker may run it (as a join's inner side). An ordered scan
         // publishes scorer state to the score calls of its own backend.
-        path.path.parallel_safe = (*rel).consider_parallel && private.ordering.is_none();
+        path.path.parallel_safe =
+            (*rel).consider_parallel && private.ordering.is_none() && dictionary_parallel_safe;
         // This is a complete, worker-local path, never a partial path: giving
         // each worker a full candidate list would duplicate rows/counts. A DSM
         // cursor and partial aggregate protocol are required before changing it.
@@ -777,7 +809,8 @@ unsafe extern "C-unwind" fn upper_paths_hook(
         path.path.parent = output_rel;
         path.path.pathtarget = (*output_rel).reltarget;
         path.path.param_info = std::ptr::null_mut();
-        path.path.parallel_safe = (*output_rel).consider_parallel;
+        path.path.parallel_safe =
+            (*output_rel).consider_parallel && crate::dict::parallel_safe(found.index_oid, root);
         path.path.parallel_aware = false;
         path.path.parallel_workers = 0;
         path.path.rows = 1.0;
@@ -900,6 +933,26 @@ struct ScanExec {
     top_k_completions: usize,
     fetched: usize,
     skipped_pages: usize,
+    /// Sources whose cursors this scan opened, classified by the view's
+    /// directory order (immutable segments first, then the write buffer).
+    /// Counted when the walk opens a source — exhaustive walks at cursor
+    /// construction, a pruned walk when WAND opens the source — not when a
+    /// rescan rewinds an existing stream.
+    segments_visited_immutable: usize,
+    segments_visited_buffer: usize,
+    /// Clause evaluations that exist only because the plan was inexact (a
+    /// capped expansion); plain visibility fetches do not recheck. The
+    /// ExecScan-level recheck callback is an unconditional stub, so this
+    /// counter is purely internal.
+    heap_rechecks: usize,
+    /// Candidates dropped by a segment dead list (WAND walks) or by an
+    /// all-dead heap fetch chain.
+    dead_skipped: usize,
+    /// This scan's counting frame for pinned segment reads (see
+    /// [`crate::observe`]); pushed at begin, popped when the executor
+    /// context drops the scan.
+    #[expect(dead_code, reason = "held for its Drop, which pops the counting frame")]
+    io: crate::observe::IoGuard,
     page_masks: Option<bool>,
     ordered: bool,
     /// Identity under which the scan publishes its scorer.
@@ -1041,6 +1094,11 @@ unsafe extern "C-unwind" fn begin_scan(
             top_k_completions: 0,
             fetched: 0,
             skipped_pages: 0,
+            segments_visited_immutable: 0,
+            segments_visited_buffer: 0,
+            heap_rechecks: 0,
+            dead_skipped: 0,
+            io: crate::observe::push_io(),
             page_masks: None,
             ordered,
             scan_id: crate::score::scan_id(),
@@ -1077,9 +1135,20 @@ unsafe fn gather(exec: &mut ScanExec) {
             )
         });
         let top_k = exec.private.ordering.as_ref().and_then(|o| o.top_k);
+        let mut wand_events = |event: crate::score::WalkEvent| match event {
+            crate::score::WalkEvent::SourceOpened { immutable: true } => {
+                exec.segments_visited_immutable += 1
+            }
+            crate::score::WalkEvent::SourceOpened { immutable: false } => {
+                exec.segments_visited_buffer += 1
+            }
+            crate::score::WalkEvent::DeadSkipped => exec.dead_skipped += 1,
+        };
         if let Some(k) = top_k
             && k <= crate::score::PRUNE_MAX_K
-            && let Some(top) = scorer.as_ref().and_then(|scorer| scorer.top_k(k))
+            && let Some(top) = scorer
+                .as_ref()
+                .and_then(|scorer| scorer.top_k(k, &mut wand_events))
         {
             exec.candidates = top.complete.then_some(top.rows.len());
             exec.scored = Some(top.scored);
@@ -1117,10 +1186,25 @@ unsafe fn start_stream(exec: &mut ScanExec) {
     unsafe {
         let query = scan_query(exec);
         let view = crate::storage::view(pg_sys::Oid::from(exec.private.index_oid));
+        // The stream opens a cursor on every source as it is built (and
+        // again on each rewind, which the visited counters do not re-count).
+        for i in 0..view.sources.len() {
+            note_source_visited(exec, i, view.immutable_sources);
+        }
         let stream = crate::stream::CandidateStream::new(view, query);
         exec.recheck = stream.recheck;
         exec.stream = Some(stream);
         exec.started = true;
+    }
+}
+
+/// Counts a source as visited by the scan, classified by the view's
+/// directory order (immutable segments first, then the write buffer).
+fn note_source_visited(exec: &mut ScanExec, index: usize, immutable_sources: usize) {
+    if index < immutable_sources {
+        exec.segments_visited_immutable += 1;
+    } else {
+        exec.segments_visited_buffer += 1;
     }
 }
 
@@ -1137,7 +1221,8 @@ unsafe fn candidates(exec: &mut ScanExec) -> Vec<Tid> {
 fn candidates_in_view(exec: &mut ScanExec, query: &Query, view: &crate::storage::View) -> Vec<Tid> {
     let limits = Limits::default();
     let mut tids = Vec::new();
-    for ((segment, dead), label) in view.sources.iter().zip(&view.labels) {
+    for (i, ((segment, dead), label)) in view.sources.iter().zip(&view.labels).enumerate() {
+        note_source_visited(exec, i, view.immutable_sources);
         pgrx::check_for_interrupts!();
         let planned = plan(query, segment, &limits)
             .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
@@ -1413,7 +1498,10 @@ unsafe extern "C-unwind" fn search_access(
                     &mut all_dead,
                 ) {
                     exec.fetched += 1;
-                    if !exec.recheck || passes_clause(node, exec, slot) {
+                    if !exec.recheck || {
+                        exec.heap_rechecks += 1;
+                        passes_clause(node, exec, slot)
+                    } {
                         if exec.ordered {
                             let member = (*slot).tts_tid;
                             let block = (u32::from(member.ip_blkid.bi_hi) << 16)
@@ -1429,6 +1517,9 @@ unsafe extern "C-unwind" fn search_access(
                     break;
                 }
                 if !call_again {
+                    if all_dead {
+                        exec.dead_skipped += 1;
+                    }
                     break;
                 }
             }
@@ -1511,12 +1602,18 @@ unsafe fn count_page(
                     &mut all_dead,
                 ) {
                     exec.fetched += 1;
-                    if !exec.recheck || passes_clause(node, exec, exec.fetch_slot) {
+                    if !exec.recheck || {
+                        exec.heap_rechecks += 1;
+                        passes_clause(node, exec, exec.fetch_slot)
+                    } {
                         count += 1;
                     }
                     break;
                 }
                 if !call_again {
+                    if all_dead {
+                        exec.dead_skipped += 1;
+                    }
                     break;
                 }
             }
@@ -1595,7 +1692,10 @@ unsafe extern "C-unwind" fn exec_count(
                 }
             } else {
                 let mut sources: Vec<Box<dyn segment::pages::Cursor>> = Vec::new();
-                for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
+                for (i, ((source, dead), label)) in
+                    view.sources.iter().zip(&view.labels).enumerate()
+                {
+                    note_source_visited(exec, i, view.immutable_sources);
                     pgrx::check_for_interrupts!();
                     let planned =
                         tinql::runtime::plan::page_plan(&query, source, &Limits::default())
@@ -1713,6 +1813,30 @@ unsafe extern "C-unwind" fn rescan(node: *mut pg_sys::CustomScanState) {
     }
 }
 
+/// The directory's shape and the analysis identity, from the meta page
+/// alone: shown with or without ANALYZE, and never reading a run.
+unsafe fn directory_properties(exec: &ScanExec, es: *mut pg_sys::ExplainState) {
+    unsafe {
+        let relation = PgRelation::with_lock(
+            pg_sys::Oid::from(exec.private.index_oid),
+            pg_sys::AccessShareLock as _,
+        );
+        let index = relation.as_ptr();
+        if !crate::storage::present(index) {
+            return;
+        }
+        let summary = crate::storage::directory_summary(index);
+        let segments = summary.immutable_segments + usize::from(summary.buffer_documents > 0);
+        pg_sys::ExplainPropertyInteger(c"Segments".as_ptr(), std::ptr::null(), segments as i64, es);
+        if let Some((_, analysis)) =
+            crate::dict::analysis_summary(&crate::storage::analysis_meta(index))
+        {
+            let analysis = std::ffi::CString::new(analysis).unwrap_or_default();
+            pg_sys::ExplainPropertyText(c"Analysis".as_ptr(), analysis.as_ptr(), es);
+        }
+    }
+}
+
 #[pg_guard]
 unsafe extern "C-unwind" fn explain(
     node: *mut pg_sys::CustomScanState,
@@ -1733,6 +1857,9 @@ unsafe extern "C-unwind" fn explain(
                 pg_sys::ExplainPropertyInteger(c"Top K".as_ptr(), std::ptr::null(), k as i64, es);
             }
         }
+        // Directory shape and analysis identity come from the meta page
+        // alone, so they show without ANALYZE too.
+        directory_properties(exec, es);
         if (*es).analyze {
             // Core instrumentation is copied from workers, but these private
             // Rust counters are not. Do not report the idle leader's zero
@@ -1790,6 +1917,57 @@ unsafe extern "C-unwind" fn explain(
                     es,
                 );
             }
+            // The prune identity: candidates the block-max walk never scored.
+            if let (Some(candidates), Some(scored)) = (exec.candidates, exec.scored) {
+                pg_sys::ExplainPropertyInteger(
+                    c"Pruned by Block-Max".as_ptr(),
+                    std::ptr::null(),
+                    candidates.saturating_sub(scored) as i64,
+                    es,
+                );
+            }
+            pg_sys::ExplainPropertyInteger(
+                c"Segments Visited".as_ptr(),
+                std::ptr::null(),
+                (exec.segments_visited_immutable + exec.segments_visited_buffer) as i64,
+                es,
+            );
+            if exec.segments_visited_immutable > 0 {
+                pg_sys::ExplainPropertyInteger(
+                    c"Immutable Segments".as_ptr(),
+                    std::ptr::null(),
+                    exec.segments_visited_immutable as i64,
+                    es,
+                );
+            }
+            if exec.segments_visited_buffer > 0 {
+                pg_sys::ExplainPropertyInteger(
+                    c"Write-Buffer Segments".as_ptr(),
+                    std::ptr::null(),
+                    exec.segments_visited_buffer as i64,
+                    es,
+                );
+            }
+            // Pin counts from this scan's observing frame (see `observe`);
+            // the frame spans rescans like the counters above it.
+            if let Some((dictionary_pages, postings_blocks)) = crate::observe::top_pages() {
+                if dictionary_pages > 0 {
+                    pg_sys::ExplainPropertyInteger(
+                        c"Dictionary Pages Read".as_ptr(),
+                        std::ptr::null(),
+                        dictionary_pages as i64,
+                        es,
+                    );
+                }
+                if postings_blocks > 0 {
+                    pg_sys::ExplainPropertyInteger(
+                        c"Postings Blocks Read".as_ptr(),
+                        std::ptr::null(),
+                        postings_blocks as i64,
+                        es,
+                    );
+                }
+            }
             if exec.ordered {
                 pg_sys::ExplainPropertyInteger(
                     c"Exhaustive Score Calls".as_ptr(),
@@ -1810,6 +1988,20 @@ unsafe extern "C-unwind" fn explain(
                 exec.fetched as i64,
                 es,
             );
+            pg_sys::ExplainPropertyInteger(
+                c"Heap Rechecks".as_ptr(),
+                std::ptr::null(),
+                exec.heap_rechecks as i64,
+                es,
+            );
+            if exec.dead_skipped > 0 {
+                pg_sys::ExplainPropertyInteger(
+                    c"Dead Skipped".as_ptr(),
+                    std::ptr::null(),
+                    exec.dead_skipped as i64,
+                    es,
+                );
+            }
             if exec.skipped_pages > 0 {
                 pg_sys::ExplainPropertyInteger(
                     c"All-Visible Pages".as_ptr(),

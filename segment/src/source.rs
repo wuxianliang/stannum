@@ -13,6 +13,22 @@ use std::rc::Rc;
 
 use crate::{Error, Result};
 
+/// Which section of a segment blob a read fetches from.
+///
+/// The [`Reader`](crate::segment::Reader) notes the area immediately before
+/// each region read so a page-backed source can attribute its pins. The
+/// initial header probe is noted as [`Area::Other`] before anything is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    Dictionary,
+    Postings,
+    Payload,
+    Docs,
+    Lengths,
+    /// The header probe, or a range outside every section.
+    Other,
+}
+
 pub trait Source {
     /// Total bytes available.
     fn len(&self) -> u64;
@@ -28,6 +44,15 @@ pub trait Source {
     fn slice(&self, offset: u64, len: usize) -> Option<&[u8]> {
         let _ = (offset, len);
         None
+    }
+
+    /// Notes the section the next [`read`](Source::read) fetches from.
+    ///
+    /// Called immediately before the read fetching each region, and only
+    /// then: memoized extents are served without a read and note nothing.
+    /// The default is a no-op; page-backed sources outside observers keep it.
+    fn note_area(&self, area: Area) {
+        let _ = area;
     }
 }
 
@@ -98,6 +123,9 @@ impl Source for Box<dyn Source> {
     }
     fn slice(&self, offset: u64, len: usize) -> Option<&[u8]> {
         (**self).slice(offset, len)
+    }
+    fn note_area(&self, area: Area) {
+        (**self).note_area(area)
     }
 }
 

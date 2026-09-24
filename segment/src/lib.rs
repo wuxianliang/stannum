@@ -55,6 +55,8 @@ pub mod tid;
 pub mod verify;
 
 pub use error::{Error, Result};
+pub use segment::dictionary_extent;
+pub use source::Area;
 pub use tid::Tid;
 
 #[cfg(test)]

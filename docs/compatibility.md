@@ -30,7 +30,7 @@ version or script; the exact Stannum behavior and remaining uncertainty follow.
 | `position_gaps` | `preserve`, `collapse`; `preserve` | Positions consumed by removed analyzed tokens | Same | Matches documented modes; discarded long tokens leave gaps only in preserve mode; base-tokenizer discarded punctuation/graphemes do not consume positions |
 | `k1` | real `0..10000`; `1.2` | BM25 saturation | Same | Matches; query-time setting, no rebuild |
 | `b` | real `0..1`; `0.75` | BM25 length normalization | Same | Matches; query-time setting, no rebuild |
-| `score_stop_words` | comma-separated text; unset | Exact analyzed terms omitted from default scoring | Same | Matches; entries are not tokenized; does not remove indexed tokens or change matching; full scoring ignores this list |
+| `score_stop_words` | comma-separated text; unset | Exact analyzed terms omitted from default scoring | Same, plus `auto`, `auto:zh`, `auto:en` | Explicit entries remain literal; presets are analyzed and single-token filtered; neither removes indexed tokens or changes matching; full scoring ignores this list |
 | `initial_segment_count` | integer `1..4096`; available parallelism | Build partitions; default target count | `1..4096`; stored default `1` | Accepted **and ignored, with warning**; expanded previous `1..1024` domain |
 | `target_segment_count` | integer `1..4096`; initial count | Background maintenance target | Same range; inert stored default `1` | Newly accepted **and ignored, with warning** |
 | `max_mutable_segment_size` | integer `>=131072`; `4194304` bytes | Promotion trigger; also 16,384 docs | Signed 32-bit integer `131072..2147483647`; `4194304` | Newly accepted **and ignored, with warning**; public docs give no explicit upper bound beyond `int` |
@@ -122,3 +122,77 @@ passed, including four new tokenizer audit tests; PG18 and PG17 clippy with
 pg_test and warnings denied passed; 44 Python benchmark tests passed. Full
 reference report and catalog evidence were saved locally under
 `/tmp/stannum-ab7-oracle-final/`; the large raw report is not checked in.
+
+
+## Dictionary governance (0.2.0)
+
+`stannum.jieba_words` is the database-local custom dictionary. Use
+`stannum.jieba_add_word(word, freq DEFAULT 0, tag DEFAULT NULL)` and
+`stannum.jieba_delete_word(word)` rather than direct table DML. Add upserts;
+delete is idempotent. Words must be nonempty, at most 256 UTF-8 bytes, and
+contain no Unicode whitespace. Frequencies must be nonnegative; zero lets
+jieba choose its default frequency. Only superusers and members of
+`pg_database_owner` may mutate or force-reload the dictionary. The functions
+are invoker-run, with an explicit Rust authorization check; the private,
+OID-resolved table is accessed internally under its owner's identity with
+error-safe restoration. No direct DML privileges are granted to callers.
+
+Committed changes invalidate other backends' caches. The next jieba use
+refreshes from that transaction's visible rows. Aborting a transaction or
+savepoint discards its uncommitted dictionary on next use. Reload failure or
+cancellation propagates an ERROR, keeps the previous dictionary installed,
+and leaves refresh pending. Compiled pipelines retain their dictionary
+snapshot for their lifetime. `jieba_reload_dict()` always reinstalls the
+embedded dictionary plus custom words and increments the backend generation,
+even when `jieba_dict_version()` is unchanged. Unchanged content reuses the
+fingerprint-keyed pipeline cache; stale identities are evicted.
+
+`jieba_dict_version()` is a deterministic SipHash-1-3 content fingerprint,
+returned as a bit-preserving signed bigint. For a hexadecimal display, use
+`SELECT lpad(to_hex(stannum.jieba_dict_version()), 16, '0')`. Zero is reserved
+for the not-yet-loaded embedded-only identity; even the empty table has a
+nonzero content fingerprint (`6855a0736155f3dd` for the frozen v1 empty table). Row ordering is raw UTF-8, not database collation.
+
+CREATE INDEX and REINDEX stamp jieba indexes with the runtime jieba version
+and dictionary fingerprint. `stannum.index_analysis(index)` reports recorded
+and runtime identities, a nullable `matches`, and a status. Non-jieba indexes
+have NULL identities and matches, with status `not applicable`. Drift emits
+one WARNING per index per statement with REINDEX advice (planner-only selectivity reads are silent). Setting
+`stannum.strict_analysis = on` upgrades **stamped-but-drifted** indexes to
+ERROR; unstamped legacy jieba indexes continue to WARNING and remain usable.
+Inserts use the current runtime dictionary without changing an existing
+stamp; REINDEX is required to make the entire index consistent again.
+
+On a hot standby the dictionary is read from WAL-visible table rows, not
+silently replaced with the embedded dictionary. Drift WARNINGs repeat on
+each query. REINDEX cannot run there until promotion (or rebuild on the
+primary and replay it). The v1 custom scan declines parallel-worker execution
+for jieba indexes with nonempty custom dictionaries (including competing
+bitmap/heap paths for the same relation); dictionary snapshot
+transfer through DSM is not implemented. Non-jieba indexes and empty custom
+dictionaries retain the existing parallel policy. Empty-dictionary workers use
+the defined empty-table fingerprint, and cached custom-scan plans depend on
+the dictionary relation so mutations re-evaluate worker eligibility.
+
+`score_stop_words` accepts case-insensitive selectors `auto`, `auto:zh`, and
+`auto:en`, mixed with literal CSV entries. Bare `auto` means Chinese plus
+English on jieba, English otherwise. Only preset words producing exactly
+one index-analyzer token are kept; explicit CSV entries are not analyzed.
+The frozen, repository-authored source lists are exposed through
+`stannum.builtin_stop_words('zh'|'en'|'auto')`. `score()` honors the reloption;
+`full_score()` always ignores it. `score_inspect` uses the persisted analyzer
+for segmented indexes and a fresh reloption pipeline for its diagnostic
+non-segmented fallback (no tokenizer-cache lookup).
+
+### Upgrade and rollback limits
+
+Upgrade with `ALTER EXTENSION stannum UPDATE TO '0.2.0'`. No existing index
+is automatically stamped. Inserts, folds, merges and VACUUM preserve the
+original optional stamp. Indexes never rebuilt retain their old-readable
+meta layout. Indexes created or reindexed with a jieba stamp on 0.2.0 cannot
+be opened by 0.1.0, whose decoder rejects the trailer. There is no on-disk
+stamp downgrade or reverse SQL upgrade script: restoring the old binary
+alone is not a rollback for rebuilt indexes; restore an appropriate backup
+or rebuild under the old binary. Page-special version remains 2 and unknown
+meta trailer tags fail closed. `tokenize` and `ql_parse` are now STABLE and
+PARALLEL UNSAFE because jieba analysis can consult the mutable dictionary.

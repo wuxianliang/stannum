@@ -9,6 +9,7 @@ import collections
 import csv
 import datetime as dt
 import dataset
+import explain_counters
 import hashlib
 import json
 import math
@@ -365,10 +366,28 @@ def run(args):
         save(out / "correctness-before.json", validate(args.engine, args.rows, env, corpus))
         if args.profile not in ("count", "mutation-count"):
             save(out / "ranked-before.json", validate_ranked(args.engine, args.rows, env, corpus))
+        explain_counters_json = {}
+        explain_counters_json = {}
         for i, (name, sql) in enumerate(queries):
             (out / f"query-{i}.sql").write_text(sql + "\n")
             plan = sql_json("EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS, FORMAT JSON) " + sql, env)
             save(out / f"plan-{name}.json", plan)
+            if args.engine == "stannum":
+                # Assert the block-max prune identity and keep this run's
+                # Stannum counters with its results; published baselines
+                # under docs/benchmarks are never touched.
+                explain_counters_json[name] = explain_counters.observe(
+                    lambda statement, env=env: psql(statement, env), sql)
+        if explain_counters_json:
+            save(out / "explain-counters.json", explain_counters_json)
+            if args.engine == "stannum":
+                # Assert the block-max prune identity and keep this run's
+                # Stannum counters with its results; published baselines
+                # under docs/benchmarks are never touched.
+                explain_counters_json[name] = explain_counters.observe(
+                    lambda statement, env=env: psql(statement, env), sql)
+        if explain_counters_json:
+            save(out / "explain-counters.json", explain_counters_json)
         writer_sql = f"""\\set id random(1, {args.rows})
 UPDATE documents SET body = CASE WHEN right(body, 8) = 'mutablea'
  THEN left(body, length(body)-8) || 'mutableb'

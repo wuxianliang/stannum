@@ -4,7 +4,7 @@
 # See LICENSE in the repository root for license terms.
 
 comment = 'Stannum: experimental PostgreSQL text search with TINQL and BM25'
-default_version = '@CARGO_VERSION@'
+default_version = '0.3.0'
 module_pathname = 'stannum'
 relocatable = false
 schema = 'stannum'

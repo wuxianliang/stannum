@@ -10,13 +10,18 @@ use pgrx::pg_guard;
 mod am;
 mod bm25;
 mod customscan;
+mod dict;
 mod highlight;
 mod highlight_udfs;
 mod match_positions;
+mod observe;
 mod operator;
 pub(crate) mod options;
+mod progress;
 mod score;
+mod search;
 mod selectivity;
+mod stopwords;
 mod storage;
 mod stream;
 mod tf_bucket {
@@ -29,6 +34,7 @@ pub extern "C-unwind" fn _PG_init() {
     options::init();
     storage::init();
     storage::wal::init();
+    dict::init();
     operator::init();
     customscan::init();
 }
@@ -5014,5 +5020,353 @@ mod tests {
         assert_eq!(from_a, before[..12]);
         assert_eq!(from_b, after[..12]);
         Spi::run("CLOSE a; CLOSE b;").unwrap();
+    }
+
+    #[pg_test]
+    fn standalone_search_srf_limits_snippets_and_count() {
+        Spi::run(
+            "CREATE TABLE srf_docs (id int primary key, body text);
+             INSERT INTO srf_docs VALUES
+               (1, 'needle needle'), (2, 'needle pad'), (3, 'other');
+             CREATE INDEX srf_docs_idx ON srf_docs USING stannum(body);",
+        )
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('srf_docs_idx', 'needle')").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM stannum.search('srf_docs_idx', 'needle', 1, 'html')",
+            )
+            .unwrap(),
+            Some(1)
+        );
+        let snippet = Spi::get_one::<String>(
+            "SELECT snippet FROM stannum.search('srf_docs_idx', 'needle', 1, 'html', '<x>', '</x>')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(snippet.contains("<x>needle</x>"));
+        let ansi = Spi::get_one::<String>(
+            "SELECT snippet FROM stannum.search('srf_docs_idx', 'needle', 1, 'ansi', '<x>', '</x>')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!ansi.contains("<x>"));
+        assert!(ansi.contains('\u{1b}'));
+        let default_score = Spi::get_one::<f32>(
+            "SELECT score FROM stannum.search('srf_docs_idx', 'needle', 1, 'none')",
+        )
+        .unwrap()
+        .unwrap();
+        let changed_score = Spi::get_one::<f32>(
+            "SELECT score FROM stannum.search('srf_docs_idx', 'needle', 1, 'none', '<x>', '</x>', 0.5, 0.25)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(default_score.to_bits(), changed_score.to_bits());
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM stannum.search('srf_docs_idx', 'needle', 0, 'ansi')",
+            )
+            .unwrap(),
+            Some(0)
+        );
+    }
+
+    #[pg_test]
+    fn standalone_wand_matches_exhaustive_plan() {
+        Spi::run(
+            "CREATE TABLE wand_docs (id int primary key, body text);
+             INSERT INTO wand_docs
+             SELECT n, CASE WHEN n % 3 = 0 THEN repeat('needle ', 4)
+               ELSE 'needle pad' END FROM generate_series(1, 60) n;
+             CREATE INDEX wand_docs_idx ON wand_docs USING stannum(body);",
+        )
+        .unwrap();
+        let (heap, index) = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT 'wand_docs'::regclass::oid, 'wand_docs_idx'::regclass::oid",
+                    Some(1),
+                    &[],
+                )
+                .unwrap()
+                .first()
+                .get_two::<pg_sys::Oid, pg_sys::Oid>()
+                .unwrap()
+        });
+        let mut exhaustive = crate::score::build_standalone_scorer(
+            heap.unwrap(),
+            index.unwrap(),
+            "needle",
+            None,
+            None,
+        );
+        let tids = exhaustive.matching_tids();
+        let mut expected: Vec<_> = exhaustive
+            .score_matching_tids(&tids)
+            .into_iter()
+            .map(|row| (row.score, row.indexed_tid))
+            .collect();
+        expected.sort_by(crate::score::rank);
+        let scorer = crate::score::build_standalone_scorer(
+            heap.unwrap(),
+            index.unwrap(),
+            "needle",
+            None,
+            None,
+        );
+        let pruned = scorer.pruned_top_k(8).expect("flat term is WAND-prunable");
+        assert!(pruned.rows.len() <= 8);
+        let actual: Vec<_> = pruned
+            .rows
+            .into_iter()
+            .map(|row| (row.score, row.indexed_tid))
+            .collect();
+        assert_eq!(
+            actual
+                .iter()
+                .map(|(score, tid)| (score.to_bits(), *tid))
+                .collect::<Vec<_>>(),
+            expected[..actual.len()]
+                .iter()
+                .map(|(score, tid)| (score.to_bits(), *tid))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[pg_test]
+    fn standalone_search_returns_distinct_visible_hot_documents() {
+        Spi::run(
+            "CREATE TABLE srf_hot (id int primary key, body text, revision int default 0)
+               WITH (fillfactor = 50);
+             INSERT INTO srf_hot
+             SELECT n, CASE WHEN n % 3 = 0 THEN 'needle needle' ELSE 'needle pad' END, 0
+               FROM generate_series(1, 30) n;
+             CREATE INDEX srf_hot_idx ON srf_hot USING stannum(body);
+             UPDATE srf_hot SET revision = revision + 1 WHERE id IN (3, 4, 5);",
+        )
+        .unwrap();
+        let rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (
+               SELECT DISTINCT d.id
+               FROM srf_hot d
+               JOIN stannum.search('srf_hot_idx', 'needle', 8, 'none') s
+                 ON d.ctid = s.ctid
+             ) hits",
+        )
+        .unwrap();
+        assert_eq!(rows, Some(8));
+    }
+
+    #[pg_test]
+    fn explain_segments_property_counts_the_directory_without_analyze() {
+        Spi::run(
+            "CREATE TABLE obs_directory(id int, body text);
+             SET LOCAL stannum.build_segment_docs = 10;
+             INSERT INTO obs_directory
+               SELECT n, 'common ' || CASE WHEN n % 2 = 0 THEN 'beer' ELSE 'wine' END
+               FROM generate_series(1, 20) n;
+             CREATE INDEX obs_directory_idx ON obs_directory USING stannum(body);
+             SET LOCAL enable_seqscan = off;",
+        )
+        .unwrap();
+        // Two immutable segments and an empty write buffer, from the meta
+        // page alone: visible without ANALYZE, before any execution.
+        let plan = plan_of("SELECT count(*) FROM obs_directory WHERE body ==> 'beer'").0;
+        let scan = &plan[0]["Plan"];
+        assert_eq!(scan["Custom Plan Provider"], "Stannum Count");
+        assert_eq!(scan["Segments"], 2);
+        assert!(scan.get("Segments Visited").is_none(), "{scan}");
+        assert!(
+            scan.get("Analysis").is_none(),
+            "a unicode index is never stamped"
+        );
+    }
+
+    #[pg_test]
+    fn explain_analyze_reports_scan_counters_and_prune_identity() {
+        Spi::run(
+            "CREATE TABLE obs_counters(id int, body text);
+             SET LOCAL stannum.build_segment_docs = 10;
+             INSERT INTO obs_counters
+               SELECT n, 'common ' || CASE WHEN n % 2 = 0 THEN 'beer' ELSE 'wine' END
+               FROM generate_series(1, 20) n;
+             CREATE INDEX obs_counters_idx ON obs_counters USING stannum(body);
+             SET LOCAL enable_seqscan = off;",
+        )
+        .unwrap();
+        let plan = Spi::get_one::<Json>(
+            "EXPLAIN (ANALYZE, FORMAT JSON)
+             SELECT id FROM obs_counters WHERE body ==> 'beer'
+             ORDER BY stannum.full_score(ctid) DESC LIMIT 20",
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        let scan = &plan[0]["Plan"]["Plans"][0]["Plans"][0];
+        assert_eq!(scan["Custom Plan Provider"], "Stannum Text Search Scan");
+        assert_eq!(scan["Segments Visited"], 2);
+        assert_eq!(scan["Immutable Segments"], 2);
+        assert!(
+            scan["Postings Blocks Read"].as_i64().unwrap() >= 1,
+            "{scan}"
+        );
+        assert!(scan["Heap Fetches"].as_i64().unwrap() >= 1, "{scan}");
+        // k exceeds the ten matches, so the walk completed and reports both
+        // sides of the prune identity.
+        let candidates = scan["Candidates"].as_i64().expect("complete walk");
+        let scored = scan["Scored Candidates"].as_i64().expect("pruned walk");
+        assert_eq!(candidates, 10);
+        assert!(scored <= candidates, "{scan}");
+        assert_eq!(scan["Pruned by Block-Max"], candidates - scored);
+        // Planning already resolved the term through the shared reader cache,
+        // so dictionary pages this scan itself pinned can legitimately be
+        // zero; the counter describes this scan's own pins, not the heap of
+        // pages warm from planning. Postings are fetched only at execution.
+        let pages = scan["Dictionary Pages Read"].as_i64().unwrap_or(0);
+        assert!(pages >= 0);
+    }
+
+    #[pg_test]
+    fn explain_analysis_property_requires_a_stamp_and_jieba() {
+        Spi::run(
+            "CREATE TABLE obs_analysis(body text);
+             CREATE INDEX obs_analysis_idx ON obs_analysis USING stannum(body) WITH(tokenizer='jieba');
+             INSERT INTO obs_analysis VALUES ('PostgreSQL 是开源数据库');
+             SET LOCAL enable_seqscan = off;",
+        )
+        .unwrap();
+        let plan = plan_of("SELECT body FROM obs_analysis WHERE body ==> '数据库'").0;
+        fn text_scan(node: &serde_json::Value) -> Option<&serde_json::Value> {
+            if node["Custom Plan Provider"] == "Stannum Text Search Scan" {
+                return Some(node);
+            }
+            node.get("Plans")?.as_array()?.iter().find_map(text_scan)
+        }
+        let scan = text_scan(&plan[0]["Plan"]).expect("search scan");
+        let analysis = scan["Analysis"].as_str().expect("stamped jieba index");
+        assert!(analysis.starts_with("jieba "), "{analysis}");
+        assert!(analysis.contains("/ matches"), "{analysis}");
+        assert!(analysis.contains("/ dict "), "{analysis}");
+        // A legacy index from before stamps: same bytes, no analysis tail.
+        let index = unsafe {
+            pgrx::PgRelation::with_lock(
+                pgrx::pg_sys::Oid::from(oid_of("obs_analysis_idx")),
+                pg_sys::AccessShareLock as _,
+            )
+        };
+        unsafe { crate::storage::testing::strip_analysis(index.as_ptr()) };
+        let plan = plan_of("SELECT body FROM obs_analysis WHERE body ==> '数据库'").0;
+        let scan = text_scan(&plan[0]["Plan"]).expect("search scan");
+        assert!(scan.get("Analysis").is_none(), "legacy meta omits Analysis");
+    }
+
+    #[pg_test]
+    fn explain_counter_contract_covers_shapes_and_a_live_write_buffer() {
+        Spi::run(
+            "CREATE TABLE hardening_counters(id int, body text);
+             SET LOCAL stannum.build_segment_docs = 10;
+             SET LOCAL stannum.write_buffer_docs = 1000;
+             INSERT INTO hardening_counters SELECT n,
+               CASE WHEN n % 2 = 0 THEN 'alpha beta' ELSE 'alpha gamma' END
+               FROM generate_series(1, 20) n;
+             CREATE INDEX hardening_counters_idx ON hardening_counters USING stannum(body);
+             INSERT INTO hardening_counters VALUES (21, 'alpha beta'), (22, 'alpha gamma');
+             SET LOCAL enable_seqscan = off;",
+        )
+        .unwrap();
+        fn scan(node: &serde_json::Value) -> Option<&serde_json::Value> {
+            if node["Custom Plan Provider"] == "Stannum Text Search Scan" {
+                return Some(node);
+            }
+            node.get("Plans")?.as_array()?.iter().find_map(scan)
+        }
+        let counters = [
+            "Segments Visited",
+            "Immutable Segments",
+            "Write-Buffer Segments",
+            "Dictionary Pages Read",
+            "Postings Blocks Read",
+            "Heap Fetches",
+            "Heap Rechecks",
+            "Dead Skipped",
+            "Candidates",
+            "Scored Candidates",
+            "Pruned by Block-Max",
+        ];
+        for query in [
+            "alpha",
+            "alpha AND beta",
+            "beta OR gamma",
+            "alpha^2 OR beta^0.5",
+        ] {
+            let sql = format!(
+                "SELECT id FROM hardening_counters WHERE body ==> '{query}'
+                ORDER BY stannum.full_score(ctid) DESC LIMIT 100"
+            );
+            let planned = plan_of(&sql).0;
+            let planned = scan(&planned[0]["Plan"]).expect("planned text scan");
+            assert_eq!(planned["Segments"], 3);
+            for property in counters {
+                assert!(
+                    planned.get(property).is_none(),
+                    "{query}: unexpected {property}: {planned}"
+                );
+            }
+            let analyzed = Spi::get_one::<Json>(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {sql}"))
+                .unwrap()
+                .unwrap()
+                .0;
+            let analyzed = scan(&analyzed[0]["Plan"]).expect("executed text scan");
+            assert_eq!(analyzed["Immutable Segments"], 2, "{query}: {analyzed}");
+            assert_eq!(analyzed["Write-Buffer Segments"], 1, "{query}: {analyzed}");
+            assert_eq!(analyzed["Segments Visited"], 3, "{query}: {analyzed}");
+            let candidates = analyzed["Candidates"].as_u64().expect("complete walk");
+            let scored = analyzed["Scored Candidates"]
+                .as_u64()
+                .expect("prunable shape");
+            assert!(scored <= candidates, "{query}: {analyzed}");
+            assert_eq!(
+                analyzed["Pruned by Block-Max"],
+                candidates.saturating_sub(scored)
+            );
+            let expected = Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM hardening_counters WHERE body ==> '{query}'"
+            ))
+            .unwrap()
+            .unwrap();
+            assert_eq!(candidates, expected as u64, "{query}: {analyzed}");
+        }
+    }
+
+    #[pg_test]
+    fn create_index_progress_reports_am_subphase_names() {
+        Spi::run(
+            "CREATE TABLE obs_progress(body text);
+             CREATE INDEX obs_progress_idx ON obs_progress USING stannum(body);",
+        )
+        .unwrap();
+        // The view's phase column renders `building index: <name>` from
+        // this callback; numbers outside the map must yield NULL.
+        let names = Spi::get_one::<Vec<Option<String>>>(
+            "SELECT array(SELECT pg_indexam_progress_phasename(a.oid, n)
+                         FROM pg_am a, generate_series(0, 4) n
+                         WHERE a.amname = 'stannum' ORDER BY n)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            names,
+            vec![
+                None,
+                Some("heap scan".to_owned()),
+                Some("segment flush".to_owned()),
+                Some("final merge-finish".to_owned()),
+                None,
+            ]
+        );
     }
 }

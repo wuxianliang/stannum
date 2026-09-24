@@ -51,6 +51,10 @@ pub const KIND_FREE: u8 = 4;
 /// records before freeing pages, so a hot standby with the same resource
 /// manager can serve segmented reads from it.
 pub const FLAG_REMOVAL_HORIZONS: u16 = 1;
+
+/// Extension record tag for the analysis identity trailer. P0-3 knows only
+/// this tag; future tags are deliberately rejected until their decoder ships.
+pub(crate) const ANALYSIS_TAG: u8 = 0x01;
 const FLAGS: usize = PAGE_SIZE - SPECIAL_SIZE + 6;
 
 /// Directory entries the meta page can hold before a merge is forced.
@@ -212,6 +216,12 @@ pub struct BufferState {
     pub docs: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AnalysisStamp {
+    pub(crate) jieba_rs_version: u32,
+    pub(crate) dict_fingerprint: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
     /// Distinguishes this index's contents from a reused relation number.
@@ -221,6 +231,8 @@ pub struct Meta {
     pub next_generation: u32,
     pub segments: Vec<SegmentEntry>,
     pub pending: Vec<Pending>,
+    /// Optional tail-appended analysis identity. `None` is the legacy format.
+    pub analysis: Option<AnalysisStamp>,
 }
 
 const META_HEADER: usize = 8 + crate::options::SPEC_BYTES + 28 + 4 + 4 + 4;
@@ -271,6 +283,13 @@ impl Meta {
             put_run(&mut out, pending.run);
             out.extend_from_slice(&pending.xid.to_le_bytes());
         }
+        if let Some(analysis) = self.analysis {
+            out.push(ANALYSIS_TAG);
+            out.extend_from_slice(&16u32.to_le_bytes());
+            out.extend_from_slice(&analysis.jieba_rs_version.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&analysis.dict_fingerprint.to_le_bytes());
+        }
         if out.len() > CAPACITY {
             return Err("Stannum meta page overflow");
         }
@@ -299,10 +318,15 @@ impl Meta {
         let segment_count = u32_at(bytes, at + 4) as usize;
         let pending_count = u32_at(bytes, at + 8) as usize;
         at += 12;
-        if segment_count > MAX_SEGMENTS
-            || pending_count > MAX_PENDING
-            || bytes.len() != at + segment_count * ENTRY_BYTES + pending_count * PENDING_BYTES
-        {
+        let records_at = at
+            .checked_add(
+                segment_count
+                    .checked_mul(ENTRY_BYTES)
+                    .ok_or("invalid Stannum meta page")?,
+            )
+            .and_then(|at| at.checked_add(pending_count.checked_mul(PENDING_BYTES)?))
+            .ok_or("invalid Stannum meta page")?;
+        if segment_count > MAX_SEGMENTS || pending_count > MAX_PENDING || bytes.len() < records_at {
             return Err("invalid Stannum meta page");
         }
         let mut segments = Vec::with_capacity(segment_count);
@@ -329,6 +353,42 @@ impl Meta {
             });
             at += PENDING_BYTES;
         }
+        let mut analysis = None;
+        while at < bytes.len() {
+            if bytes.len() - at < 5 {
+                return Err("truncated Stannum meta extension record");
+            }
+            let tag = bytes[at];
+            let payload_len = u32_at(bytes, at + 1) as usize;
+            at += 5;
+            let end = at
+                .checked_add(payload_len)
+                .ok_or("invalid Stannum meta extension record")?;
+            if end > bytes.len() {
+                return Err("truncated Stannum meta extension record");
+            }
+            match tag {
+                ANALYSIS_TAG => {
+                    if analysis.is_some() {
+                        return Err("duplicate Stannum meta analysis record");
+                    }
+                    if payload_len != 16 {
+                        return Err("invalid Stannum meta analysis record");
+                    }
+                    let jieba_rs_version = u32_at(bytes, at);
+                    let reserved = u32_at(bytes, at + 4);
+                    if reserved != 0 {
+                        return Err("invalid Stannum meta analysis record");
+                    }
+                    analysis = Some(AnalysisStamp {
+                        jieba_rs_version,
+                        dict_fingerprint: u64_at(bytes, at + 8),
+                    });
+                }
+                _ => return Err("unknown Stannum meta extension record"),
+            }
+            at = end;
+        }
         Ok(Self {
             identity,
             spec,
@@ -336,6 +396,7 @@ impl Meta {
             next_generation,
             segments,
             pending,
+            analysis,
         })
     }
 }
@@ -400,6 +461,7 @@ mod tests {
                 },
                 xid: 77,
             }],
+            analysis: None,
         }
     }
 
@@ -410,6 +472,15 @@ mod tests {
         assert_eq!(Meta::decode(&bytes).unwrap(), meta);
         assert!(Meta::decode(&bytes[..bytes.len() - 1]).is_err());
         assert!(Meta::decode(&[]).is_err());
+
+        let mut stamped = meta.clone();
+        stamped.analysis = Some(AnalysisStamp {
+            jieba_rs_version: 0x0000_0704,
+            dict_fingerprint: 0x0123_4567_89ab_cdef,
+        });
+        let stamped_bytes = stamped.encode().unwrap();
+        assert_eq!(Meta::decode(&stamped_bytes).unwrap(), stamped);
+        assert_eq!(Meta::decode(&bytes).unwrap().analysis, None);
         let mut too_many = meta.clone();
         too_many.segments = vec![meta.segments[0]; MAX_SEGMENTS + 1];
         assert!(too_many.encode().is_err());
@@ -419,6 +490,120 @@ mod tests {
         let bytes = full.encode().unwrap();
         assert!(bytes.len() <= CAPACITY);
         assert_eq!(Meta::decode(&bytes).unwrap(), full);
+
+        let mut full_stamped = full;
+        full_stamped.analysis = Some(AnalysisStamp {
+            jieba_rs_version: 1,
+            dict_fingerprint: 2,
+        });
+        let bytes = full_stamped.encode().unwrap();
+        assert!(bytes.len() <= CAPACITY);
+        assert_eq!(Meta::decode(&bytes).unwrap(), full_stamped);
+    }
+
+    #[test]
+    fn analysis_trailer_rejects_duplicate_unknown_truncated_and_reserved_records() {
+        let meta = sample_meta();
+        let mut bytes = meta.encode().unwrap();
+        bytes.push(ANALYSIS_TAG);
+        assert!(Meta::decode(&bytes).is_err());
+
+        let mut bytes = meta.encode().unwrap();
+        bytes.extend_from_slice(&[ANALYSIS_TAG, 16, 0, 0, 0]);
+        assert!(Meta::decode(&bytes).is_err());
+
+        let mut bytes = meta.encode().unwrap();
+        bytes.extend_from_slice(&[ANALYSIS_TAG, 17, 0, 0, 0]);
+        bytes.extend_from_slice(&[0; 16]);
+        assert!(Meta::decode(&bytes).is_err());
+
+        let mut bytes = meta.encode().unwrap();
+        bytes.extend_from_slice(&[ANALYSIS_TAG, 16, 0, 0, 0]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&2u64.to_le_bytes());
+        assert!(Meta::decode(&bytes).is_err());
+
+        let stamped = AnalysisStamp {
+            jieba_rs_version: 1,
+            dict_fingerprint: 2,
+        };
+        let mut bytes = meta.clone();
+        bytes.analysis = Some(stamped);
+        let mut bytes = bytes.encode().unwrap();
+        bytes.extend_from_slice(&[ANALYSIS_TAG, 16, 0, 0, 0]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u64.to_le_bytes());
+        assert!(Meta::decode(&bytes).is_err());
+
+        let mut bytes = meta.encode().unwrap();
+        bytes.extend_from_slice(&[0x02, 0, 0, 0, 0]);
+        assert!(Meta::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn stamped_trailer_all_single_byte_mutations_and_truncations_are_checked() {
+        let mut meta = sample_meta();
+        let legacy = meta.encode().unwrap();
+        meta.analysis = Some(AnalysisStamp {
+            jieba_rs_version: 0x0000_0704,
+            dict_fingerprint: 0x0123_4567_89ab_cdef,
+        });
+        let bytes = meta.encode().unwrap();
+        let start = legacy.len();
+        assert_eq!(bytes.len() - start, 21);
+        for at in start..bytes.len() {
+            for replacement in 0..=u8::MAX {
+                if replacement == bytes[at] {
+                    continue;
+                }
+                let mut mutated = bytes.clone();
+                mutated[at] = replacement;
+                // No catch_unwind: any decoder panic fails the test. Version
+                // and fingerprint bytes are opaque; framing/reserved bytes aren't.
+                let result = Meta::decode(&mutated);
+                if (start + 5..start + 9).contains(&at) || at >= start + 13 {
+                    let decoded = result.unwrap_or_else(|error| {
+                        panic!("opaque identity mutation at {at}: {replacement}: {error}")
+                    });
+                    assert_eq!(decoded.encode().unwrap(), mutated);
+                } else {
+                    assert!(result.is_err(), "accepted mutation at {at}: {replacement}");
+                }
+            }
+        }
+        assert_eq!(Meta::decode(&bytes[..start]).unwrap().analysis, None);
+        for end in start + 1..bytes.len() {
+            assert!(
+                Meta::decode(&bytes[..end]).is_err(),
+                "accepted prefix {end}"
+            );
+        }
+        // No single garbage byte appended to a legacy page is a valid trailer.
+        for garbage in 0..=u8::MAX {
+            let mut trailing = legacy.clone();
+            trailing.push(garbage);
+            assert!(Meta::decode(&trailing).is_err());
+        }
+    }
+
+    #[test]
+    fn stamped_meta_rejects_one_entry_beyond_the_pending_count_limit() {
+        let mut meta = sample_meta();
+        meta.segments = vec![meta.segments[0]; MAX_SEGMENTS];
+        meta.pending = vec![meta.pending[0]; MAX_PENDING];
+        meta.analysis = Some(AnalysisStamp {
+            jieba_rs_version: 1,
+            dict_fingerprint: 2,
+        });
+        let bytes = meta.encode().unwrap();
+        assert!(bytes.len() <= CAPACITY);
+        assert_eq!(Meta::decode(&bytes).unwrap(), meta);
+        // The configured count limit leaves byte slack; this specifically
+        // exercises that guard, not the later serialized-size guard.
+        meta.pending.push(meta.pending[0]);
+        assert_eq!(meta.encode().unwrap_err(), "Stannum meta page overflow");
     }
 
     #[test]

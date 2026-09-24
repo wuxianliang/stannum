@@ -88,7 +88,7 @@ def execute(args):
     root.mkdir(parents=True, exist_ok=False)
     protocol = root / 'protocol'
     protocol.mkdir()
-    for name in ('paired.py', 'run.py', 'campaign.py', 'dataset.py', 'Dockerfile', 'Dockerfile.dockerignore'):
+    for name in ('paired.py', 'run.py', 'campaign.py', 'dataset.py', 'explain_counters.py', 'Dockerfile', 'Dockerfile.dockerignore'):
         shutil.copy2(Path(__file__).parent / name, protocol / name)
     recipe = bench.digest((protocol / 'Dockerfile').read_bytes() + (protocol / 'Dockerfile.dockerignore').read_bytes())
     images = {}

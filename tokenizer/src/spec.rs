@@ -64,8 +64,29 @@ impl TokenizerPipelineSpec {
     }
 
     pub fn compile(self) -> Result<CompiledTokenizerPipeline, TokenizerPipelineSpecError> {
+        self.compile_with_current_snapshot()
+    }
+
+    /// Compile while taking the current global Jieba snapshot exactly once.
+    /// PostgreSQL uses this entry point so the compiled pipeline owns the
+    /// dictionary used for its entire lifetime; non-Jieba specs are unchanged.
+    pub fn compile_with_current_snapshot(
+        self,
+    ) -> Result<CompiledTokenizerPipeline, TokenizerPipelineSpecError> {
         self.validate()?;
         Ok(CompiledTokenizerPipeline::from_validated_spec(self))
+    }
+
+    /// Compile a Jieba pipeline from an already captured dictionary snapshot.
+    /// This is used by PostgreSQL's cache so the cache key and compiled
+    /// pipeline cannot observe different dictionary generations.
+    pub fn compile_with_snapshot(
+        self,
+        snapshot: crate::JiebaSnapshot,
+    ) -> Result<CompiledTokenizerPipeline, TokenizerPipelineSpecError> {
+        self.validate()?;
+        let jieba = (self.tokenizer == TokenizerSpec::Jieba).then_some(snapshot);
+        Ok(CompiledTokenizerPipeline::from_validated_spec_with_snapshot(self, jieba))
     }
 }
 

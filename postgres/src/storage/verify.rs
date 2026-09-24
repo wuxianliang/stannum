@@ -42,7 +42,9 @@ use segment::verify::{Finding, Findings, verify_dead_list, verify_forward_stream
 use super::layout::{
     self, BufferState, CHAIN_CAPACITY, KIND_BUFFER, KIND_FREE, KIND_META, KIND_RUN, Meta, NONE, Run,
 };
-use super::{Buffer, blocks, decode_page_table, tid_of, tokenizer_for, tokens_of};
+use super::{
+    Buffer, blocks, decode_page_table, dictionary_fingerprint, tid_of, tokenizer_for, tokens_of,
+};
 
 /// One row of `stannum.verify_index`.
 pub struct Row {
@@ -725,7 +727,7 @@ unsafe fn check_heap_rows(checker: &mut Checker, heap: pg_sys::Relation, meta: &
     };
     let mut state = HeapScan {
         live: checker.live.iter().map(|(tid, _)| *tid).collect(),
-        tokenizer: tokenizer_for(&meta.spec),
+        tokenizer: tokenizer_for(&meta.spec, dictionary_fingerprint(&meta.spec)),
         missing: Vec::new(),
         rows: 0,
     };

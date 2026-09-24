@@ -32,7 +32,7 @@ pub mod layout;
 pub mod verify;
 pub mod wal;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -46,7 +46,6 @@ use pgrx::{
     PgSqlErrorCode, pg_sys,
 };
 use rustc_hash::FxHashMap;
-use segment::Tid;
 use segment::dictionary::TermEntry;
 use segment::forward::ForwardRecord;
 use segment::index::{Expanded, Index, MutableIndex, Window};
@@ -54,6 +53,7 @@ use segment::postings::{Postings, PostingsBuilder, PostingsCursor};
 use segment::segment::{Lengths, Reader, Term};
 use segment::segment::{Segment, SegmentBuilder};
 use segment::set::{Cursor, Difference, Intersection};
+use segment::{Area, Tid};
 use tinql::runtime::Query;
 use tinql::runtime::plan::{Limits, plan};
 use tokenizer::{CompiledTokenizerPipeline, Tokenizer};
@@ -90,7 +90,17 @@ pub const MAX_MERGE_TIER_FACTOR: i32 = 64;
 
 /// Registers the tunables. Low values exist so tests can drive folds,
 /// merges and reclamation at small scale; the defaults are the intended ones.
+pub(crate) static STRICT_ANALYSIS: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 pub fn init() {
+    GucRegistry::define_bool_guc(
+        c"stannum.strict_analysis",
+        c"Reject stamped indexes with analysis drift",
+        c"Legacy unstamped jieba indexes still warn; REINDEX records current analysis.",
+        &STRICT_ANALYSIS,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_enum_guc(
         c"stannum.experimental_vacuum_merge_strategy",
         c"Experimental VACUUM merge strategy for controlled comparisons",
@@ -455,30 +465,82 @@ fn restamp(meta: &Meta, released: &[u32], horizon: u32) -> Option<Meta> {
 // --- Tokenizers ---------------------------------------------------------------
 
 thread_local! {
-    static TOKENIZERS: RefCell<HashMap<[u8; crate::options::SPEC_BYTES], Rc<CompiledTokenizerPipeline>>> =
-        RefCell::new(HashMap::new());
+    static TOKENIZERS: RefCell<
+        HashMap<([u8; crate::options::SPEC_BYTES], u64), Rc<CompiledTokenizerPipeline>>,
+    > = RefCell::new(HashMap::new());
 }
 
 /// The tokenizer an index was built with, compiled once per backend.
-pub fn tokenizer_for(spec: &[u8; crate::options::SPEC_BYTES]) -> Rc<CompiledTokenizerPipeline> {
+/// The current runtime dictionary fingerprint for a serialized tokenizer
+/// spec. Non-Jieba pipelines do not depend on dictionary state.
+pub fn dictionary_fingerprint(spec: &[u8; crate::options::SPEC_BYTES]) -> u64 {
+    match crate::options::decode_spec(spec) {
+        Some(spec) if spec.tokenizer == tokenizer::TokenizerSpec::Jieba => {
+            crate::dict::ensure_current()
+        }
+        _ => 0,
+    }
+}
+
+/// The tokenizer an index was built with, compiled once per backend and
+/// dictionary fingerprint.
+pub fn tokenizer_for(
+    spec: &[u8; crate::options::SPEC_BYTES],
+    dict_fingerprint: u64,
+) -> Rc<CompiledTokenizerPipeline> {
+    let decoded = crate::options::decode_spec(spec)
+        .unwrap_or_else(|| corrupt("Stannum index meta page: tokenizer settings are unreadable"));
+    let snapshot =
+        (decoded.tokenizer == tokenizer::TokenizerSpec::Jieba).then(tokenizer::jieba_snapshot);
+    let captured_fingerprint = snapshot
+        .as_ref()
+        .map_or(0, tokenizer::JiebaSnapshot::fingerprint);
+    // The caller normally supplies the same fingerprint it observed while
+    // preparing the request. If a reload raced that observation, the captured
+    // snapshot is authoritative for both the key and the compiled pipeline.
+    let cache_fingerprint = if captured_fingerprint == dict_fingerprint {
+        dict_fingerprint
+    } else {
+        captured_fingerprint
+    };
     TOKENIZERS.with_borrow_mut(|cache| {
         cache
-            .entry(*spec)
+            .entry((*spec, cache_fingerprint))
             .or_insert_with(|| {
-                let spec = crate::options::decode_spec(spec).unwrap_or_else(|| {
-                    corrupt("Stannum index meta page: tokenizer settings are unreadable")
-                });
-                Rc::new(spec.compile().expect("decoded spec validated"))
+                let pipeline = match snapshot {
+                    Some(snapshot) => decoded
+                        .compile_with_snapshot(snapshot)
+                        .expect("decoded spec validated"),
+                    None => decoded.compile().expect("decoded spec validated"),
+                };
+                debug_assert_eq!(pipeline.jieba_fingerprint().unwrap_or(0), cache_fingerprint);
+                Rc::new(pipeline)
             })
             .clone()
     })
+}
+
+/// Drop cached Jieba pipelines from older dictionary identities. The reload
+/// owner calls this after installing a new snapshot so stale pipelines do not
+/// retain an unbounded sequence of multi-megabyte dictionaries.
+pub(crate) fn evict_jieba_tokenizers_except(fingerprint: u64) {
+    TOKENIZERS.with_borrow_mut(|cache| {
+        cache.retain(|(spec, cached_fingerprint), _| {
+            crate::options::decode_spec(spec)
+                .map(|spec| {
+                    spec.tokenizer != tokenizer::TokenizerSpec::Jieba
+                        || *cached_fingerprint == fingerprint
+                })
+                .unwrap_or(true)
+        });
+    });
 }
 
 /// # Safety
 /// `index` is a live LDP2 index relation.
 pub unsafe fn index_tokenizer(index: pg_sys::Relation) -> Rc<CompiledTokenizerPipeline> {
     let (_, meta) = unsafe { read_meta(index, false) };
-    tokenizer_for(&meta.spec)
+    tokenizer_for(&meta.spec, dictionary_fingerprint(&meta.spec))
 }
 
 /// The tokenizer settings an index analyzes text with: the meta page's copy
@@ -534,7 +596,8 @@ pub unsafe fn spec_by_oid(index_oid: pg_sys::Oid) -> [u8; crate::options::SPEC_B
 /// # Safety
 /// `index_oid` names an index relation that the caller may open.
 pub unsafe fn tokenizer_by_oid(index_oid: pg_sys::Oid) -> Rc<CompiledTokenizerPipeline> {
-    tokenizer_for(&unsafe { spec_by_oid(index_oid) })
+    let spec = unsafe { spec_by_oid(index_oid) };
+    tokenizer_for(&spec, dictionary_fingerprint(&spec))
 }
 
 fn tokens_of(tokenizer: &CompiledTokenizerPipeline, text: &str) -> Vec<(String, u32)> {
@@ -648,9 +711,14 @@ unsafe fn write_run_with_map(index: pg_sys::Relation, data: &[u8]) -> (Run, Vec<
         } else {
             data.chunks(CHAIN_CAPACITY).collect()
         };
+        // During a build (never for insert folds or VACUUM; see `progress`),
+        // this run's pages become the block columns' denominator and done
+        // count: blob pages from here on, where the heap scan reported heap
+        // blocks in the same slots.
+        crate::progress::set_blocks_total(chunks.len());
         let mut next = NONE;
         let mut blocks = Vec::with_capacity(chunks.len());
-        for chunk in chunks.iter().rev() {
+        for (written, chunk) in chunks.iter().enumerate().rev() {
             pgrx::check_for_interrupts!();
             let buffer = Buffer::allocate(index);
             write_page(
@@ -662,6 +730,7 @@ unsafe fn write_run_with_map(index: pg_sys::Relation, data: &[u8]) -> (Run, Vec<
             );
             next = buffer.block();
             blocks.push(next);
+            crate::progress::set_blocks_done(chunks.len() - written);
         }
         blocks.reverse();
         (
@@ -741,6 +810,9 @@ pub struct RunSource {
     table: Rc<Vec<u32>>,
     /// The run's name in error messages.
     label: String,
+    /// The section the next `read` fetches from, noted by the segment
+    /// reader immediately before each region read.
+    area: Cell<segment::Area>,
 }
 
 impl segment::source::Source for RunSource {
@@ -748,11 +820,26 @@ impl segment::source::Source for RunSource {
         u64::from(self.run.bytes)
     }
 
+    fn note_area(&self, area: segment::Area) {
+        self.area.set(area);
+    }
+
     fn read(&self, offset: u64, len: usize) -> segment::Result<Vec<u8>> {
         let end = offset
             .checked_add(len as u64)
             .filter(|end| *end <= u64::from(self.run.bytes))
             .ok_or(segment::Error::Truncated)?;
+        // The pins this range takes on the chain, matching the page walk
+        // below: `div_ceil(offset_in_page + len, CHAIN_CAPACITY)` counts
+        // every page whose slot the range occupies, where
+        // `div_ceil(len, CHAIN_CAPACITY)` would undercount any range not
+        // starting at a run-page boundary. Repeat pins count; the observing
+        // frame (if any) deduplicates nothing.
+        if len > 0 {
+            let pins =
+                (offset % CHAIN_CAPACITY as u64 + len as u64).div_ceil(CHAIN_CAPACITY as u64);
+            crate::observe::add_pages(self.area.get(), pins);
+        }
         let mut out = Vec::with_capacity(len);
         // SAFETY: the transaction still holds the lock the planner or scan
         // took on the index; the relcache reference is scoped to this read.
@@ -907,6 +994,7 @@ unsafe fn cached_segment(
                 run: entry.run,
                 table: unsafe { page_table(index, identity, entry) },
                 label: label.clone(),
+                area: Cell::new(Area::Other),
             });
             let segment = MemoizedSegment {
                 reader: Rc::new(codec_in(Reader::new(source), &label)),
@@ -1746,6 +1834,7 @@ unsafe fn empty_meta(index: pg_sys::Relation) -> Meta {
             next_generation: 1,
             segments: Vec::new(),
             pending: Vec::new(),
+            analysis: crate::dict::stamp(&crate::options::encode_spec(&spec)),
         }
     }
 }
@@ -1841,7 +1930,9 @@ impl Builder {
                 tokens.iter().map(|(term, pos)| (term.as_str(), *pos)),
             ));
             if self.segment.document_count() >= BUILD_SEGMENT_DOCS.get().max(1) as usize {
+                crate::progress::update_subphase(crate::progress::SUBPHASE_SEGMENT_FLUSH);
                 self.flush(index);
+                crate::progress::update_subphase(crate::progress::SUBPHASE_HEAP_SCAN);
             }
         }
     }
@@ -1863,6 +1954,9 @@ impl Builder {
     /// `index` is the relation passed to `new`.
     pub unsafe fn finish(mut self, index: pg_sys::Relation) {
         if self.tokenizer.is_some() {
+            // The heap scan is over; the last flush and any merges it runs
+            // are the build's finishing subphase.
+            crate::progress::update_subphase(crate::progress::SUBPHASE_MERGE_FINISH);
             unsafe { self.flush(index) };
         }
     }
@@ -1896,7 +1990,7 @@ pub unsafe fn insert(
             // documents must not serialize readers and other writers while
             // tokenization and forward-record encoding run.
             let bytes = {
-                let tokenizer = tokenizer_for(&spec);
+                let tokenizer = tokenizer_for(&spec, dictionary_fingerprint(&spec));
                 let tokens = tokens_of(&tokenizer, &text);
                 let record = codec(ForwardRecord::from_tokens(
                     tid_of(*tid),
@@ -1957,6 +2051,13 @@ pub struct View {
     pub dead_sets: Vec<DeadSet>,
 }
 
+/// Read metadata without drift warnings (the explicit analysis diagnostic).
+/// # Safety
+/// `index` is a live segmented index relation held open by the caller.
+pub(crate) unsafe fn analysis_meta(index: pg_sys::Relation) -> Meta {
+    unsafe { read_meta(index, false).1 }
+}
+
 /// During recovery the view is served only when [`index_reads_allowed`]
 /// holds; callers choose their heap fallback before asking. Buffer pages
 /// read under the shared meta lock are validated against the meta page's
@@ -1968,13 +2069,30 @@ pub struct View {
 /// # Safety
 /// `index_oid` names a live LDP2 index the caller may open.
 pub unsafe fn view(index_oid: pg_sys::Oid) -> View {
+    unsafe { view_inner(index_oid, true) }
+}
+
+/// Planner estimates are advisory, not index execution. Emitting here would
+/// warn once during planning and again after ExecutorStart clears warned OIDs.
+pub(crate) unsafe fn estimate_view(index_oid: pg_sys::Oid) -> View {
+    unsafe { view_inner(index_oid, false) }
+}
+
+unsafe fn view_inner(index_oid: pg_sys::Oid, enforce_analysis: bool) -> View {
     unsafe {
         let relation = PgRelation::with_lock(index_oid, pg_sys::AccessShareLock as _);
         let index = relation.as_ptr();
+        // Refresh before holding a meta buffer lock across any internal SPI.
+        dictionary_fingerprint(&index_spec(index));
         let recovery = pg_sys::RecoveryInProgress();
+        let mut checked_analysis = false;
         let mut stale_reads = 0;
         loop {
             let (meta_buffer, meta) = read_meta(index, false);
+            if enforce_analysis && !checked_analysis {
+                crate::dict::check_analysis(index_oid, &meta);
+                checked_analysis = true;
+            }
             if recovery && !standby_reads_allowed(&meta_buffer) {
                 pgrx::error!(
                     "Stannum segmented reads are unavailable during recovery for this index: \
@@ -2734,6 +2852,19 @@ pub mod testing {
         unsafe { write_run_with_map(index, bytes).1 }
     }
 
+    /// Rewrites the meta page with the analysis stamp removed, as an index
+    /// built before the stamp existed still reads on disk.
+    ///
+    /// # Safety
+    /// `index` is a live LDP2 index.
+    pub unsafe fn strip_analysis(index: pg_sys::Relation) {
+        unsafe {
+            let (buffer, mut meta) = read_meta(index, true);
+            meta.analysis = None;
+            write_meta(index, &buffer, &meta);
+        }
+    }
+
     unsafe extern "C-unwind" fn in_set(
         tid: pg_sys::ItemPointer,
         state: *mut std::ffi::c_void,
@@ -2865,6 +2996,120 @@ pub unsafe fn segment_rows(index: pg_sys::Relation) -> Vec<SegmentRow> {
             });
         }
         rows
+    }
+}
+
+/// Pages of run chains intersected by immutable segments' dictionary
+/// extents: `ceil((offset + len) / CHAIN_CAPACITY) -
+/// floor(offset / CHAIN_CAPACITY)` per segment, so an extent not starting at
+/// a run-page boundary counts every page it touches. The write buffer
+/// contributes nothing (its dictionary is in memory). One first-page read
+/// per segment; never reads a dead list.
+///
+/// # Safety
+/// `index` is a live LDP2 index.
+pub unsafe fn dictionary_pages(index: pg_sys::Relation) -> u64 {
+    unsafe {
+        let (_, meta) = read_meta(index, false);
+        let mut pages = 0u64;
+        for entry in &meta.segments {
+            let label = generation_label(entry.generation);
+            let buffer = Buffer::read(index, entry.run.first, false);
+            expect_run_page(&buffer, &label);
+            let (_, data) = buffer.chain();
+            let (at, len) = codec_in(segment::dictionary_extent(data), &label);
+            pages +=
+                (at + u64::from(len)).div_ceil(CHAIN_CAPACITY as u64) - at / CHAIN_CAPACITY as u64;
+        }
+        pages
+    }
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod hardening_tests {
+    use super::*;
+    use pgrx::prelude::*;
+
+    #[pg_test(schema = "tests")]
+    fn dictionary_page_stats_count_intersected_pages_for_each_segment() {
+        Spi::run(
+            "CREATE TABLE hardening_dictionary_pages(body text);
+             SET LOCAL stannum.build_segment_docs = 200;
+             SET LOCAL stannum.write_buffer_docs = 1000;
+             INSERT INTO hardening_dictionary_pages
+               SELECT md5(n::text) || ' ' || md5((n + 10000)::text)
+               FROM generate_series(1, 400) n;
+             CREATE INDEX hardening_dictionary_pages_idx
+               ON hardening_dictionary_pages USING stannum(body);
+             INSERT INTO hardening_dictionary_pages VALUES ('buffer only');",
+        )
+        .unwrap();
+        let oid =
+            Spi::get_one::<pg_sys::Oid>("SELECT 'hardening_dictionary_pages_idx'::regclass::oid")
+                .unwrap()
+                .unwrap();
+        let roots = Spi::get_one::<Vec<i64>>(
+            "SELECT array_agg(root_block ORDER BY ordinal)
+               FROM stannum.segment_info('hardening_dictionary_pages_idx') WHERE kind='immutable'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(roots.len(), 2);
+        let index = unsafe { PgRelation::with_lock(oid, pg_sys::AccessShareLock as _) };
+        let mut expected = 0;
+        let mut crosses_page = false;
+        let mut starts_mid_page = false;
+        for root in roots {
+            let buffer = unsafe { Buffer::read(index.as_ptr(), root as u32, false) };
+            let (_, bytes) = buffer.chain();
+            let (offset, len) = segment::dictionary_extent(bytes).unwrap();
+            starts_mid_page |= offset % CHAIN_CAPACITY as u64 != 0;
+            // Enumerate page membership independently of the production
+            // ceil/floor formula, from segment_info's actual run roots.
+            let pages: std::collections::BTreeSet<_> = (offset..offset + u64::from(len))
+                .map(|byte| byte / CHAIN_CAPACITY as u64)
+                .collect();
+            crosses_page |= pages.len() > 1;
+            expected += pages.len() as i64;
+        }
+        assert!(starts_mid_page, "fixture needs a non-aligned dictionary extent");
+        assert!(crosses_page, "fixture must span dictionary pages");
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT dictionary_pages FROM stannum.index_stats('hardening_dictionary_pages_idx')"
+            )
+            .unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT immutable_segments = 2 AND mutable_segments = 1 AND segments = 3
+               FROM stannum.index_stats('hardening_dictionary_pages_idx')"
+            )
+            .unwrap(),
+            Some(true)
+        );
+    }
+}
+
+/// The directory's shape from the meta page alone: how many immutable
+/// segments it lists and whether the write buffer holds documents. Unlike
+/// [`segment_rows`] this never reads a run (not even a dead list), so
+/// EXPLAIN can show it without doing ANALYZE-scale work.
+pub struct DirectorySummary {
+    pub immutable_segments: usize,
+    /// Documents in the write buffer; zero means there is no buffer entry.
+    pub buffer_documents: u32,
+}
+
+/// # Safety
+/// `index` is a live LDP2 index.
+pub unsafe fn directory_summary(index: pg_sys::Relation) -> DirectorySummary {
+    let (_, meta) = unsafe { read_meta(index, false) };
+    DirectorySummary {
+        immutable_segments: meta.segments.len(),
+        buffer_documents: meta.buffer.docs,
     }
 }
 

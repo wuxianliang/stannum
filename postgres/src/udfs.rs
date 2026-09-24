@@ -105,7 +105,12 @@ fn parse_position_gaps(value: &str) -> Result<PositionGapMode, String> {
 fn compile_options(options: TokenizeOptions<'_>) -> tokenizer::CompiledTokenizerPipeline {
     options
         .into_spec()
-        .and_then(|spec| spec.compile().map_err(|e| e.to_string()))
+        .and_then(|spec| {
+            if spec.tokenizer == TokenizerSpec::Jieba {
+                crate::dict::ensure_current();
+            }
+            spec.compile().map_err(|e| e.to_string())
+        })
         .unwrap_or_else(|error| pgrx::error!("{error}"))
 }
 
@@ -118,7 +123,7 @@ fn collect_tokens(text: &str, spec: TokenizerPipelineSpec) -> Vec<String> {
         .collect()
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(stable, parallel_unsafe)]
 #[expect(clippy::too_many_arguments, reason = "TIN-compatible SQL signature")]
 pub fn tokenize<'a>(
     text: Option<&'a str>,
@@ -155,7 +160,7 @@ pub fn maybe_quote(text: Option<&str>) -> Option<String> {
     text.map(|text| tinql::maybe_quote(text).into_owned())
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(stable, parallel_unsafe)]
 #[expect(clippy::too_many_arguments, reason = "TIN-compatible SQL signature")]
 pub fn ql_parse(
     query: Option<&str>,
@@ -298,6 +303,96 @@ fn segment_info(
             row.generation,
         )
     }))
+}
+
+/// One health row per stannum index: the aggregates `segment_info`
+/// streams per source, plus the dictionary page coverage and the analysis
+/// identity. `VOLATILE PARALLEL UNSAFE` matches `segment_info`; the SQL
+/// (function, column comment and the `index_health` view) is pinned in the
+/// `sql` attribute so fresh installs and upgrade scripts stay identical.
+#[pg_extern(
+    volatile,
+    parallel_unsafe,
+    sql = "
+    CREATE FUNCTION @extschema@.index_stats(\"index\" regclass)
+    RETURNS TABLE (documents bigint, dead_documents bigint, dead_ratio float8,
+        segments int, immutable_segments int, mutable_segments int,
+        next_generation bigint, total_pages bigint, dictionary_pages bigint,
+        total_length bigint, average_length float8,
+        analysis_matches bool, analysis_detail text)
+    STRICT VOLATILE PARALLEL UNSAFE
+    LANGUAGE c AS 'MODULE_PATHNAME', '@FUNCTION_NAME@';
+    CREATE VIEW @extschema@.index_health WITH (security_invoker = true) AS
+    SELECT c.oid::regclass AS index, s.* FROM pg_class c
+    CROSS JOIN LATERAL @extschema@.index_stats(c.oid) s
+    WHERE c.relkind = 'i' AND c.relam = (SELECT oid FROM pg_am WHERE amname = 'stannum');
+    COMMENT ON COLUMN @extschema@.index_health.dictionary_pages IS 'Pages intersected by every immutable segment''s dictionary extents, whether or not this backend ever read them. EXPLAIN''s Dictionary Pages Read counts only the pages a given scan actually pinned; the two differ by design and agree only for a fully-scanned index.';
+"
+)]
+#[allow(clippy::type_complexity)]
+fn index_stats(
+    index: PgRelation,
+) -> TableIterator<
+    'static,
+    (
+        name!(documents, i64),
+        name!(dead_documents, i64),
+        name!(dead_ratio, f64),
+        name!(segments, i32),
+        name!(immutable_segments, i32),
+        name!(mutable_segments, i32),
+        name!(next_generation, i64),
+        name!(total_pages, i64),
+        name!(dictionary_pages, i64),
+        name!(total_length, i64),
+        name!(average_length, f64),
+        name!(analysis_matches, Option<bool>),
+        name!(analysis_detail, Option<String>),
+    ),
+> {
+    require_stannum_index(&index, "index_stats");
+    if !unsafe { crate::storage::present(index.as_ptr()) } {
+        return TableIterator::new(Vec::new());
+    }
+    // Dead counts reuse segment_rows: one dead-list decode implementation.
+    let rows = unsafe { crate::storage::segment_rows(index.as_ptr()) };
+    let meta = unsafe { crate::storage::analysis_meta(index.as_ptr()) };
+    let documents: i64 = rows
+        .iter()
+        .map(|row| row.docs - row.dead_docs)
+        .sum::<i64>()
+        .max(0);
+    let dead_documents: i64 = rows.iter().map(|row| row.dead_docs).sum();
+    let posted = documents + dead_documents;
+    let dead_ratio = if posted > 0 {
+        dead_documents as f64 / posted as f64
+    } else {
+        0.0
+    };
+    let immutable_segments =
+        rows.len() - usize::from(rows.last().is_some_and(|row| row.kind == "mutable"));
+    let mutable_segments = rows.len() - immutable_segments;
+    let (analysis_matches, analysis_detail) = crate::dict::analysis_summary(&meta)
+        .map_or((None, None), |(matches, detail)| {
+            (Some(matches), Some(detail))
+        });
+    TableIterator::new(vec![(
+        documents,
+        dead_documents,
+        dead_ratio,
+        (immutable_segments + mutable_segments) as i32,
+        immutable_segments as i32,
+        mutable_segments as i32,
+        i64::from(meta.next_generation),
+        rows.iter().map(|row| row.total_pages).sum(),
+        unsafe { crate::storage::dictionary_pages(index.as_ptr()) } as i64,
+        rows.iter().map(|row| row.sum_doc_lengths).sum(),
+        // Reserved: averages need a definition that survives dead documents;
+        // v1 reports zero rather than a misleading mean.
+        0.0,
+        analysis_matches,
+        analysis_detail,
+    )])
 }
 
 pub(crate) fn require_stannum_index(index: &PgRelation, function: &str) {

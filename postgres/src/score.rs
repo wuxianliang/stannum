@@ -25,6 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::{CStr, CString, c_void};
+use std::rc::Rc;
 use tinql::runtime::plan::{Limits, plan};
 use tinql::runtime::{
     CompiledRegex, FuzzyMatcher, Query, RangeBound, SpanTermSlot, evaluate, parse_tinql_to_query,
@@ -59,6 +60,8 @@ struct ScoreCorpus {
 /// dead-inclusive segment statistics, and the sources to look each row up in.
 pub(crate) struct IndexScorer {
     key: CacheKey,
+    /// The one analysis pipeline captured while this scorer was built.
+    pipeline: Rc<tokenizer::CompiledTokenizerPipeline>,
     /// Per-source cursors, declared before `view` so they drop first.
     sources: Vec<SourceReader>,
     view: View,
@@ -176,7 +179,7 @@ pub(crate) fn note_executor_start() {
     STATEMENT.with(|s| s.set(s.get().wrapping_add(1)));
 }
 
-fn current_statement() -> u64 {
+pub(crate) fn current_statement() -> u64 {
     STATEMENT.with(Cell::get)
 }
 
@@ -390,6 +393,11 @@ fn segment_error_in<T>(result: segment::Result<T>, label: &str) -> T {
 }
 
 impl IndexScorer {
+    /// The tokenizer captured with this scorer's query and scoring statistics.
+    pub(crate) fn pipeline(&self) -> &tokenizer::CompiledTokenizerPipeline {
+        self.pipeline.as_ref()
+    }
+
     /// Score of one visible document, or zero if the index does not hold it.
     ///
     /// A HOT-updated row keeps its posting at the root of its chain while the
@@ -507,6 +515,82 @@ pub(crate) struct TopK {
     /// True when `rows` holds every candidate: the threshold never formed,
     /// so nothing was skipped.
     pub(crate) complete: bool,
+}
+
+/// What a pruned walk reports to its caller's EXPLAIN counters. The walk
+/// happens under the scorer, out of reach of the scan state that owns the
+/// counters, so it reports through this callback instead.
+pub(crate) enum WalkEvent {
+    /// The walk opened a source (its cursors and term lookups); `immutable`
+    /// classifies it by the view's directory order.
+    SourceOpened { immutable: bool },
+    /// A candidate was dropped because the segment's dead list names it.
+    DeadSkipped,
+}
+
+pub(crate) struct RankedCandidate {
+    pub(crate) indexed_tid: Tid,
+    pub(crate) score: f32,
+}
+
+pub(crate) struct PrunedCandidates {
+    pub(crate) rows: Vec<RankedCandidate>,
+    pub(crate) complete: bool,
+}
+
+impl IndexScorer {
+    /// The WAND candidates exposed to standalone callers without exposing the
+    /// scan-specific `TopK` representation.
+    pub(crate) fn pruned_top_k(&self, k: usize) -> Option<PrunedCandidates> {
+        if k > PRUNE_MAX_K {
+            return None;
+        }
+        self.top_k(k, &mut |_| {}).map(|top| PrunedCandidates {
+            rows: top
+                .rows
+                .into_iter()
+                .map(|(score, indexed_tid)| RankedCandidate { indexed_tid, score })
+                .collect(),
+            complete: top.complete,
+        })
+    }
+
+    /// Enumerate every planned root matching this scorer's full query.
+    pub(crate) fn matching_tids(&self) -> BTreeSet<Tid> {
+        let mut candidates = BTreeSet::new();
+        for (i, (segment, _)) in self.view.sources.iter().enumerate() {
+            pgrx::check_for_interrupts!();
+            let planned = plan(&self.query, &**segment, &Limits::default())
+                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let mut cursor = planned.cursor;
+            while let Some(tid) = cursor.current() {
+                if !self.dead[i].contains(&tid) {
+                    candidates.insert(tid);
+                }
+                segment_error_in(cursor.advance(), &self.view.labels[i]);
+                if candidates.len().is_multiple_of(256) {
+                    pgrx::check_for_interrupts!();
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Score the supplied indexed roots in their stable TID order.
+    pub(crate) fn score_matching_tids(&mut self, tids: &BTreeSet<Tid>) -> Vec<RankedCandidate> {
+        tids.iter()
+            .enumerate()
+            .map(|(n, indexed_tid)| {
+                if n.is_multiple_of(64) {
+                    pgrx::check_for_interrupts!();
+                }
+                RankedCandidate {
+                    indexed_tid: *indexed_tid,
+                    score: self.score(*indexed_tid),
+                }
+            })
+            .collect()
+    }
 }
 
 /// How a query's leaf terms combine into its candidate set.
@@ -650,6 +734,7 @@ struct Walk<'a, 's> {
     k: usize,
     heap: &'s mut BinaryHeap<Ranked>,
     scored: &'s mut usize,
+    events: &'s mut dyn FnMut(WalkEvent),
     iterations: u32,
 }
 
@@ -693,6 +778,7 @@ impl Walk<'_, '_> {
     /// exact contributions so far plus the remaining bounds cannot.
     fn score(&mut self, pivot: Tid) {
         if self.dead.contains(&pivot) {
+            (self.events)(WalkEvent::DeadSkipped);
             return;
         }
         let Some(ordinal) = segment_error(self.documents.rank(pivot)) else {
@@ -948,7 +1034,7 @@ impl IndexScorer {
     /// `None` when the query is not a flat conjunction or disjunction of
     /// exactly the scoring terms, or a source carries no block bounds; the
     /// caller then scores every candidate.
-    pub(crate) fn top_k(&self, k: usize) -> Option<TopK> {
+    pub(crate) fn top_k(&self, k: usize, events: &mut dyn FnMut(WalkEvent)) -> Option<TopK> {
         let (combine, leaves) = prunable_shape(&self.query)?;
         // Every scoring term must be a leaf (no added terms), and a leaf that
         // is not a scoring term must be absent from the index altogether: it
@@ -981,6 +1067,9 @@ impl IndexScorer {
         let mut scored = 0usize;
         if k > 0 && !(absent && combine == Combine::All) {
             for (i, (source, _)) in self.view.sources.iter().enumerate() {
+                events(WalkEvent::SourceOpened {
+                    immutable: i < self.view.immutable_sources,
+                });
                 if !self.prune_source(
                     &**source,
                     &self.view.labels[i],
@@ -989,6 +1078,7 @@ impl IndexScorer {
                     k,
                     &mut heap,
                     &mut scored,
+                    events,
                 )? {
                     return None;
                 }
@@ -1024,6 +1114,7 @@ impl IndexScorer {
         k: usize,
         heap: &mut BinaryHeap<Ranked>,
         scored: &mut usize,
+        events: &mut dyn FnMut(WalkEvent),
     ) -> Option<bool> {
         let mut cursors: Vec<TermCursor<'_>> = Vec::with_capacity(self.terms.len());
         for (slot, (name, scorer)) in self.terms.iter().enumerate() {
@@ -1065,6 +1156,7 @@ impl IndexScorer {
             k,
             heap,
             scored,
+            events,
             iterations: 0,
         };
         match combine {
@@ -1072,6 +1164,76 @@ impl IndexScorer {
             Combine::All => walk.all(),
         }
         Some(true)
+    }
+}
+
+pub(crate) struct VisibleTid {
+    pub(crate) indexed_tid: Tid,
+    pub(crate) visible_tid: Tid,
+}
+
+/// Filters roots to visible HOT members, retaining the first root for each
+/// member in TID order. The fetch state and slot are shared by the batch.
+///
+/// # Safety
+/// `heap_oid` names a relation the caller may open; an active snapshot exists.
+pub(crate) unsafe fn visible_tid_pairs(
+    heap_oid: pg_sys::Oid,
+    tids: BTreeSet<Tid>,
+) -> Vec<VisibleTid> {
+    unsafe {
+        let heap = pg_sys::table_open(heap_oid, pg_sys::AccessShareLock as _);
+        let fetch = pg_sys::table_index_fetch_begin(heap);
+        let slot = pg_sys::table_slot_create(heap, std::ptr::null_mut());
+        let snapshot = pg_sys::GetActiveSnapshot();
+        let mut visible = Vec::new();
+        let mut seen = FxHashSet::default();
+        for indexed_tid in tids {
+            pgrx::check_for_interrupts!();
+            let mut pointer = pg_sys::ItemPointerData {
+                ip_blkid: pg_sys::BlockIdData {
+                    bi_hi: (indexed_tid.block >> 16) as u16,
+                    bi_lo: indexed_tid.block as u16,
+                },
+                ip_posid: indexed_tid.offset,
+            };
+            let mut call_again = false;
+            let mut all_dead = false;
+            let mut found = false;
+            loop {
+                if pg_sys::table_index_fetch_tuple(
+                    fetch,
+                    &mut pointer,
+                    snapshot,
+                    slot,
+                    &mut call_again,
+                    &mut all_dead,
+                ) {
+                    found = true;
+                    break;
+                }
+                if !call_again {
+                    break;
+                }
+            }
+            if !found {
+                continue;
+            }
+            let member = (*slot).tts_tid;
+            let block = (u32::from(member.ip_blkid.bi_hi) << 16) | u32::from(member.ip_blkid.bi_lo);
+            let visible_tid = Tid::new(block, member.ip_posid)
+                .unwrap_or_else(|_| pgrx::error!("invalid visible heap tuple location"));
+            if seen.insert(visible_tid) {
+                visible.push(VisibleTid {
+                    indexed_tid,
+                    visible_tid,
+                });
+            }
+        }
+        pg_sys::ExecDropSingleTupleTableSlot(slot);
+        pg_sys::table_index_fetch_end(fetch);
+        pg_sys::table_close(heap, pg_sys::AccessShareLock as _);
+        visible
     }
 }
 
@@ -1221,6 +1383,28 @@ pub(crate) fn publish_scan_scorer(scan: u64, mut scorer: IndexScorer, ranked: &[
     });
 }
 
+pub(crate) fn build_standalone_scorer(
+    heap_oid: pg_sys::Oid,
+    index_oid: pg_sys::Oid,
+    query: &str,
+    k1: Option<f32>,
+    b: Option<f32>,
+) -> IndexScorer {
+    let key = CacheKey {
+        statement: 0,
+        heap_oid: heap_oid.to_u32(),
+        index_oid: index_oid.to_u32(),
+        query: query.to_owned(),
+        full: true,
+        dense: 0.0_f32.to_bits(),
+        k1: bits(k1),
+        b: bits(b),
+        add: None,
+        replace: None,
+    };
+    build_index_scorer(key, k1, b, None, None)
+}
+
 fn build_index_scorer(
     key: CacheKey,
     k1: Option<f32>,
@@ -1262,7 +1446,20 @@ fn build_index_scorer(
     let stop = if key.full {
         None
     } else {
-        stop_csv.as_deref().and_then(ScoreStopWords::from_csv)
+        stop_csv.as_deref().and_then(|csv| {
+            ScoreStopWords::from_reloption(
+                &crate::stopwords::reloption(
+                    csv,
+                    tokenizer.spec().tokenizer == tokenizer::TokenizerSpec::Jieba,
+                ),
+                |word| {
+                    tokenizer
+                        .tokenize(word)
+                        .map(|t| t.text.into_owned())
+                        .collect()
+                },
+            )
+        })
     };
 
     let view = unsafe { crate::storage::view(index.oid()) };
@@ -1314,8 +1511,12 @@ fn build_index_scorer(
         .iter()
         .map(|(index, _)| unsafe { SourceReader::new(&**index, &scorers) })
         .collect();
+    crate::dict::check_analysis(index.oid(), &unsafe {
+        crate::storage::analysis_meta(index.as_ptr())
+    });
     IndexScorer {
         key,
+        pipeline: tokenizer,
         sources,
         view,
         dead,
@@ -1405,7 +1606,20 @@ fn build_corpus(
     let stop = if key.full {
         None
     } else {
-        stop_csv.as_deref().and_then(ScoreStopWords::from_csv)
+        stop_csv.as_deref().and_then(|csv| {
+            ScoreStopWords::from_reloption(
+                &crate::stopwords::reloption(
+                    csv,
+                    tokenizer.spec().tokenizer == tokenizer::TokenizerSpec::Jieba,
+                ),
+                |word| {
+                    tokenizer
+                        .tokenize(word)
+                        .map(|t| t.text.into_owned())
+                        .collect()
+                },
+            )
+        })
     };
     let documents = load_documents(heap_oid, index.oid());
     let positioned = tokenize_documents(&documents, |document| tokenize_doc(document, &tokenizer));
@@ -1771,8 +1985,8 @@ fn score_inspect(
     };
     crate::udfs::require_index_select(&index);
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
-    let tokenizer = unsafe { crate::options::tokenizer(index.as_ptr()) };
-    let parsed = parse_tinql_to_query(query, &tokenizer)
+    let tokenizer = unsafe { crate::storage::tokenizer_by_oid(index.oid()) };
+    let parsed = parse_tinql_to_query(query, tokenizer.as_ref())
         .unwrap_or_else(|error| pgrx::error!("stannum.score_inspect() query error: {error}"));
     let edit = TermSetEdit::from_bound_arrays(
         unwrap("term_add", term_add),
@@ -1786,7 +2000,20 @@ fn score_inspect(
             .collect::<Vec<_>>()
     });
     let stop_csv = unsafe { crate::options::score_stop_words(index.as_ptr()) };
-    let stop = stop_csv.as_deref().and_then(ScoreStopWords::from_csv);
+    let stop = stop_csv.as_deref().and_then(|csv| {
+        ScoreStopWords::from_reloption(
+            &crate::stopwords::reloption(
+                csv,
+                tokenizer.spec().tokenizer == tokenizer::TokenizerSpec::Jieba,
+            ),
+            |word| {
+                tokenizer
+                    .tokenize(word)
+                    .map(|t| t.text.into_owned())
+                    .collect()
+            },
+        )
+    });
     let ratio = DenseRatio::new(dense_ratio);
     if !ratio.is_valid() {
         pgrx::error!("dense_ratio must be finite and non-negative");

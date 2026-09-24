@@ -222,7 +222,8 @@ pub fn init() {
         pg_sys::add_string_reloption(
             kind,
             c"score_stop_words".as_ptr(),
-            c"Comma-separated analyzed terms omitted by stannum.score".as_ptr(),
+            c"Literal scoring terms or auto/auto:zh/auto:en presets; full_score ignores this list"
+                .as_ptr(),
             std::ptr::null(),
             None,
             lock,
@@ -484,9 +485,11 @@ fn decode_folding(value: i32) -> Folding {
 }
 
 pub unsafe fn tokenizer(index: pg_sys::Relation) -> tokenizer::CompiledTokenizerPipeline {
-    unsafe { tokenizer_spec(index) }
-        .compile()
-        .expect("catalog-validated tokenizer options")
+    let spec = unsafe { tokenizer_spec(index) };
+    if spec.tokenizer == TokenizerSpec::Jieba {
+        crate::dict::ensure_current();
+    }
+    spec.compile().expect("catalog-validated tokenizer options")
 }
 
 pub unsafe fn bm25(index: pg_sys::Relation) -> Bm25Params {

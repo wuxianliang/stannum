@@ -13,7 +13,7 @@ license.workspace = true
 emojis = "0.6"
 # Word-level segmenter for the `jieba` tokenizer preset (embedded dictionary,
 # deterministic for a pinned jieba-rs version).
-jieba-rs = "0.7"
+jieba-rs = "=0.7.4"
 thiserror.workspace = true
 # tinyvec 1.13.0 fails to compile with unicode-normalization's alloc-only features.
 tinyvec = "=1.12.0"
