@@ -20,6 +20,7 @@ pub enum LoweringIssue {
     EmptyRangeBound,
     SplitLongToken,
     MatchAllInSpanContext,
+    FieldInSpanContext,
     InvalidRegex,
 }
 
@@ -60,6 +61,7 @@ impl From<LowerError> for LoweringIssue {
     fn from(value: LowerError) -> Self {
         match value {
             LowerError::MatchAllInSpanContext => Self::MatchAllInSpanContext,
+            LowerError::FieldInSpanContext => Self::FieldInSpanContext,
             LowerError::InvalidRegex(_) => Self::InvalidRegex,
         }
     }

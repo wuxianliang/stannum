@@ -123,6 +123,73 @@ fn messages(report: &crate::verify::SegmentReport) -> String {
         .join("\n")
 }
 
+/// The frozen LSG4 golden vectors are verified a second time through the
+/// crate's own whole-blob verifier (RFC §7): the independent decoder in
+/// `tests/lsg4_golden.rs` pins the bytes; this pins that the shared reader
+/// agrees. It shares the reader, so it is explicitly *not* the independent
+/// check.
+#[test]
+fn lsg4_golden_blobs_verify_clean() {
+    let directory = format!("{}/tests/fixtures/lsg4", env!("CARGO_MANIFEST_DIR"));
+    let mut verified = 0;
+    for entry in std::fs::read_dir(&directory).expect("golden fixtures") {
+        let path = entry.expect("directory entry").path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "segment")
+        {
+            continue;
+        }
+        let blob = std::fs::read(&path).expect("fixture blob");
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        if &blob[..4] != b"LSG4" || name.starts_with("corrupt_") {
+            continue; // the LSG3 twins and corruption cases are not for this gate
+        }
+        let report = verify_segment(&blob);
+        assert!(
+            report.is_clean(),
+            "{}: {}",
+            path.display(),
+            report
+                .findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        verified += 1;
+    }
+    assert!(verified >= 7, "only {verified} valid LSG4 blobs found");
+}
+
+/// The product write path never emits LSG4: a single-column build stays
+/// LSG3 forever (RFC §5.8), and only the explicit field-aware entry point
+/// writes the new magic.
+#[test]
+fn single_column_writes_stay_lsg3() {
+    let mut builder = SegmentBuilder::default();
+    builder
+        .add_document(Tid::new(0, 1).unwrap(), [("single", 1u32), ("column", 2)])
+        .unwrap();
+    let bytes = builder.finish();
+    assert_eq!(&bytes[..4], Format::CURRENT.magic());
+    assert_eq!(Format::CURRENT, Format::Lsg3);
+    assert_eq!(&bytes[..4], b"LSG3");
+    // Field-aware documents take the explicit entry point, and never mix.
+    let mut fields = SegmentBuilder::default();
+    fields
+        .add_document_fields(Tid::new(0, 1).unwrap(), 2, [(0u8, "a", 0u32), (1, "b", 0)])
+        .unwrap();
+    let auto = fields.finish_auto();
+    assert_eq!(&auto[..4], b"LSG4");
+    assert!(crate::verify::verify_segment(&auto).is_clean());
+    let mut again = SegmentBuilder::default();
+    again
+        .add_document_fields(Tid::new(0, 1).unwrap(), 2, [(0u8, "a", 0u32), (1, "b", 0)])
+        .unwrap();
+    assert_eq!(&again.finish()[..4], b"LSG3");
+}
+
 /// Writes `tests/fixtures/<magic>.segment` from the current writer. Run by
 /// hand before changing the writer, so the old format stays covered.
 #[test]

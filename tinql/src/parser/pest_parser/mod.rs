@@ -513,6 +513,7 @@ fn build_base(pair: Pair<'_>, implicit_op: ImplicitOp) -> Result<Expr, ParseErro
     let child = pair.into_inner().next().unwrap();
 
     match child.as_rule() {
+        Rule::field_expr => build_field_expr(child, implicit_op),
         Rule::grouped => {
             let or_expr = child
                 .into_inner()
@@ -532,6 +533,42 @@ fn build_base(pair: Pair<'_>, implicit_op: ImplicitOp) -> Result<Expr, ParseErro
 }
 
 // ── ALL OF ──────────────────────────────────────────────────────────
+
+// ── Field scope ──────────────────────────────────────
+
+/// The only field syntax: `name:(…)`, scoping the group to one field. The
+/// head is compound atomic, so the name is read from its text.
+fn build_field_expr(pair: Pair<'_>, implicit_op: ImplicitOp) -> Result<Expr, ParseError> {
+    let mut inner = pair.into_inner();
+    let head = inner
+        .find(|p| p.as_rule() == Rule::field_head)
+        .expect("field_expr opens with a field_head");
+    let body = inner
+        .find(|p| p.as_rule() == Rule::or_expr)
+        .expect("field_expr holds an or_expr");
+    Ok(Expr::Field {
+        name: build_field_name(head),
+        inner: Box::new(build_or_expr(body, implicit_op)?),
+    })
+}
+
+/// The name of a `field_head`, read from its text and stripped of the `:(`
+/// suffix. A bare name is folded the way PostgreSQL folds an unquoted
+/// identifier (ASCII letters to lower case); a quoted one uses the phrase
+/// escape rule and stays byte-exact.
+fn build_field_name(head: Pair<'_>) -> String {
+    let text = head.as_str();
+    let raw = text.strip_suffix(":(").expect("a field head ends with :(");
+    match raw.strip_prefix('"') {
+        Some(quoted) => {
+            let quoted = quoted
+                .strip_suffix('"')
+                .expect("a quoted field name closes before :(");
+            unescape_phrase_term(quoted)
+        }
+        None => raw.to_ascii_lowercase(),
+    }
+}
 
 fn build_all_of(pair: Pair<'_>, implicit_op: ImplicitOp) -> Result<Expr, ParseError> {
     let alts = pair

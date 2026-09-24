@@ -74,7 +74,7 @@ fn tid_of(pointer: pg_sys::ItemPointerData) -> Tid {
         .unwrap_or_else(|_| pgrx::error!("invalid visible heap tuple location"))
 }
 
-fn rank_rows(rows: &mut Vec<(f32, VisibleTid)>) {
+fn rank_rows(rows: &mut [(f32, VisibleTid)]) {
     rows.sort_by(|(left_score, left), (right_score, right)| {
         right_score
             .total_cmp(left_score)
@@ -141,6 +141,7 @@ fn accepted_pruned_rows(
     Some(rows)
 }
 
+#[allow(clippy::too_many_arguments)] // snippet refetch bundles its fixed context
 fn fetch_snippet(
     heap_oid: pg_sys::Oid,
     attnum: i16,

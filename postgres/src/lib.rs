@@ -5369,4 +5369,158 @@ mod tests {
             ]
         );
     }
+
+    // ── Multi-column fields (RFC §5.10 / §5.11 phase 1) ─────────────────
+
+    /// A multi-column index answers `==>` on any of its key columns, and the
+    /// clause's own column scopes the matches: a body match never satisfies a
+    /// title clause (RFC §5.11).
+    #[pg_test]
+    fn operator_scopes_matches_to_the_scan_key_column() {
+        Spi::run(
+            "CREATE TABLE fields(id int primary key, title text, body text);
+             INSERT INTO fields VALUES
+               (1, 'beer', 'wine'),
+               (2, 'wine', 'beer'),
+               (3, 'beer beer', 'beer wine');
+             CREATE INDEX fields_idx ON fields USING stannum(title, body);",
+        )
+        .unwrap();
+        let ids = |sql: &str| -> Vec<i32> {
+            Spi::get_one::<Vec<i32>>(sql)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            ids("SELECT array_agg(id ORDER BY id) FROM fields WHERE title ==> 'beer'"),
+            vec![1, 3]
+        );
+        assert_eq!(
+            ids("SELECT array_agg(id ORDER BY id) FROM fields WHERE body ==> 'beer'"),
+            vec![2, 3]
+        );
+        // An explicit group naming the clause's own column is accepted.
+        assert_eq!(
+            ids("SELECT array_agg(id ORDER BY id) FROM fields WHERE title ==> 'title:(beer)'"),
+            vec![1, 3]
+        );
+    }
+
+    /// The message of the PostgreSQL ERROR `run` raises. The catch runs in a
+    /// subtransaction, so this test's own transaction survives it.
+    fn error_of(run: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        pgrx::PgTryBuilder::new(move || {
+            run();
+            String::new()
+        })
+        .catch_others(|caught| match caught {
+            pgrx::pg_sys::panic::CaughtError::PostgresError(report)
+            | pgrx::pg_sys::panic::CaughtError::ErrorReport(report)
+            | pgrx::pg_sys::panic::CaughtError::RustPanic {
+                ereport: report, ..
+            } => report.message().to_owned(),
+        })
+        .execute()
+    }
+
+    /// The field-name errors of RFC §5.11 reach SQL: an unknown name, a group
+    /// naming another column, and field syntax on a single-column index.
+    #[pg_test]
+    fn field_syntax_errors_name_the_field() {
+        Spi::run(
+            "CREATE TABLE fields_err(id int primary key, title text, body text);
+             INSERT INTO fields_err VALUES (1, 'beer', 'wine');
+             CREATE INDEX fields_err_idx ON fields_err USING stannum(title, body);
+             CREATE TABLE single_err(id int primary key, body text);
+             INSERT INTO single_err VALUES (1, 'beer');
+             CREATE INDEX single_err_idx ON single_err USING stannum(body);",
+        )
+        .unwrap();
+        let unknown = error_of(|| {
+            Spi::run("SELECT count(*) FROM fields_err WHERE title ==> 'nope:(beer)'").unwrap();
+        });
+        assert!(
+            unknown.contains("stannum: unknown field 'nope'"),
+            "{unknown}"
+        );
+        let foreign = error_of(|| {
+            Spi::run("SELECT count(*) FROM fields_err WHERE title ==> 'body:(beer)'").unwrap();
+        });
+        assert!(foreign.contains("stannum.search()"), "{foreign}");
+        let fieldless = error_of(|| {
+            Spi::run("SELECT count(*) FROM single_err WHERE body ==> 'title:(beer)'").unwrap();
+        });
+        assert!(fieldless.contains("multi-column index"), "{fieldless}");
+    }
+
+    /// The recorded weights reach the field-aware scorer: the same row scores
+    /// higher under a title weight of 10 than under the default of 1
+    /// (RFC §5.10).
+    #[pg_test]
+    fn field_weights_scale_the_field_contribution() {
+        Spi::run(
+            "CREATE TABLE heavy(id int primary key, title text, body text);
+             INSERT INTO heavy VALUES (1, 'beer', 'wine');
+             CREATE INDEX heavy_idx ON heavy USING stannum(title, body)
+               WITH (field_weights = 'title:10.0,body:1.0');
+             CREATE TABLE plain(id int primary key, title text, body text);
+             INSERT INTO plain VALUES (1, 'beer', 'wine');
+             CREATE INDEX plain_idx ON plain USING stannum(title, body);",
+        )
+        .unwrap();
+        let score = |table: &str| -> f32 {
+            Spi::get_one::<f32>(&format!(
+                "SELECT stannum.full_score(ctid) FROM {table} WHERE title ==> 'beer'"
+            ))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .expect("the row matches")
+        };
+        let heavy = score("heavy");
+        let plain = score("plain");
+        assert!(heavy > plain, "weighted {heavy} vs plain {plain}");
+    }
+
+    /// `ALTER INDEX … SET/RESET (field_weights = …)` fails closed: the weights
+    /// live in the index's meta trailer, and REINDEX is the way to change
+    /// them (RFC §5.7). Unrelated reloptions still pass.
+    #[pg_test]
+    fn altering_field_weights_requires_reindex() {
+        Spi::run(
+            "CREATE TABLE alter_fields(id int primary key, title text, body text);
+             CREATE INDEX alter_fields_idx ON alter_fields USING stannum(title, body);",
+        )
+        .unwrap();
+        let error = error_of(|| {
+            Spi::run("ALTER INDEX alter_fields_idx SET (field_weights = 'title:2.0,body:1.0')")
+                .unwrap();
+        });
+        assert!(error.contains("REINDEX to change field_weights"), "{error}");
+        Spi::run("ALTER INDEX alter_fields_idx SET (k1 = 1.5)").unwrap();
+    }
+
+    /// Opening an index whose columns were renamed is an error until REINDEX
+    /// rewrites the trailer; after the rebuild the index works again
+    /// (RFC §5.7).
+    #[pg_test]
+    fn renaming_an_indexed_column_requires_reindex() {
+        Spi::run(
+            "CREATE TABLE ren(id int primary key, title text, body text);
+             INSERT INTO ren VALUES (1, 'beer', 'wine');
+             CREATE INDEX ren_idx ON ren USING stannum(title, body);",
+        )
+        .unwrap();
+        Spi::run("ALTER TABLE ren RENAME COLUMN title TO heading").unwrap();
+        // A sequential scan evaluates the clause on the heap and never opens
+        // the index; the check belongs to opening it.
+        Spi::run("SET LOCAL enable_seqscan = off").unwrap();
+        let error = error_of(|| {
+            Spi::get_one::<i64>("SELECT count(*) FROM ren WHERE heading ==> 'beer'").unwrap();
+        });
+        assert!(error.contains("REINDEX required"), "{error}");
+        Spi::run("REINDEX INDEX ren_idx").unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM ren WHERE heading ==> 'beer'").unwrap(),
+            Some(1)
+        );
+    }
 }

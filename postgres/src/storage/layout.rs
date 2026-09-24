@@ -55,6 +55,7 @@ pub const FLAG_REMOVAL_HORIZONS: u16 = 1;
 /// Extension record tag for the analysis identity trailer. P0-3 knows only
 /// this tag; future tags are deliberately rejected until their decoder ships.
 pub(crate) const ANALYSIS_TAG: u8 = 0x01;
+pub(crate) const FIELDS_TAG: u8 = 0x02;
 const FLAGS: usize = PAGE_SIZE - SPECIAL_SIZE + 6;
 
 /// Directory entries the meta page can hold before a merge is forced.
@@ -222,7 +223,50 @@ pub(crate) struct AnalysisStamp {
     pub(crate) dict_fingerprint: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The `FIELDS_TAG` extension record of `fields`, exactly as the meta page
+/// carries it: `tag u8, payload_len u32le, payload` (RFC §5.7). `None` when
+/// the plan cannot be encoded, which the decoder's own rules rule out for a
+/// decoded plan.
+///
+/// The insert path compares these bytes next to `(identity, spec)`, so a
+/// concurrent REINDEX that changes the field count cannot publish a forward
+/// record the rebuilt index does not match.
+#[must_use]
+pub fn fields_tag_bytes(fields: &FieldMeta) -> Option<Vec<u8>> {
+    if fields.names.len() != fields.weights.len() || !(2..=16).contains(&fields.names.len()) {
+        return None;
+    }
+    let mut payload = Vec::new();
+    payload.push(1);
+    payload.push(fields.names.len() as u8);
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    for (name, weight) in fields.names.iter().zip(&fields.weights) {
+        let bytes = name.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > u16::MAX as usize
+            || !weight.is_finite()
+            || *weight <= 0.0
+        {
+            return None;
+        }
+        payload.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+        payload.extend_from_slice(bytes);
+        payload.extend_from_slice(&weight.to_bits().to_le_bytes());
+    }
+    let mut record = Vec::with_capacity(5 + payload.len());
+    record.push(FIELDS_TAG);
+    record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    record.extend_from_slice(&payload);
+    Some(record)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldMeta {
+    pub names: Vec<String>,
+    pub weights: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Meta {
     /// Distinguishes this index's contents from a reused relation number.
     pub identity: u64,
@@ -233,6 +277,7 @@ pub struct Meta {
     pub pending: Vec<Pending>,
     /// Optional tail-appended analysis identity. `None` is the legacy format.
     pub analysis: Option<AnalysisStamp>,
+    pub fields: Option<FieldMeta>,
 }
 
 const META_HEADER: usize = 8 + crate::options::SPEC_BYTES + 28 + 4 + 4 + 4;
@@ -282,6 +327,10 @@ impl Meta {
         for pending in &self.pending {
             put_run(&mut out, pending.run);
             out.extend_from_slice(&pending.xid.to_le_bytes());
+        }
+        if let Some(fields) = &self.fields {
+            let record = fields_tag_bytes(fields).ok_or("invalid Stannum fields metadata")?;
+            out.extend_from_slice(&record);
         }
         if let Some(analysis) = self.analysis {
             out.push(ANALYSIS_TAG);
@@ -354,6 +403,7 @@ impl Meta {
             at += PENDING_BYTES;
         }
         let mut analysis = None;
+        let mut fields = None;
         while at < bytes.len() {
             if bytes.len() - at < 5 {
                 return Err("truncated Stannum meta extension record");
@@ -368,6 +418,51 @@ impl Meta {
                 return Err("truncated Stannum meta extension record");
             }
             match tag {
+                FIELDS_TAG => {
+                    if fields.is_some() {
+                        return Err("duplicate Stannum meta fields record");
+                    }
+                    let payload = &bytes[at..end];
+                    if payload.len() < 4
+                        || payload[0] != 1
+                        || !(2..=16).contains(&(payload[1] as usize))
+                        || u16::from_le_bytes([payload[2], payload[3]]) != 0
+                    {
+                        return Err("invalid Stannum meta fields record");
+                    }
+                    let count = payload[1] as usize;
+                    let mut p = 4;
+                    let mut names = Vec::with_capacity(count);
+                    let mut weights = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        if p + 2 > payload.len() {
+                            return Err("invalid Stannum meta fields record");
+                        }
+                        let len = u16::from_le_bytes([payload[p], payload[p + 1]]) as usize;
+                        p += 2;
+                        if len == 0 || p + len + 4 > payload.len() {
+                            return Err("invalid Stannum meta fields record");
+                        }
+                        let name = std::str::from_utf8(&payload[p..p + len])
+                            .map_err(|_| "invalid Stannum meta fields record")?
+                            .to_owned();
+                        p += len;
+                        let weight = f32::from_bits(u32::from_le_bytes(
+                            payload[p..p + 4].try_into().unwrap(),
+                        ));
+                        p += 4;
+                        if !weight.is_finite() || weight <= 0.0 || names.iter().any(|n| n == &name)
+                        {
+                            return Err("invalid Stannum meta fields record");
+                        }
+                        names.push(name);
+                        weights.push(weight);
+                    }
+                    if p != payload.len() {
+                        return Err("invalid Stannum meta fields record");
+                    }
+                    fields = Some(FieldMeta { names, weights });
+                }
                 ANALYSIS_TAG => {
                     if analysis.is_some() {
                         return Err("duplicate Stannum meta analysis record");
@@ -397,6 +492,7 @@ impl Meta {
             segments,
             pending,
             analysis,
+            fields,
         })
     }
 }
@@ -462,6 +558,7 @@ mod tests {
                 xid: 77,
             }],
             analysis: None,
+            fields: None,
         }
     }
 

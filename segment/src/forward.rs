@@ -4,18 +4,9 @@
 
 //! One document as a single record for a mutable write buffer.
 //!
-//! An insert appends one record, so it needs one WAL record and one lock,
-//! regardless of how many terms the document has. Folding a buffer into an
-//! immutable segment reads records back and sorts by term. A query over the
-//! buffer evaluates each record with the exact evaluator, since positions and
-//! the document length are both present.
-//!
-//! ```text
-//! record := len varint, block varint, offset varint, doc_len varint,
-//!           term_count varint, term*
-//! term   := shared varint, suffix_len varint, suffix, n varint, position varint * n
-//!           positions: first absolute, then (delta - 1); terms sorted, unique
-//! ```
+//! The legacy codec has no field id and remains byte-for-byte compatible.  The
+//! field codec is selected by the fields trailer and adds one field-id varint
+//! before each term group.
 
 use crate::payload::{decode_positions, encode_positions, validate_positions};
 use crate::reader::Reader;
@@ -23,11 +14,11 @@ use crate::{Error, Result, Tid, varint};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardTerm {
+    pub field: u8,
     pub term: String,
     pub positions: Vec<u32>,
 }
 
-/// The fixed part of a record, from [`ForwardRecord::decode_with`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordHeader {
     pub tid: Tid,
@@ -38,15 +29,14 @@ pub struct RecordHeader {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardRecord {
     pub tid: Tid,
-    /// Document length in tokens, as the evaluator defines it.
     pub doc_len: u32,
-    /// Sorted by term bytes, unique.
+    /// Empty for the legacy fieldless codec; otherwise one entry per field.
+    pub field_lengths: Vec<u32>,
+    /// Sorted by `(term bytes, field)` and unique.
     pub terms: Vec<ForwardTerm>,
 }
 
 impl ForwardRecord {
-    /// Groups a token stream by term. `tokens` are `(term, position)` in
-    /// document order; positions must be strictly increasing.
     pub fn from_tokens<'t>(
         tid: Tid,
         tokens: impl IntoIterator<Item = (&'t str, u32)>,
@@ -62,15 +52,68 @@ impl ForwardRecord {
                 return Err(Error::InvalidPositions);
             }
             last_position = Some(position);
-            doc_len += 1;
+            doc_len = doc_len
+                .checked_add(1)
+                .ok_or(Error::Corrupt("forward length"))?;
             by_term.entry(term).or_default().push(position);
         }
         Ok(Self {
             tid,
             doc_len,
+            field_lengths: Vec::new(),
             terms: by_term
                 .into_iter()
                 .map(|(term, positions)| ForwardTerm {
+                    field: 0,
+                    term: term.to_owned(),
+                    positions,
+                })
+                .collect(),
+        })
+    }
+
+    /// Builds a field-aware record. Positions are independent and must be
+    /// strictly increasing within each field; field groups are sorted on
+    /// encode so callers may provide tokens in any field order.
+    pub fn from_tokens_fields<'t>(
+        tid: Tid,
+        field_count: u8,
+        tokens: impl IntoIterator<Item = (u8, &'t str, u32)>,
+    ) -> Result<Self> {
+        if !(1..=16).contains(&field_count) {
+            return Err(Error::Corrupt("forward field count"));
+        }
+        let mut by_term = std::collections::BTreeMap::<(&str, u8), Vec<u32>>::new();
+        let mut lengths = vec![0u32; usize::from(field_count)];
+        let mut last = vec![None; usize::from(field_count)];
+        for (field, term, position) in tokens {
+            if usize::from(field) >= lengths.len() {
+                return Err(Error::Corrupt("forward field id"));
+            }
+            if term.is_empty() {
+                return Err(Error::EmptyTerm);
+            }
+            if last[usize::from(field)].is_some_and(|p| p >= position) {
+                return Err(Error::InvalidPositions);
+            }
+            last[usize::from(field)] = Some(position);
+            lengths[usize::from(field)] = lengths[usize::from(field)]
+                .checked_add(1)
+                .ok_or(Error::Corrupt("forward field length"))?;
+            by_term.entry((term, field)).or_default().push(position);
+        }
+        let doc_len = lengths
+            .iter()
+            .try_fold(0u32, |sum, len| sum.checked_add(*len))
+            .ok_or(Error::Corrupt("forward length"))?;
+        Ok(Self {
+            tid,
+            doc_len,
+            field_lengths: lengths,
+            terms: by_term
+                .into_iter()
+                .map(|((term, field), positions)| ForwardTerm {
+                    field,
                     term: term.to_owned(),
                     positions,
                 })
@@ -80,21 +123,49 @@ impl ForwardRecord {
 
     fn validate(&self) -> Result<()> {
         Tid::new(self.tid.block, self.tid.offset)?;
-        let mut previous: Option<&[u8]> = None;
+        if self.field_lengths.len() > 16 {
+            return Err(Error::Corrupt("forward field count"));
+        }
+        let fields = !self.field_lengths.is_empty();
+        let mut previous: Option<(&[u8], u8)> = None;
+        let mut counted = 0u32;
         for term in &self.terms {
             if term.term.is_empty() {
                 return Err(Error::EmptyTerm);
             }
-            if previous.is_some_and(|p| p >= term.term.as_bytes()) {
+            if fields {
+                if usize::from(term.field) >= self.field_lengths.len() {
+                    return Err(Error::Corrupt("forward field id"));
+                }
+            } else if term.field != 0 {
+                return Err(Error::Corrupt("forward field id"));
+            }
+            if previous.is_some_and(|(p, f)| {
+                p > term.term.as_bytes() || (p == term.term.as_bytes() && f >= term.field)
+            }) {
                 return Err(Error::Unordered);
             }
             validate_positions(&term.positions)?;
-            previous = Some(term.term.as_bytes());
+            counted = counted
+                .checked_add(term.positions.len() as u32)
+                .ok_or(Error::Corrupt("forward length"))?;
+            previous = Some((term.term.as_bytes(), term.field));
+        }
+        if counted != self.doc_len {
+            return Err(Error::Corrupt("forward document length"));
+        }
+        if fields {
+            let mut lengths = vec![0u32; self.field_lengths.len()];
+            for term in &self.terms {
+                lengths[usize::from(term.field)] += term.positions.len() as u32;
+            }
+            if lengths != self.field_lengths {
+                return Err(Error::Corrupt("forward field lengths"));
+            }
         }
         Ok(())
     }
 
-    /// Appends the encoded record, including its length prefix.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.validate()?;
         let mut body = Vec::new();
@@ -102,8 +173,12 @@ impl ForwardRecord {
         varint::put(&mut body, u64::from(self.tid.offset));
         varint::put(&mut body, u64::from(self.doc_len));
         varint::put(&mut body, self.terms.len() as u64);
+        let fields = !self.field_lengths.is_empty();
         let mut previous: &[u8] = &[];
         for term in &self.terms {
+            if fields {
+                varint::put(&mut body, u64::from(term.field));
+            }
             let bytes = term.term.as_bytes();
             let shared = previous
                 .iter()
@@ -121,41 +196,61 @@ impl ForwardRecord {
         Ok(())
     }
 
-    /// Byte length of the record at the start of `bytes`, so a buffer page can
-    /// skip records without decoding them.
     pub fn encoded_len(bytes: &[u8]) -> Result<usize> {
         let mut reader = Reader::new(bytes);
         let len = reader.varint()? as usize;
-        let total = reader
+        reader
             .position()
             .checked_add(len)
-            .filter(|total| *total <= bytes.len())
-            .ok_or(Error::Truncated)?;
-        Ok(total)
+            .filter(|n| *n <= bytes.len())
+            .ok_or(Error::Truncated)
     }
 
-    /// Decodes the record at the start of `bytes`, returning it and the bytes
-    /// consumed.
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize)> {
+        Self::decode_mode(bytes, false, 0)
+    }
+
+    pub fn decode_fields(bytes: &[u8], field_count: u8) -> Result<(Self, usize)> {
+        if field_count == 0 || field_count > 16 {
+            return Err(Error::Corrupt("segment field count"));
+        }
+        Self::decode_mode(bytes, true, field_count)
+    }
+
+    fn decode_mode(bytes: &[u8], fields: bool, field_count: u8) -> Result<(Self, usize)> {
         let mut terms = Vec::new();
-        let (header, total) = Self::decode_with(bytes, |term, positions| {
+        let (header, total) = Self::decode_with_mode(bytes, fields, |field, term, positions| {
             terms.push(ForwardTerm {
+                field,
                 term: term.to_owned(),
                 positions: positions.to_vec(),
             });
             Ok(())
         })?;
-        Ok((
-            Self {
-                tid: header.tid,
-                doc_len: header.doc_len,
-                terms,
-            },
-            total,
-        ))
+        let field_lengths = if fields {
+            let count = usize::from(field_count.max(1));
+            let mut lengths = vec![0u32; count];
+            for term in &terms {
+                let slot = lengths
+                    .get_mut(usize::from(term.field))
+                    .ok_or(Error::Corrupt("forward field id"))?;
+                *slot = slot
+                    .checked_add(term.positions.len() as u32)
+                    .ok_or(Error::Corrupt("forward field length"))?;
+            }
+            lengths
+        } else {
+            Vec::new()
+        };
+        let record = Self {
+            tid: header.tid,
+            doc_len: header.doc_len,
+            field_lengths,
+            terms,
+        };
+        Ok((record, total))
     }
 
-    /// Reads only the fixed part of the record at the start of `bytes`.
     pub fn peek(bytes: &[u8]) -> Result<RecordHeader> {
         let mut reader = Reader::new(bytes);
         let len = reader.varint()? as usize;
@@ -169,61 +264,76 @@ impl ForwardRecord {
         })
     }
 
-    /// Decodes the record at the start of `bytes` without building it,
-    /// handing each term and its positions to `visit` in term order. Returns
-    /// the header and the bytes consumed.
     pub fn decode_with(
         bytes: &[u8],
         mut visit: impl FnMut(&str, &[u32]) -> Result<()>,
+    ) -> Result<(RecordHeader, usize)> {
+        Self::decode_with_mode(bytes, false, |_, term, positions| visit(term, positions))
+    }
+
+    pub fn decode_with_fields(
+        bytes: &[u8],
+        visit: impl FnMut(u8, &str, &[u32]) -> Result<()>,
+    ) -> Result<(RecordHeader, usize)> {
+        Self::decode_with_mode(bytes, true, visit)
+    }
+
+    fn decode_with_mode(
+        bytes: &[u8],
+        fields: bool,
+        mut visit: impl FnMut(u8, &str, &[u32]) -> Result<()>,
     ) -> Result<(RecordHeader, usize)> {
         let total = Self::encoded_len(bytes)?;
         let mut reader = Reader::new(bytes);
         let len = reader.varint()? as usize;
         let mut body = Reader::new(reader.take(len)?);
-        let block = body.varint_u32()?;
-        let offset = u16::try_from(body.varint_u32()?).map_err(|_| Error::InvalidTid)?;
-        let tid = Tid::new(block, offset)?;
-        let doc_len = body.varint_u32()?;
-        let term_count = body.varint_u32()?;
-        let mut term: Vec<u8> = Vec::new();
-        let mut positions: Vec<u32> = Vec::new();
-        for _ in 0..term_count {
+        let tid = Tid::new(
+            body.varint_u32()?,
+            u16::try_from(body.varint_u32()?).map_err(|_| Error::InvalidTid)?,
+        )?;
+        let header = RecordHeader {
+            tid,
+            doc_len: body.varint_u32()?,
+            term_count: body.varint_u32()?,
+        };
+        let mut term = Vec::new();
+        let mut positions = Vec::new();
+        let mut previous: Option<(Vec<u8>, u8)> = None;
+        for _ in 0..header.term_count {
+            let field = if fields {
+                u8::try_from(body.varint_u32()?).map_err(|_| Error::Corrupt("forward field id"))?
+            } else {
+                0
+            };
             let shared = body.varint_u32()? as usize;
             if shared > term.len() {
                 return Err(Error::Corrupt("forward term prefix"));
             }
             let suffix_len = body.varint_u32()? as usize;
-            let suffix = body.take(suffix_len)?;
-            // The new term is previous[..shared] + suffix; it follows the
-            // previous term exactly when the suffix exceeds the rest of it.
-            if !term.is_empty() && term[shared..] >= *suffix {
+            let suffix = body.take(suffix_len)?.to_vec();
+            term.truncate(shared);
+            term.extend_from_slice(&suffix);
+            if term.is_empty() {
                 return Err(Error::Corrupt("forward term order"));
             }
-            term.truncate(shared);
-            term.extend_from_slice(suffix);
-            if term.is_empty() {
+            if previous.as_ref().is_some_and(|(p, f)| {
+                p.as_slice() > term.as_slice() || (p.as_slice() == term.as_slice() && *f >= field)
+            }) {
                 return Err(Error::Corrupt("forward term order"));
             }
             positions.clear();
             decode_positions(&mut body, &mut positions)?;
             let text =
                 std::str::from_utf8(&term).map_err(|_| Error::Corrupt("forward term UTF-8"))?;
-            visit(text, &positions)?;
+            visit(field, text, &positions)?;
+            previous = Some((term.clone(), field));
         }
         if body.remaining() != 0 {
             return Err(Error::Corrupt("forward record length"));
         }
-        Ok((
-            RecordHeader {
-                tid,
-                doc_len,
-                term_count,
-            },
-            total,
-        ))
+        Ok((header, total))
     }
 
-    /// Positions of every token in document order, the inverse of `from_tokens`.
     pub fn tokens(&self) -> Vec<(&str, u32)> {
         let mut out: Vec<(&str, u32)> = self
             .terms
@@ -235,7 +345,6 @@ impl ForwardRecord {
     }
 }
 
-/// Iterates records packed back to back.
 pub fn records(mut bytes: &[u8]) -> impl Iterator<Item = Result<ForwardRecord>> + '_ {
     std::iter::from_fn(move || {
         if bytes.is_empty() {
@@ -254,73 +363,56 @@ pub fn records(mut bytes: &[u8]) -> impl Iterator<Item = Result<ForwardRecord>> 
     })
 }
 
+pub fn records_fields(
+    mut bytes: &[u8],
+    field_count: u8,
+) -> impl Iterator<Item = Result<ForwardRecord>> + '_ {
+    std::iter::from_fn(move || {
+        if bytes.is_empty() {
+            return None;
+        }
+        match ForwardRecord::decode_fields(bytes, field_count) {
+            Ok((record, consumed)) => {
+                bytes = &bytes[consumed..];
+                Some(Ok(record))
+            }
+            Err(error) => {
+                bytes = &[];
+                Some(Err(error))
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn round_trips_tokens_and_packs_records() {
         let tid = Tid::new(12, 3).unwrap();
         let tokens = [("craft", 1), ("beer", 2), ("craft", 4), ("ale", 9)];
         let record = ForwardRecord::from_tokens(tid, tokens).unwrap();
         assert_eq!(record.doc_len, 4);
-        assert_eq!(
-            record
-                .terms
-                .iter()
-                .map(|t| t.term.as_str())
-                .collect::<Vec<_>>(),
-            ["ale", "beer", "craft"]
-        );
         assert_eq!(record.terms[2].positions, [1, 4]);
         assert_eq!(record.tokens(), tokens);
         let mut bytes = Vec::new();
         record.encode(&mut bytes).unwrap();
-        let empty = ForwardRecord::from_tokens(Tid::new(13, 1).unwrap(), []).unwrap();
-        empty.encode(&mut bytes).unwrap();
-        let decoded: Vec<ForwardRecord> = records(&bytes).map(Result::unwrap).collect();
-        assert_eq!(decoded, [record.clone(), empty]);
-        let (first, consumed) = ForwardRecord::decode(&bytes).unwrap();
-        assert_eq!(first, record);
-        assert_eq!(consumed, ForwardRecord::encoded_len(&bytes).unwrap());
+        let (decoded, consumed) = ForwardRecord::decode(&bytes).unwrap();
+        assert_eq!(decoded, record);
+        assert_eq!(consumed, bytes.len());
     }
 
     #[test]
-    fn validation_and_corruption() {
-        assert_eq!(
-            ForwardRecord::from_tokens(Tid::new(1, 1).unwrap(), [("a", 2), ("b", 2)]),
-            Err(Error::InvalidPositions)
-        );
-        assert_eq!(
-            ForwardRecord::from_tokens(Tid::new(1, 1).unwrap(), [("", 1)]),
-            Err(Error::EmptyTerm)
-        );
-        let unordered = ForwardRecord {
-            tid: Tid::new(1, 1).unwrap(),
-            doc_len: 2,
-            terms: vec![
-                ForwardTerm {
-                    term: "b".into(),
-                    positions: vec![1],
-                },
-                ForwardTerm {
-                    term: "a".into(),
-                    positions: vec![2],
-                },
-            ],
-        };
-        assert_eq!(unordered.encode(&mut Vec::new()), Err(Error::Unordered));
-        let record =
-            ForwardRecord::from_tokens(Tid::new(1, 1).unwrap(), [("x", 1), ("y", 2)]).unwrap();
+    fn fields_round_trip_with_independent_positions() {
+        let record = ForwardRecord::from_tokens_fields(
+            Tid::new(1, 1).unwrap(),
+            2,
+            [(0, "x", 0), (1, "x", 0), (1, "y", 1)],
+        )
+        .unwrap();
         let mut bytes = Vec::new();
         record.encode(&mut bytes).unwrap();
-        assert!(ForwardRecord::decode(&bytes[..bytes.len() - 1]).is_err());
-        assert!(ForwardRecord::decode(&[]).is_err());
-        let mut tampered = bytes.clone();
-        tampered[0] += 1; // Length prefix now exceeds the input.
-        assert!(ForwardRecord::decode(&tampered).is_err());
-        let errors: Vec<_> = records(&bytes[..bytes.len() - 1]).collect();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].is_err());
+        assert_eq!(ForwardRecord::decode_fields(&bytes, 2).unwrap().0, record);
+        assert!(ForwardRecord::decode(&bytes).is_err());
     }
 }

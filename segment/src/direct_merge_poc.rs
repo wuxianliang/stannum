@@ -22,6 +22,13 @@ fn direct(blobs: &[Vec<u8>], dead: &[BTreeSet<Tid>], format: Format) -> Result<V
         .iter()
         .map(|b| Segment::parse(b))
         .collect::<Result<Vec<_>>>()?;
+    if segments.iter().any(|segment| segment.format().has_fields()) {
+        // The proof of concept predates the field dimension; the validated
+        // production merger (merge::merge_fields) owns the LSG4 path.
+        return Err(Error::Corrupt(
+            "direct merge does not support LSG4; use merge_fields",
+        ));
+    }
     let mut docs = segments
         .iter()
         .map(Segment::documents)
@@ -177,6 +184,77 @@ pub(crate) fn reference(
     Ok(builder.finish_as(format))
 }
 
+/// The field-aware reference: rebuild through the forward-record path and
+/// finish in the `LSG4` layout, the way a buffer fold does. The field count
+/// is carried explicitly: an output whose documents are all dead still
+/// records the inputs' count, which the builder cannot infer.
+pub(crate) fn reference_fields(
+    blobs: &[Vec<u8>],
+    dead: &[BTreeSet<Tid>],
+    field_count: u8,
+) -> Result<Vec<u8>> {
+    let mut builder = SegmentBuilder::with_field_count(field_count);
+    for (blob, dead) in blobs.iter().zip(dead) {
+        for record in Segment::parse(blob)?.records(|tid| dead.contains(&tid))? {
+            builder.add_record(&record)?;
+        }
+    }
+    Ok(builder.finish_fields())
+}
+
+/// Field-aware inputs: the same document shapes as [`fixture`] with tokens
+/// spread across `field_count` fields, positions restarting per field.
+pub(crate) fn fixture_fields(
+    parts: usize,
+    docs: usize,
+    tokens: usize,
+    vocab: usize,
+    interleaved: bool,
+    deletion: usize,
+    field_count: u8,
+) -> (Vec<Vec<u8>>, Vec<BTreeSet<Tid>>) {
+    let mut blobs = Vec::new();
+    let mut dead = Vec::new();
+    for part in 0..parts {
+        let mut builder = SegmentBuilder::with_field_count(field_count);
+        let mut deleted = BTreeSet::new();
+        for doc in 0..docs {
+            let id = if interleaved {
+                doc * parts + part
+            } else {
+                part * docs + doc
+            };
+            let tid = Tid::new((id / 100) as u32, (id % 100 + 1) as u16).unwrap();
+            let mut positions = vec![0u32; usize::from(field_count)];
+            let mut owned = Vec::new();
+            for p in 0..tokens {
+                let field = (p % usize::from(field_count)) as u8;
+                positions[usize::from(field)] += 1;
+                owned.push((
+                    field,
+                    format!("term{:04}", (p + id) % vocab),
+                    positions[usize::from(field)],
+                ));
+            }
+            builder
+                .add_document_fields(
+                    tid,
+                    field_count,
+                    owned
+                        .iter()
+                        .map(|(field, term, position)| (*field, term.as_str(), *position)),
+                )
+                .unwrap();
+            if deletion != 0 && id % deletion == 0 {
+                deleted.insert(tid);
+            }
+        }
+        blobs.push(builder.finish_fields());
+        dead.push(deleted);
+    }
+    (blobs, dead)
+}
+
 pub(crate) fn fixture(
     parts: usize,
     docs: usize,
@@ -233,6 +311,33 @@ fn assert_verified(bytes: &[u8], format: Format) {
     } else {
         assert!(report.is_clean(), "{:?}", report.findings);
     }
+}
+
+#[test]
+fn direct_merge_poc_refuses_lsg4_inputs_with_a_clear_error() {
+    let (blobs, dead) = fixture_fields(2, 3, 4, 2, true, 0, 3);
+    assert_eq!(
+        direct(&blobs, &dead, Format::CURRENT).unwrap_err(),
+        Error::Corrupt("direct merge does not support LSG4; use merge_fields")
+    );
+    // The validated field merge handles the same inputs.
+    let inputs: Vec<_> = blobs
+        .iter()
+        .zip(&dead)
+        .map(|(bytes, dead)| crate::merge::MergeInput { bytes, dead })
+        .collect();
+    let merged = crate::merge::merge_fields(
+        &inputs,
+        crate::merge::MergeLimits {
+            max_inputs: 128,
+            max_input_bytes: 64 << 20,
+            max_documents: 100_000,
+            max_output_bytes: 64 << 20,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(merged, reference_fields(&blobs, &dead, 3).unwrap());
 }
 
 #[test]

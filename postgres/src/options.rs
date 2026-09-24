@@ -96,6 +96,93 @@ struct IndexOptions {
     k1: f64,
     b: f64,
     score_stop_words: i32,
+    field_weights: i32,
+}
+
+/// The previous `ProcessUtility` hook and the reloption guard's only state.
+static mut PREVIOUS_PROCESS_UTILITY: pg_sys::ProcessUtility_hook_type = None;
+
+/// Rejects `ALTER INDEX … SET/RESET (field_weights = …)`: the weights live in
+/// the index's meta trailer, so changing the reloption alone would split the
+/// reloption from the trailer (RFC §5.7). `REINDEX` rebuilds the trailer from
+/// the reloption and is the one supported way to change the weights.
+#[pg_guard]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PostgreSQL ProcessUtility hook signature"
+)]
+unsafe extern "C-unwind" fn process_utility_hook(
+    pstmt: *mut pg_sys::PlannedStmt,
+    query_string: *const std::ffi::c_char,
+    read_only_tree: bool,
+    context: pg_sys::ProcessUtilityContext::Type,
+    params: pg_sys::ParamListInfo,
+    query_env: *mut pg_sys::QueryEnvironment,
+    dest: *mut pg_sys::DestReceiver,
+    qc: *mut pg_sys::QueryCompletion,
+) {
+    unsafe {
+        if alters_field_weights(pstmt) {
+            pgrx::error!("REINDEX to change field_weights");
+        }
+        match PREVIOUS_PROCESS_UTILITY {
+            Some(previous) => previous(
+                pstmt,
+                query_string,
+                read_only_tree,
+                context,
+                params,
+                query_env,
+                dest,
+                qc,
+            ),
+            None => pg_sys::standard_ProcessUtility(
+                pstmt,
+                query_string,
+                read_only_tree,
+                context,
+                params,
+                query_env,
+                dest,
+                qc,
+            ),
+        }
+    }
+}
+
+/// Whether this utility statement sets or resets `field_weights` on an index.
+unsafe fn alters_field_weights(pstmt: *mut pg_sys::PlannedStmt) -> bool {
+    unsafe {
+        if pstmt.is_null() {
+            return false;
+        }
+        let statement = (*pstmt).utilityStmt;
+        if statement.is_null() || (*statement).type_ != pg_sys::NodeTag::T_AlterTableStmt {
+            return false;
+        }
+        let alter = statement.cast::<pg_sys::AlterTableStmt>();
+        if (*alter).objtype != pg_sys::ObjectType::OBJECT_INDEX {
+            return false;
+        }
+        for command in PgList::<pg_sys::AlterTableCmd>::from_pg((*alter).cmds).iter_ptr() {
+            if !matches!(
+                (*command).subtype,
+                pg_sys::AlterTableType::AT_SetRelOptions
+                    | pg_sys::AlterTableType::AT_ReplaceRelOptions
+                    | pg_sys::AlterTableType::AT_ResetRelOptions
+            ) {
+                continue;
+            }
+            let options = (*command).def.cast::<pg_sys::List>();
+            for option in PgList::<pg_sys::DefElem>::from_pg(options).iter_ptr() {
+                let name = (*option).defname;
+                if !name.is_null() && CStr::from_ptr(name).to_bytes() == b"field_weights" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 pub fn init() {
@@ -104,6 +191,8 @@ pub fn init() {
     }
     let lock = pg_sys::ShareUpdateExclusiveLock as pg_sys::LOCKMODE;
     unsafe {
+        PREVIOUS_PROCESS_UTILITY = pg_sys::ProcessUtility_hook;
+        pg_sys::ProcessUtility_hook = Some(process_utility_hook);
         let kind = pg_sys::add_reloption_kind();
         pg_sys::add_int_reloption(
             kind,
@@ -221,6 +310,14 @@ pub fn init() {
         );
         pg_sys::add_string_reloption(
             kind,
+            c"field_weights".as_ptr(),
+            c"Field weights as name:positive-float pairs".as_ptr(),
+            std::ptr::null(),
+            None,
+            lock,
+        );
+        pg_sys::add_string_reloption(
+            kind,
             c"score_stop_words".as_ptr(),
             c"Literal scoring terms or auto/auto:zh/auto:en presets; full_score ignores this list"
                 .as_ptr(),
@@ -321,6 +418,11 @@ pub unsafe extern "C-unwind" fn amoptions(
             c"b".as_ptr(),
             pg_sys::relopt_type::RELOPT_TYPE_REAL,
             std::mem::offset_of!(IndexOptions, b),
+        ),
+        parse_entry(
+            c"field_weights".as_ptr(),
+            pg_sys::relopt_type::RELOPT_TYPE_STRING,
+            std::mem::offset_of!(IndexOptions, field_weights),
         ),
         parse_entry(
             c"score_stop_words".as_ptr(),
@@ -499,6 +601,19 @@ pub unsafe fn bm25(index: pg_sys::Relation) -> Bm25Params {
             b: options.b as f32,
         })
         .unwrap_or_else(Bm25Params::default_bm25)
+}
+
+pub unsafe fn field_weights(index: pg_sys::Relation) -> Option<String> {
+    let options = unsafe { parsed(index) }?;
+    let offset = usize::try_from(options.field_weights).ok()?;
+    if offset == 0 {
+        return None;
+    }
+    let ptr = std::ptr::from_ref(options).cast::<u8>();
+    unsafe { CStr::from_ptr(ptr.add(offset).cast()) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 pub unsafe fn score_stop_words(index: pg_sys::Relation) -> Option<String> {

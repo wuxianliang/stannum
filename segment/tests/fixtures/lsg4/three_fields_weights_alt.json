@@ -1,0 +1,132 @@
+{
+  "schema": "stannum.lsg4-golden/1",
+  "case": "three_fields_weights",
+  "kind": "valid",
+  "generator": {"git": "db68b07+", "tool": "SegmentBuilder::add_document_fields + finish_fields"},
+  "format": "LSG4",
+  "layout_revision": 1,
+  "fields": [
+    {"name": "heading", "weight": 9},
+    {"name": "summary", "weight": 0.5},
+    {"name": "text", "weight": 3.25}
+  ],
+  "documents": [
+    {"tid": [0, 1], "tokens": [
+        {"field": 0, "term": "apple", "position": 1},
+        {"field": 1, "term": "banana", "position": 1},
+        {"field": 1, "term": "banana", "position": 2},
+        {"field": 2, "term": "cherry", "position": 1},
+        {"field": 2, "term": "cherry", "position": 2},
+        {"field": 2, "term": "cherry", "position": 3}
+    ]},
+    {"tid": [3, 2], "tokens": [
+        {"field": 0, "term": "apple", "position": 1},
+        {"field": 0, "term": "apple", "position": 2},
+        {"field": 1, "term": "banana", "position": 1},
+        {"field": 1, "term": "banana", "position": 2},
+        {"field": 1, "term": "banana", "position": 3},
+        {"field": 2, "term": "cherry", "position": 1},
+        {"field": 2, "term": "cherry", "position": 2},
+        {"field": 2, "term": "cherry", "position": 3},
+        {"field": 2, "term": "cherry", "position": 4}
+    ]},
+    {"tid": [6, 3], "tokens": [
+        {"field": 0, "term": "apple", "position": 1},
+        {"field": 0, "term": "apple", "position": 2},
+        {"field": 0, "term": "apple", "position": 3},
+        {"field": 1, "term": "banana", "position": 1},
+        {"field": 1, "term": "banana", "position": 2},
+        {"field": 1, "term": "banana", "position": 3},
+        {"field": 1, "term": "banana", "position": 4},
+        {"field": 2, "term": "cherry", "position": 1},
+        {"field": 2, "term": "cherry", "position": 2},
+        {"field": 2, "term": "cherry", "position": 3},
+        {"field": 2, "term": "cherry", "position": 4},
+        {"field": 2, "term": "cherry", "position": 5}
+    ]},
+    {"tid": [9, 1], "tokens": [
+        {"field": 0, "term": "apple", "position": 1},
+        {"field": 1, "term": "banana", "position": 1},
+        {"field": 1, "term": "banana", "position": 2},
+        {"field": 2, "term": "cherry", "position": 1},
+        {"field": 2, "term": "cherry", "position": 2},
+        {"field": 2, "term": "cherry", "position": 3}
+    ]},
+    {"tid": [12, 2], "tokens": [
+        {"field": 0, "term": "apple", "position": 1},
+        {"field": 0, "term": "apple", "position": 2},
+        {"field": 1, "term": "banana", "position": 1},
+        {"field": 1, "term": "banana", "position": 2},
+        {"field": 1, "term": "banana", "position": 3},
+        {"field": 2, "term": "cherry", "position": 1},
+        {"field": 2, "term": "cherry", "position": 2},
+        {"field": 2, "term": "cherry", "position": 3},
+        {"field": 2, "term": "cherry", "position": 4}
+    ]}
+  ],
+  "expected": {
+    "doc_count": 5,
+    "total_length": 42,
+    "field_total": [9, 14, 19],
+    "documents": [
+        {"tid": [0, 1], "lengths": [1, 2, 3]},
+        {"tid": [3, 2], "lengths": [2, 3, 4]},
+        {"tid": [6, 3], "lengths": [3, 4, 5]},
+        {"tid": [9, 1], "lengths": [1, 2, 3]},
+        {"tid": [12, 2], "lengths": [2, 3, 4]}
+    ],
+    "terms": [
+      {"term": "apple", "df": 5, "max_tf_bucket": 2, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 0, "bucket": 0, "positions": [1]}
+          ]},
+          {"tid": [3, 2], "fields": [
+              {"field": 0, "bucket": 1, "positions": [1, 2]}
+          ]},
+          {"tid": [6, 3], "fields": [
+              {"field": 0, "bucket": 2, "positions": [1, 2, 3]}
+          ]},
+          {"tid": [9, 1], "fields": [
+              {"field": 0, "bucket": 0, "positions": [1]}
+          ]},
+          {"tid": [12, 2], "fields": [
+              {"field": 0, "bucket": 1, "positions": [1, 2]}
+          ]}
+      ]},
+      {"term": "banana", "df": 5, "max_tf_bucket": 2, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 1, "bucket": 1, "positions": [1, 2]}
+          ]},
+          {"tid": [3, 2], "fields": [
+              {"field": 1, "bucket": 2, "positions": [1, 2, 3]}
+          ]},
+          {"tid": [6, 3], "fields": [
+              {"field": 1, "bucket": 2, "positions": [1, 2, 3, 4]}
+          ]},
+          {"tid": [9, 1], "fields": [
+              {"field": 1, "bucket": 1, "positions": [1, 2]}
+          ]},
+          {"tid": [12, 2], "fields": [
+              {"field": 1, "bucket": 2, "positions": [1, 2, 3]}
+          ]}
+      ]},
+      {"term": "cherry", "df": 5, "max_tf_bucket": 3, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 2, "bucket": 2, "positions": [1, 2, 3]}
+          ]},
+          {"tid": [3, 2], "fields": [
+              {"field": 2, "bucket": 2, "positions": [1, 2, 3, 4]}
+          ]},
+          {"tid": [6, 3], "fields": [
+              {"field": 2, "bucket": 3, "positions": [1, 2, 3, 4, 5]}
+          ]},
+          {"tid": [9, 1], "fields": [
+              {"field": 2, "bucket": 2, "positions": [1, 2, 3]}
+          ]},
+          {"tid": [12, 2], "fields": [
+              {"field": 2, "bucket": 2, "positions": [1, 2, 3, 4]}
+          ]}
+      ]}
+    ]
+  }
+}

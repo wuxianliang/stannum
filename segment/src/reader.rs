@@ -59,6 +59,11 @@ impl<'a> Reader<'a> {
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
+    pub fn u64_le(&mut self) -> Result<u64> {
+        let bytes = self.take(8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().expect("fixed width")))
+    }
+
     /// Moves to an absolute position that must not exceed the end of input.
     pub fn seek(&mut self, at: usize) -> Result<()> {
         if at > self.bytes.len() {

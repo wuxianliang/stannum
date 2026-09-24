@@ -20,6 +20,16 @@
 //! dictionary alone answers selectivity and score-bound questions. Each
 //! term's postings carry score bounds (see [`crate::postings`]).
 //!
+//! `LSG4` (docs/designs/lsg4-rfc.md) is the field-aware superset: the header
+//! gains `layout_revision varint = 1` and `field_count varint` with
+//! `field_total u64le x field_count` after `total_length`, and the length
+//! table becomes doc-major `field_count x u32le` rows. Its streams gain a
+//! field dimension (field-tagged payload entries, per-field score bounds)
+//! and are written only by the field-aware entry points —
+//! [`SegmentBuilder::add_document_fields`] and
+//! [`SegmentBuilder::finish_fields`]. `CURRENT` stays `Lsg3`, so
+//! single-column writes never emit it, and the two formats never merge.
+//!
 //! Every released signature is still read; see [`Format`]. `LSG2` added
 //! block bounds to term postings and fixed-width payload skip offsets;
 //! `LSG3` stores a single term bound for postings of one block, drops the
@@ -60,6 +70,8 @@ pub enum Format {
     /// for entry 0; dictionary entries pack `df` with the bucket and store
     /// extents as gaps from the previous entry's.
     Lsg3,
+    /// Field-aware BM25F layout. CURRENT intentionally remains Lsg3.
+    Lsg4,
 }
 
 impl Format {
@@ -70,11 +82,12 @@ impl Format {
             Self::Lsg1 => b"LSG1",
             Self::Lsg2 => b"LSG2",
             Self::Lsg3 => b"LSG3",
+            Self::Lsg4 => b"LSG4",
         }
     }
 
     pub fn from_magic(magic: &[u8]) -> Option<Self> {
-        [Self::Lsg1, Self::Lsg2, Self::Lsg3]
+        [Self::Lsg1, Self::Lsg2, Self::Lsg3, Self::Lsg4]
             .into_iter()
             .find(|format| format.magic() == magic)
     }
@@ -82,6 +95,10 @@ impl Format {
     /// True when term postings carry score bounds a ranked scan can prune with.
     pub const fn has_bounds(self) -> bool {
         !matches!(self, Self::Lsg1)
+    }
+
+    pub const fn has_fields(self) -> bool {
+        matches!(self, Self::Lsg4)
     }
 }
 
@@ -94,6 +111,7 @@ impl std::fmt::Display for Format {
 struct Occurrence {
     tid: Tid,
     doc_len: u32,
+    field: u8,
     positions: Vec<u32>,
 }
 
@@ -101,7 +119,9 @@ struct Occurrence {
 #[derive(Default)]
 pub struct SegmentBuilder {
     lengths: BTreeMap<Tid, u32>,
+    field_lengths: BTreeMap<Tid, Vec<u32>>,
     terms: BTreeMap<String, Vec<Occurrence>>,
+    field_count: Option<u8>,
 }
 
 impl SegmentBuilder {
@@ -143,6 +163,7 @@ impl SegmentBuilder {
                 .push(Occurrence {
                     tid,
                     doc_len,
+                    field: 0,
                     positions,
                 });
         }
@@ -154,6 +175,35 @@ impl SegmentBuilder {
         Tid::new(record.tid.block, record.tid.offset)?;
         if self.lengths.contains_key(&record.tid) {
             return Err(Error::Unordered);
+        }
+        if !record.field_lengths.is_empty() {
+            let field_count = u8::try_from(record.field_lengths.len())
+                .map_err(|_| Error::Corrupt("segment field count"))?;
+            if !(1..=16).contains(&field_count)
+                || self.field_count.is_some_and(|n| n != field_count)
+            {
+                return Err(Error::Corrupt("segment field count"));
+            }
+            record.encode(&mut Vec::new())?;
+            if record.doc_len == 0 {
+                return Ok(());
+            }
+            self.field_count = Some(field_count);
+            self.lengths.insert(record.tid, record.doc_len);
+            self.field_lengths
+                .insert(record.tid, record.field_lengths.clone());
+            for term in &record.terms {
+                self.terms
+                    .entry(term.term.clone())
+                    .or_default()
+                    .push(Occurrence {
+                        tid: record.tid,
+                        doc_len: record.doc_len,
+                        field: term.field,
+                        positions: term.positions.clone(),
+                    });
+            }
+            return Ok(());
         }
         // Records emitted by our codecs are already grouped by term. Avoid
         // expanding them into tokens, sorting by position and regrouping them.
@@ -209,7 +259,66 @@ impl SegmentBuilder {
                 .push(Occurrence {
                     tid: record.tid,
                     doc_len,
+                    field: 0,
                     positions: term.positions.clone(),
+                });
+        }
+        Ok(())
+    }
+
+    /// Adds a multi-column document. Empty fields are represented by zero
+    /// lengths; an all-empty document is omitted from the segment.
+    pub fn add_document_fields<'t>(
+        &mut self,
+        tid: Tid,
+        field_count: u8,
+        tokens: impl IntoIterator<Item = (u8, &'t str, u32)>,
+    ) -> Result<()> {
+        if !(1..=16).contains(&field_count) || self.field_count.is_some_and(|n| n != field_count) {
+            return Err(Error::Corrupt("segment field count"));
+        }
+        Tid::new(tid.block, tid.offset)?;
+        if self.lengths.contains_key(&tid) {
+            return Err(Error::Unordered);
+        }
+        let mut lengths = vec![0u32; usize::from(field_count)];
+        let mut last = vec![None; usize::from(field_count)];
+        let mut by_term = BTreeMap::<(&str, u8), Vec<u32>>::new();
+        for (field, term, position) in tokens {
+            if usize::from(field) >= lengths.len() {
+                return Err(Error::Corrupt("segment field id"));
+            }
+            if term.is_empty() {
+                return Err(Error::EmptyTerm);
+            }
+            if last[usize::from(field)].is_some_and(|p| p >= position) {
+                return Err(Error::InvalidPositions);
+            }
+            last[usize::from(field)] = Some(position);
+            lengths[usize::from(field)] = lengths[usize::from(field)]
+                .checked_add(1)
+                .ok_or(Error::Corrupt("segment field length"))?;
+            by_term.entry((term, field)).or_default().push(position);
+        }
+        let doc_len = lengths
+            .iter()
+            .try_fold(0u32, |sum, len| sum.checked_add(*len))
+            .ok_or(Error::Corrupt("segment length"))?;
+        if doc_len == 0 {
+            return Ok(());
+        }
+        self.field_count = Some(field_count);
+        self.lengths.insert(tid, doc_len);
+        self.field_lengths.insert(tid, lengths.clone());
+        for ((term, field), positions) in by_term {
+            self.terms
+                .entry(term.to_owned())
+                .or_default()
+                .push(Occurrence {
+                    tid,
+                    doc_len,
+                    field,
+                    positions,
                 });
         }
         Ok(())
@@ -221,6 +330,133 @@ impl SegmentBuilder {
 
     pub fn finish(self) -> Vec<u8> {
         self.finish_as(Format::CURRENT)
+    }
+
+    pub fn finish_auto(self) -> Vec<u8> {
+        if self.field_count.is_some() {
+            self.finish_fields()
+        } else {
+            self.finish()
+        }
+    }
+
+    pub fn has_fields(&self) -> bool {
+        self.field_count.is_some()
+    }
+
+    /// Finishes a field-aware segment in the frozen LSG4 layout.
+    pub fn finish_fields(self) -> Vec<u8> {
+        let field_count = self.field_count.unwrap_or(1);
+        assert!((1..=16).contains(&field_count));
+        let mut dictionary = DictionaryBuilder::with_format(Format::Lsg4);
+        let mut postings_area = Vec::new();
+        let mut payload_area = Vec::new();
+        for (term, mut occurrences) in self.terms {
+            occurrences.sort_unstable_by_key(|occurrence| (occurrence.tid, occurrence.field));
+            let mut postings = PostingsBuilder::default();
+            let mut payload = PayloadBuilder::default();
+            let mut max_tf_bucket = 0;
+            let mut at = 0;
+            while at < occurrences.len() {
+                let tid = occurrences[at].tid;
+                let start = at;
+                while at < occurrences.len() && occurrences[at].tid == tid {
+                    at += 1;
+                }
+                let group = &occurrences[start..at];
+                let scores: Vec<(u8, u8)> = group
+                    .iter()
+                    .map(|o| {
+                        (
+                            o.field,
+                            TfBucket::from_count(o.positions.len() as u32).value(),
+                        )
+                    })
+                    .collect();
+                let lens = self
+                    .field_lengths
+                    .get(&tid)
+                    .expect("field lengths accompany documents");
+                postings
+                    .push_scored_fields(tid, &scores, lens)
+                    .expect("field occurrences are validated");
+                let payload_groups: Vec<(u8, u8, &[u32])> = group
+                    .iter()
+                    .map(|o| {
+                        (
+                            o.field,
+                            TfBucket::from_count(o.positions.len() as u32).value(),
+                            o.positions.as_slice(),
+                        )
+                    })
+                    .collect();
+                payload
+                    .push_fields(&payload_groups, field_count)
+                    .expect("field occurrences are validated");
+                max_tf_bucket =
+                    max_tf_bucket.max(scores.iter().map(|(_, b)| *b).max().unwrap_or(0));
+            }
+            let df = postings.len() as u32;
+            let postings_bytes = postings.finish_as(Format::Lsg4);
+            let payload_bytes = payload.finish_as(Format::Lsg4);
+            let entry = TermEntry {
+                df,
+                max_tf_bucket,
+                postings: Extent {
+                    offset: postings_area.len() as u64,
+                    len: postings_bytes.len() as u32,
+                },
+                payload: Extent {
+                    offset: payload_area.len() as u64,
+                    len: payload_bytes.len() as u32,
+                },
+            };
+            postings_area.extend_from_slice(&postings_bytes);
+            payload_area.extend_from_slice(&payload_bytes);
+            dictionary.push(&term, entry).expect("terms ordered");
+        }
+        let dictionary_bytes = dictionary.finish();
+        let mut docs = PostingsBuilder::default();
+        let mut lengths = Vec::with_capacity(self.lengths.len() * usize::from(field_count) * 4);
+        let mut field_total = vec![0u64; usize::from(field_count)];
+        for tid in self.lengths.keys() {
+            docs.push(*tid).expect("map keys ordered");
+            let row = self
+                .field_lengths
+                .get(tid)
+                .expect("field lengths accompany documents");
+            for (field, length) in row.iter().enumerate() {
+                lengths.extend_from_slice(&length.to_le_bytes());
+                field_total[field] += u64::from(*length);
+            }
+        }
+        let total_length = field_total.iter().sum::<u64>();
+        // The document table carries no scores, so its stream is the plain
+        // unscored layout in every format.
+        let docs_bytes = docs.finish();
+        let mut out = Vec::new();
+        out.extend_from_slice(Format::Lsg4.magic());
+        varint::put(&mut out, 1);
+        varint::put(&mut out, self.lengths.len() as u64);
+        varint::put(&mut out, total_length);
+        varint::put(&mut out, u64::from(field_count));
+        for total in field_total {
+            out.extend_from_slice(&total.to_le_bytes());
+        }
+        for n in [
+            dictionary_bytes.len(),
+            postings_area.len(),
+            payload_area.len(),
+            docs_bytes.len(),
+        ] {
+            varint::put(&mut out, n as u64);
+        }
+        out.extend_from_slice(&dictionary_bytes);
+        out.extend_from_slice(&postings_area);
+        out.extend_from_slice(&payload_area);
+        out.extend_from_slice(&docs_bytes);
+        out.extend_from_slice(&lengths);
+        out
     }
 
     /// Encodes in the layout of an earlier format, for compatibility tests.
@@ -238,6 +474,17 @@ impl SegmentBuilder {
                 .unwrap();
         }
         builder
+    }
+
+    /// A field-aware builder whose documents will carry `field_count`
+    /// fields, so a `finish_fields` output with no live documents still
+    /// records the count (an empty segment keeps its index's field count).
+    pub fn with_field_count(field_count: u8) -> Self {
+        assert!((1..=16).contains(&field_count));
+        Self {
+            field_count: Some(field_count),
+            ..Default::default()
+        }
     }
 
     /// Encodes with the signature of one format and the stream layouts of
@@ -329,7 +576,12 @@ impl<'a> Term<'a> {
     }
 
     pub fn postings(&self) -> Result<Postings<'a>> {
-        Postings::parse(self.areas.postings_bytes(self.entry.postings)?)
+        let bytes = self.areas.postings_bytes(self.entry.postings)?;
+        if self.areas.format().has_fields() {
+            Postings::parse_fields(bytes, self.areas.field_count())
+        } else {
+            Postings::parse_format(bytes, self.areas.format())
+        }
     }
 
     pub fn cursor(&self) -> Result<PostingsCursor<'a>> {
@@ -338,7 +590,11 @@ impl<'a> Term<'a> {
 
     pub fn payload(&self) -> Result<Payload<'a>> {
         let bytes = self.areas.payload_bytes(self.entry.payload)?;
-        Payload::parse_format(bytes, self.areas.format())
+        if self.areas.format().has_fields() {
+            Payload::parse_fields(bytes, self.areas.field_count())
+        } else {
+            Payload::parse_format(bytes, self.areas.format())
+        }
     }
 }
 
@@ -347,13 +603,30 @@ pub trait AreaFetch {
     fn postings_bytes(&self, extent: Extent) -> Result<&[u8]>;
     fn payload_bytes(&self, extent: Extent) -> Result<&[u8]>;
     fn length(&self, ordinal: u32) -> Result<u32>;
+    fn field_length(&self, ordinal: u32, field: u8) -> Result<u32> {
+        if field == 0 {
+            self.length(ordinal)
+        } else {
+            Err(Error::Corrupt("field length unavailable"))
+        }
+    }
+    fn field_count(&self) -> u8 {
+        1
+    }
+    fn field_total(&self, field: u8) -> Result<u64> {
+        if field == 0 {
+            Ok(0)
+        } else {
+            Err(Error::Corrupt("field total unavailable"))
+        }
+    }
     /// The format the streams were written in.
     fn format(&self) -> Format {
         Format::CURRENT
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Header {
     format: Format,
     doc_count: u32,
@@ -367,6 +640,8 @@ struct Header {
     docs_at: u64,
     docs_len: usize,
     lengths_at: u64,
+    field_count: u8,
+    field_totals: Vec<u64>,
 }
 
 /// Reads a segment from any [`Source`], fetching only the extents a query
@@ -411,11 +686,16 @@ pub type Segment<'a> = Reader<&'a [u8]>;
 pub fn dictionary_extent(header: &[u8]) -> Result<(u64, u32)> {
     let mut reader = crate::reader::Reader::new(header);
     let magic = reader.take(4)?;
-    if Format::from_magic(magic).is_none() {
-        return Err(Error::Corrupt("segment magic"));
+    let format = Format::from_magic(magic).ok_or(Error::Corrupt("segment magic"))?;
+    if format == Format::Lsg4 {
+        reader.varint()?;
     }
     let _doc_count = reader.varint_u32()?;
     let _total_length = reader.varint()?;
+    if format == Format::Lsg4 {
+        let fields = reader.varint_u32()? as usize;
+        reader.skip(fields * 8)?;
+    }
     let dictionary_len = reader.varint_u32()?;
     Ok((reader.position() as u64, dictionary_len))
 }
@@ -432,12 +712,43 @@ impl<S: Source> Reader<S> {
         // The header probe is read before any area is known, so it is noted
         // as `Other` and counts as nothing in observers.
         source.note_area(Area::Other);
-        let head = source.read(0, (total.min(64)) as usize)?;
-        let mut reader = crate::reader::Reader::new(&head);
-        let magic = reader.take(4)?;
+        let probe = source.read(0, (total.min(64)) as usize)?;
+        let magic = probe.get(..4).ok_or(Error::Truncated)?;
         let format = Format::from_magic(magic).ok_or(Error::Corrupt("segment magic"))?;
+        let head = if format == Format::Lsg4 {
+            source.read(0, total.min(256) as usize)?
+        } else {
+            probe
+        };
+        let mut reader = crate::reader::Reader::new(&head);
+        reader.take(4)?;
+        if format == Format::Lsg4 {
+            // RFC §5.1: layout_revision varint = 1, fail closed on any other.
+            let revision = reader.varint_u32()?;
+            if revision != 1 {
+                return Err(Error::Corrupt("segment layout revision"));
+            }
+        }
         let doc_count = reader.varint_u32()?;
         let total_length = reader.varint()?;
+        let (field_count, field_totals) = if format == Format::Lsg4 {
+            // RFC §5.1: field_count varint then field_total u64le × count,
+            // in that order, after the lengths; Σ field_total == total_length.
+            let fields = reader.varint_u32()?;
+            if !(1..=16).contains(&fields) {
+                return Err(Error::Corrupt("segment field count"));
+            }
+            let mut totals = Vec::with_capacity(fields as usize);
+            for _ in 0..fields {
+                totals.push(reader.u64_le()?);
+            }
+            if totals.iter().try_fold(0u64, |sum, n| sum.checked_add(*n)) != Some(total_length) {
+                return Err(Error::Corrupt("segment field totals"));
+            }
+            (fields as u8, totals)
+        } else {
+            (1, Vec::new())
+        };
         let dictionary_len = reader.varint_u32()? as usize;
         let postings_len = reader.varint_u32()? as usize;
         let payload_len = reader.varint_u32()? as usize;
@@ -447,7 +758,8 @@ impl<S: Source> Reader<S> {
         let payload_at = postings_at + postings_len as u64;
         let docs_at = payload_at + payload_len as u64;
         let lengths_at = docs_at + docs_len as u64;
-        if lengths_at + u64::from(doc_count) * 4 != total {
+        let row_bytes = u64::from(doc_count) * u64::from(field_count) * 4;
+        if lengths_at + row_bytes != total {
             return Err(Error::Corrupt("segment length"));
         }
         Ok(Self {
@@ -465,6 +777,8 @@ impl<S: Source> Reader<S> {
                 docs_at,
                 docs_len,
                 lengths_at,
+                field_count,
+                field_totals,
             },
             arena: RefCell::new(HashMap::new()),
             arena_bytes: Cell::new(0),
@@ -532,6 +846,18 @@ impl<S: Source> Reader<S> {
         self.header.format
     }
 
+    pub const fn field_count(&self) -> u8 {
+        self.header.field_count
+    }
+
+    pub fn field_total(&self, field: u8) -> Result<u64> {
+        self.header
+            .field_totals
+            .get(usize::from(field))
+            .copied()
+            .ok_or(Error::Corrupt("field id"))
+    }
+
     /// True for an `LSG1` blob, whose term postings carry no block bounds.
     pub const fn is_legacy(&self) -> bool {
         matches!(self.header.format, Format::Lsg1)
@@ -550,7 +876,7 @@ impl<S: Source> Reader<S> {
             postings: self.header.postings_len,
             payload: self.header.payload_len,
             docs: self.header.docs_len,
-            lengths: self.header.doc_count as usize * 4,
+            lengths: self.header.doc_count as usize * self.header.field_count as usize * 4,
         }
     }
 
@@ -627,7 +953,12 @@ impl<S: Source> Reader<S> {
 
     /// Cursor over every document in the segment, the universe for NOT.
     pub fn documents(&self) -> Result<PostingsCursor<'_>> {
-        Postings::parse(self.load(self.header.docs_at, self.header.docs_len)?)?.cursor()
+        let bytes = self.load(self.header.docs_at, self.header.docs_len)?;
+        if self.header.format.has_fields() {
+            Postings::parse_fields(bytes, self.header.field_count)?.cursor()
+        } else {
+            Postings::parse(bytes)?.cursor()
+        }
     }
 
     /// Length of the document at `tid`, if it is in this segment.
@@ -646,12 +977,22 @@ impl<S: Source> Reader<S> {
 
     /// A copyable handle on the length table.
     pub fn lengths(&self) -> Lengths<'_> {
-        let len = self.header.doc_count as usize * 4;
+        let len = self.header.doc_count as usize * usize::from(self.header.field_count) * 4;
         match self.source.slice(self.header.lengths_at, len) {
-            Some(bytes) => Lengths::Bytes(bytes),
+            Some(bytes) => {
+                if self.header.field_count == 1 {
+                    Lengths::Bytes(bytes)
+                } else {
+                    Lengths::Fields {
+                        bytes,
+                        field_count: self.header.field_count,
+                    }
+                }
+            }
             None => Lengths::Lazy {
                 fetch: self,
                 count: self.header.doc_count,
+                field_count: self.header.field_count,
             },
         }
     }
@@ -674,13 +1015,27 @@ impl<S: Source> Reader<S> {
             let mut postings = resolved.cursor()?;
             let mut payload = resolved.payload()?.cursor();
             while let Some(tid) = postings.current() {
-                let mut positions = Vec::new();
-                payload.next_into(&mut positions)?;
-                if let Some(terms) = by_document.get_mut(&tid) {
-                    terms.push(ForwardTerm {
-                        term: term.clone(),
-                        positions,
-                    });
+                if self.header.format == Format::Lsg4 {
+                    let entry = payload.next_fields()?;
+                    if let Some(terms) = by_document.get_mut(&tid) {
+                        for hit in entry.fields {
+                            terms.push(ForwardTerm {
+                                field: hit.field,
+                                term: term.clone(),
+                                positions: hit.positions,
+                            });
+                        }
+                    }
+                } else {
+                    let mut positions = Vec::new();
+                    payload.next_into(&mut positions)?;
+                    if let Some(terms) = by_document.get_mut(&tid) {
+                        terms.push(ForwardTerm {
+                            field: 0,
+                            term: term.clone(),
+                            positions,
+                        });
+                    }
                 }
                 postings.advance()?;
             }
@@ -691,9 +1046,27 @@ impl<S: Source> Reader<S> {
             let ordinal = lengths
                 .rank(tid)?
                 .ok_or(Error::Corrupt("document missing from table"))?;
+            let field_lengths = if self.header.format == Format::Lsg4 {
+                (0..self.header.field_count)
+                    .map(|field| self.lengths().field_get(ordinal, field))
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
             out.push(ForwardRecord {
                 tid,
-                doc_len: self.length_at(ordinal)?,
+                // `doc_len` is the unweighted token total across fields
+                // (RFC §5.6), not field 0's length, which is what
+                // `length_at` reports on an LSG4 source (RFC §5.2).
+                doc_len: if self.header.format == Format::Lsg4 {
+                    field_lengths
+                        .iter()
+                        .try_fold(0u32, |sum, len| sum.checked_add(*len))
+                        .ok_or(Error::Corrupt("segment length"))?
+                } else {
+                    self.length_at(ordinal)?
+                },
+                field_lengths,
                 terms,
             });
         }
@@ -722,11 +1095,47 @@ impl<S: Source> AreaFetch for Reader<S> {
         self.header.format
     }
 
+    fn field_count(&self) -> u8 {
+        self.header.field_count
+    }
+
+    fn field_total(&self, field: u8) -> Result<u64> {
+        self.field_total(field)
+    }
+
+    fn field_length(&self, ordinal: u32, field: u8) -> Result<u32> {
+        if ordinal >= self.header.doc_count || field >= self.header.field_count {
+            return Err(Error::Corrupt("field length out of range"));
+        }
+        let at = self.header.lengths_at
+            + (u64::from(ordinal) * u64::from(self.header.field_count) + u64::from(field)) * 4;
+        if let Some(bytes) = self.source.slice(at, 4) {
+            return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
+        let within = (at - self.header.lengths_at) % LENGTH_CHUNK;
+        let chunk_at = at - within;
+        let end = self.header.lengths_at
+            + u64::from(self.header.doc_count) * u64::from(self.header.field_count) * 4;
+        let chunk_len = (end - chunk_at).min(LENGTH_CHUNK) as usize;
+        let chunk = self.load(chunk_at, chunk_len)?;
+        let i = within as usize;
+        if i + 4 > chunk.len() {
+            return Err(Error::Truncated);
+        }
+        Ok(u32::from_le_bytes([
+            chunk[i],
+            chunk[i + 1],
+            chunk[i + 2],
+            chunk[i + 3],
+        ]))
+    }
+
     fn length(&self, ordinal: u32) -> Result<u32> {
         if ordinal >= self.header.doc_count {
             return Err(Error::Corrupt("document ordinal out of range"));
         }
-        let at = self.header.lengths_at + u64::from(ordinal) * 4;
+        let at =
+            self.header.lengths_at + u64::from(ordinal) * u64::from(self.header.field_count) * 4;
         if let Some(bytes) = self.source.slice(at, 4) {
             return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
         }
@@ -738,7 +1147,8 @@ impl<S: Source> AreaFetch for Reader<S> {
             // allocation alive and in place for as long as `self` lives.
             Some((last_at, pointer)) if last_at == chunk_at => unsafe { &*pointer },
             _ => {
-                let end = self.header.lengths_at + u64::from(self.header.doc_count) * 4;
+                let end = self.header.lengths_at
+                    + u64::from(self.header.doc_count) * u64::from(self.header.field_count) * 4;
                 let chunk_len = (end - chunk_at).min(LENGTH_CHUNK) as usize;
                 let chunk = self.load(chunk_at, chunk_len)?;
                 self.last_chunk
@@ -760,29 +1170,45 @@ impl<S: Source> AreaFetch for Reader<S> {
 #[derive(Clone, Copy)]
 pub enum Lengths<'a> {
     Bytes(&'a [u8]),
+    Fields {
+        bytes: &'a [u8],
+        field_count: u8,
+    },
     Lazy {
         fetch: &'a dyn AreaFetch,
         count: u32,
+        field_count: u8,
     },
 }
 
 impl Lengths<'_> {
     pub fn get(&self, ordinal: u32) -> Result<u32> {
-        match self {
-            Self::Bytes(bytes) => {
-                let at = ordinal as usize * 4;
-                let bytes = bytes
-                    .get(at..at + 4)
-                    .ok_or(Error::Corrupt("document ordinal out of range"))?;
-                Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            }
-            Self::Lazy { fetch, count } => {
-                if ordinal >= *count {
+        self.field_get(ordinal, 0)
+    }
+
+    pub fn field_get(&self, ordinal: u32, field: u8) -> Result<u32> {
+        let (bytes, count) = match self {
+            Self::Bytes(bytes) => (*bytes, 1),
+            Self::Fields { bytes, field_count } => (*bytes, *field_count),
+            Self::Lazy {
+                fetch,
+                count: max,
+                field_count,
+            } => {
+                if ordinal >= *max || field >= *field_count {
                     return Err(Error::Corrupt("document ordinal out of range"));
                 }
-                fetch.length(ordinal)
+                return fetch.field_length(ordinal, field);
             }
+        };
+        if field >= count {
+            return Err(Error::Corrupt("field id"));
         }
+        let at = (ordinal as usize * usize::from(count) + usize::from(field)) * 4;
+        let bytes = bytes
+            .get(at..at + 4)
+            .ok_or(Error::Corrupt("document ordinal out of range"))?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 }
 
@@ -944,6 +1370,7 @@ mod tests {
     #[test]
     fn public_record_normalization_and_errors_match_token_path() {
         let term = |name: &str, positions: &[u32]| ForwardTerm {
+            field: 0,
             term: name.to_owned(),
             positions: positions.to_vec(),
         };
@@ -977,6 +1404,7 @@ mod tests {
                 let record = ForwardRecord {
                     tid: record_tid,
                     doc_len: 777,
+                    field_lengths: Vec::new(),
                     terms: terms.clone(),
                 };
                 let mut grouped = SegmentBuilder::default();
@@ -1006,7 +1434,8 @@ mod tests {
             }
             let record = ForwardRecord {
                 tid: tid(0, 1), doc_len: 0,
-                terms: terms.into_iter().map(|(term, positions)| ForwardTerm {term, positions}).collect()
+                field_lengths: Vec::new(),
+                terms: terms.into_iter().map(|(term, positions)| ForwardTerm { field: 0, term, positions }).collect()
             };
             let mut grouped = SegmentBuilder::default();
             let mut baseline = SegmentBuilder::default();
@@ -1074,12 +1503,14 @@ mod tests {
         assert!(Segment::parse(b"LSG3").is_err());
         assert!(Segment::parse(b"LSG1").is_err());
         assert_eq!(&bytes[..4], Format::CURRENT.magic());
-        // An unknown signature is rejected outright.
+        // An unknown signature is rejected outright; an LSG3 blob re-stamped
+        // LSG4 now fails on its layout revision (the LSG3 doc_count byte
+        // reads as revision 0), which is the LSG4-era rejection for it.
         let mut future = bytes.clone();
         future[..4].copy_from_slice(b"LSG4");
         assert_eq!(
             Segment::parse(&future).err(),
-            Some(Error::Corrupt("segment magic"))
+            Some(Error::Corrupt("segment layout revision"))
         );
         // Earlier signatures are still readable.
         for format in [Format::Lsg1, Format::Lsg2] {

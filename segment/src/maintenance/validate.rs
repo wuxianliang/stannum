@@ -17,6 +17,16 @@ pub struct TermAreas<'a, S: Source + ?Sized> {
     pub format: Format,
 }
 
+// Manual impls: a derive would bound the area type by `Copy`, which no
+// unsized source (a slice) can satisfy, although three shared references
+// and a format are trivially copyable.
+impl<S: Source + ?Sized> Copy for TermAreas<'_, S> {}
+impl<S: Source + ?Sized> Clone for TermAreas<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 /// Validate every term, including postings a later merge will discard.
 ///
 /// `document` must reject unknown TIDs, return their true lengths, and accumulate
@@ -105,6 +115,107 @@ pub fn validate_terms<S: Source + ?Sized>(
                 }
                 if payload
                     .next_with(|_| (checkpoint.borrow_mut())())?
+                    .is_some()
+                    || max_bucket != entry.max_tf_bucket
+                {
+                    return Err(Error::Corrupt("term payload summary"));
+                }
+                Ok(())
+            },
+        )?
+        .is_some()
+    {}
+    Ok(())
+}
+
+/// The field-aware (`LSG4`) sibling of [`validate_terms`]. `document` is
+/// called once per **field hit**: it must reject unknown TIDs and unknown
+/// fields, return that field's true length, and accumulate the supplied
+/// per-field position count for subsequent verification. It must not filter
+/// dead tuples. The same not-a-complete-verifier caveat as [`validate_terms`]
+/// applies: header/document table integrity, per-field totals, dead-set
+/// membership and cross-input ownership remain the caller's responsibility.
+pub fn validate_terms_fields<S: Source + ?Sized>(
+    areas: TermAreas<'_, S>,
+    field_count: u8,
+    window_bytes: usize,
+    max_term_bytes: usize,
+    mut checkpoint: impl FnMut() -> Result<()>,
+    mut document: impl FnMut(Tid, u8, u32) -> Result<u32>,
+) -> Result<()> {
+    checkpoint()?;
+    let mut dictionary = DictionaryCursor::new(
+        areas.dictionary,
+        0,
+        areas.dictionary.len(),
+        Format::Lsg4,
+        window_bytes,
+        max_term_bytes,
+    )?;
+    let mut postings_end = 0;
+    let mut payload_end = 0;
+    let checkpoint = std::cell::RefCell::new(&mut checkpoint);
+    while dictionary
+        .next_with(
+            || (checkpoint.borrow_mut())(),
+            |_, entry| {
+                check_extent(entry.postings, areas.postings.len(), &mut postings_end)?;
+                check_extent(entry.payload, areas.payload.len(), &mut payload_end)?;
+                let mut postings = PostingsCursor::new_fields(
+                    areas.postings,
+                    entry.postings.offset,
+                    u64::from(entry.postings.len),
+                    field_count,
+                    window_bytes,
+                )?;
+                let mut payload = PayloadCursor::new_fields_with_checkpoint(
+                    areas.payload,
+                    entry.payload.offset,
+                    u64::from(entry.payload.len),
+                    field_count,
+                    window_bytes,
+                    || (checkpoint.borrow_mut())(),
+                )?;
+                if entry.df == 0 || postings.count() != entry.df || payload.count() != entry.df {
+                    return Err(Error::Corrupt("term document frequency"));
+                }
+                let mut minima = super::FieldMinima::new(field_count);
+                let mut max_bucket = 0;
+                let mut ordinal = 0u32;
+                while let Some(posting) =
+                    postings.next_fields_with(|| (checkpoint.borrow_mut())())?
+                {
+                    let hits = payload
+                        .next_fields_with(|_, _| (checkpoint.borrow_mut())())?
+                        .ok_or(Error::Corrupt("missing posting payload"))?;
+                    for field in 0..u32::from(field_count) {
+                        if hits.field_mask & (1 << field) == 0 {
+                            continue;
+                        }
+                        let positions = hits.positions[field as usize];
+                        let length = document(posting.tid, field as u8, positions)?;
+                        if positions > length || length == u32::MAX {
+                            return Err(Error::Corrupt("term frequency exceeds field length"));
+                        }
+                        max_bucket = max_bucket.max(hits.buckets[field as usize]);
+                        minima.record(field as u8, hits.buckets[field as usize], length);
+                    }
+                    ordinal += 1;
+                    let boundary = ordinal.is_multiple_of(BLOCK_POSTINGS) || ordinal == entry.df;
+                    if boundary {
+                        let found = posting
+                            .completed_bound
+                            .ok_or(Error::Corrupt("missing score bound"))?;
+                        if !minima.agrees_with(&found) || found.last != posting.tid {
+                            return Err(Error::Corrupt("score bound disagrees with documents"));
+                        }
+                        minima = super::FieldMinima::new(field_count);
+                    } else if posting.completed_bound.is_some() {
+                        return Err(Error::Corrupt("unexpected score bound"));
+                    }
+                }
+                if payload
+                    .next_fields_with(|_, _| (checkpoint.borrow_mut())())?
                     .is_some()
                     || max_bucket != entry.max_tf_bucket
                 {
@@ -374,6 +485,110 @@ mod tests {
         .unwrap();
         f.0 = d.finish();
         assert!(validate_terms(areas(&f, Format::Lsg3), 3, 64, || Ok(()), |_, _| Ok(20)).is_err());
+    }
+
+    #[test]
+    fn validates_lsg4_terms_against_field_lengths_and_bounds() {
+        use crate::segment::{Segment, SegmentBuilder};
+        use std::collections::BTreeMap;
+
+        let field_count = 3u8;
+        let mut builder = SegmentBuilder::with_field_count(field_count);
+        let mut rows: BTreeMap<Tid, [u32; 3]> = BTreeMap::new();
+        for i in 0..300u32 {
+            let tid = Tid::new(i / 5, (i % 5 + 1) as u16).unwrap();
+            let mut tokens = Vec::new();
+            let mut row = [0u32; 3];
+            for field in 0..field_count {
+                for k in 0..=(i % 4) + u32::from(field) {
+                    tokens.push((field, "common", k));
+                    row[usize::from(field)] += 1;
+                }
+                if field == 0 && i.is_multiple_of(2) {
+                    tokens.push((field, "even", (i % 4) + 1));
+                    row[0] += 1;
+                }
+            }
+            builder
+                .add_document_fields(tid, field_count, tokens)
+                .unwrap();
+            rows.insert(tid, row);
+        }
+        let blob = builder.finish_fields();
+        let segment = Segment::parse(&blob).unwrap();
+        let sections = segment.sections();
+        let dictionary = &blob[sections.header..sections.header + sections.dictionary];
+        let postings_at = sections.header + sections.dictionary;
+        let postings = &blob[postings_at..postings_at + sections.postings];
+        let payload_at = postings_at + sections.postings;
+        let payload = &blob[payload_at..payload_at + sections.payload];
+        let areas = TermAreas {
+            dictionary,
+            postings,
+            payload,
+            format: Format::Lsg4,
+        };
+        let lookup = |tid: Tid, field: u8, positions: u32| -> Result<u32> {
+            let row = rows.get(&tid).ok_or(Error::InvalidTid)?;
+            let length = row[usize::from(field)];
+            assert!(positions <= length);
+            Ok(length)
+        };
+        validate_terms_fields(areas, field_count, 7, 64, || Ok(()), lookup).unwrap();
+        // A field length that disagrees with a stored bound is rejected, as
+        // is an unknown document and an unknown field.
+        let lying = |tid: Tid, field: u8, positions: u32| -> Result<u32> {
+            let mut length = lookup(tid, field, positions)?;
+            if field == 1 {
+                length += 1;
+            }
+            Ok(length)
+        };
+        assert!(validate_terms_fields(areas, field_count, 7, 64, || Ok(()), lying).is_err());
+        // Constant lengths of 9 satisfy every bound the writer stored only
+        // if they are true minima; they are not, so this must fail.
+        assert!(
+            validate_terms_fields(
+                areas,
+                field_count,
+                7,
+                64,
+                || Ok(()),
+                |tid, field, positions| {
+                    let row = rows.get(&tid).ok_or(Error::InvalidTid)?;
+                    assert!(positions <= row[usize::from(field)]);
+                    Ok(9)
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_terms_fields(
+                areas,
+                field_count,
+                7,
+                64,
+                || Ok(()),
+                |_, _, _| { Err(Error::InvalidTid) }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_terms_fields(
+                areas,
+                field_count,
+                7,
+                64,
+                || Ok(()),
+                |tid, field, _| {
+                    let row = rows.get(&tid).ok_or(Error::InvalidTid)?;
+                    row.get(usize::from(field))
+                        .copied()
+                        .ok_or(Error::Corrupt("field"))
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]

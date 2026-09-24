@@ -1,0 +1,545 @@
+{
+  "schema": "stannum.lsg4-golden/1",
+  "case": "skip_table",
+  "kind": "valid",
+  "generator": {"git": "db68b07+", "tool": "SegmentBuilder::add_document_fields + finish_fields"},
+  "format": "LSG4",
+  "layout_revision": 1,
+  "fields": [
+    {"name": "title", "weight": 1},
+    {"name": "body", "weight": 1}
+  ],
+  "documents": [
+    {"tid": [0, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [1, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [2, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [3, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [4, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [5, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [6, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [7, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [8, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [9, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [10, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [11, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [12, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [13, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [14, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [15, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [16, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [17, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [18, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [19, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [20, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [21, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [22, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [23, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [24, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [25, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [26, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [27, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [28, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [29, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [30, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [31, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [32, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [33, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [34, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [35, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [36, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [37, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [38, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]},
+    {"tid": [39, 1], "tokens": [
+        {"field": 0, "term": "skipme", "position": 0},
+        {"field": 1, "term": "skipme", "position": 0},
+        {"field": 0, "term": "skipme", "position": 1},
+        {"field": 1, "term": "skipme", "position": 1},
+        {"field": 0, "term": "skipme", "position": 2},
+        {"field": 1, "term": "skipme", "position": 2}
+    ]}
+  ],
+  "expected": {
+    "doc_count": 40,
+    "total_length": 240,
+    "field_total": [120, 120],
+    "documents": [
+        {"tid": [0, 1], "lengths": [3, 3]},
+        {"tid": [1, 1], "lengths": [3, 3]},
+        {"tid": [2, 1], "lengths": [3, 3]},
+        {"tid": [3, 1], "lengths": [3, 3]},
+        {"tid": [4, 1], "lengths": [3, 3]},
+        {"tid": [5, 1], "lengths": [3, 3]},
+        {"tid": [6, 1], "lengths": [3, 3]},
+        {"tid": [7, 1], "lengths": [3, 3]},
+        {"tid": [8, 1], "lengths": [3, 3]},
+        {"tid": [9, 1], "lengths": [3, 3]},
+        {"tid": [10, 1], "lengths": [3, 3]},
+        {"tid": [11, 1], "lengths": [3, 3]},
+        {"tid": [12, 1], "lengths": [3, 3]},
+        {"tid": [13, 1], "lengths": [3, 3]},
+        {"tid": [14, 1], "lengths": [3, 3]},
+        {"tid": [15, 1], "lengths": [3, 3]},
+        {"tid": [16, 1], "lengths": [3, 3]},
+        {"tid": [17, 1], "lengths": [3, 3]},
+        {"tid": [18, 1], "lengths": [3, 3]},
+        {"tid": [19, 1], "lengths": [3, 3]},
+        {"tid": [20, 1], "lengths": [3, 3]},
+        {"tid": [21, 1], "lengths": [3, 3]},
+        {"tid": [22, 1], "lengths": [3, 3]},
+        {"tid": [23, 1], "lengths": [3, 3]},
+        {"tid": [24, 1], "lengths": [3, 3]},
+        {"tid": [25, 1], "lengths": [3, 3]},
+        {"tid": [26, 1], "lengths": [3, 3]},
+        {"tid": [27, 1], "lengths": [3, 3]},
+        {"tid": [28, 1], "lengths": [3, 3]},
+        {"tid": [29, 1], "lengths": [3, 3]},
+        {"tid": [30, 1], "lengths": [3, 3]},
+        {"tid": [31, 1], "lengths": [3, 3]},
+        {"tid": [32, 1], "lengths": [3, 3]},
+        {"tid": [33, 1], "lengths": [3, 3]},
+        {"tid": [34, 1], "lengths": [3, 3]},
+        {"tid": [35, 1], "lengths": [3, 3]},
+        {"tid": [36, 1], "lengths": [3, 3]},
+        {"tid": [37, 1], "lengths": [3, 3]},
+        {"tid": [38, 1], "lengths": [3, 3]},
+        {"tid": [39, 1], "lengths": [3, 3]}
+    ],
+    "terms": [
+      {"term": "skipme", "df": 40, "max_tf_bucket": 2, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [1, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [2, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [3, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [4, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [5, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [6, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [7, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [8, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [9, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [10, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [11, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [12, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [13, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [14, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [15, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [16, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [17, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [18, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [19, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [20, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [21, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [22, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [23, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [24, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [25, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [26, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [27, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [28, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [29, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [30, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [31, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [32, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [33, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [34, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [35, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [36, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [37, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [38, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]},
+          {"tid": [39, 1], "fields": [
+              {"field": 0, "bucket": 2, "positions": [0, 1, 2]},
+              {"field": 1, "bucket": 2, "positions": [0, 1, 2]}
+          ]}
+      ]}
+    ]
+  }
+}

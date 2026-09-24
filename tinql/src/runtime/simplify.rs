@@ -146,6 +146,10 @@ fn reduce_unscored_redundancy(query: Query) -> Query {
                 .map(reduce_unscored_redundancy)
                 .collect(),
         },
+        Query::Field { name, inner } => Query::Field {
+            name,
+            inner: Box::new(reduce_unscored_redundancy(*inner)),
+        },
         other => other,
     }
 }
@@ -298,7 +302,8 @@ fn implies(lhs: &Query, rhs: &Query) -> bool {
         | Query::Regex(_)
         | Query::Range { .. }
         | Query::Fuzzy { .. }
-        | Query::AtLeast { .. } => {}
+        | Query::AtLeast { .. }
+        | Query::Field { .. } => {}
     }
 
     match lhs {
@@ -307,6 +312,7 @@ fn implies(lhs: &Query, rhs: &Query) -> bool {
         Query::Or(left, right) => implies(left, rhs) && implies(right, rhs),
         Query::Disjunction { children, .. } => children.iter().all(|child| implies(child, rhs)),
         Query::Boost { inner, .. } => implies(inner, rhs),
+        Query::Field { inner, .. } => implies(inner, rhs),
         _ => false,
     }
 }
@@ -346,6 +352,7 @@ fn query_implies_term(query: &Query, rhs_term: &str) -> bool {
                 && span_expr_references_term(span_expr, term_slots, rhs_term)
         }
         Query::Boost { inner, .. } => query_implies_term(inner, rhs_term),
+        Query::Field { inner, .. } => query_implies_term(inner, rhs_term),
         Query::MatchAll
         | Query::Not(_)
         | Query::Regex(_)
@@ -566,6 +573,10 @@ fn normalize_boolean_query(query: Query, profile: SimplificationProfile) -> Quer
                 .into_iter()
                 .map(|child| normalize_boolean_query(child, profile))
                 .collect(),
+        },
+        Query::Field { name, inner } => Query::Field {
+            name,
+            inner: Box::new(normalize_boolean_query(*inner, profile)),
         },
         other => other,
     }

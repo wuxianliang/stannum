@@ -47,6 +47,7 @@ use crate::am::amhandler;
 use crate::options::SPEC_BYTES;
 #[allow(unused_imports)]
 use crate::selectivity::stannum_text_restrict;
+use crate::storage::layout::FieldMeta;
 use pgrx::{
     FromDatum, Internal, IntoDatum, PgList, PostgresType, extension_sql, pg_extern, pg_guard,
     pg_sys,
@@ -119,10 +120,15 @@ fn parsed_query(
 fn evaluate_with(
     document: &str,
     query: &str,
+    fields: Option<&FieldMeta>,
     spec: [u8; SPEC_BYTES],
     tokenizer: &CompiledTokenizerPipeline,
 ) -> Result<bool, String> {
     let query = parsed_query(spec, tokenizer, query)?;
+    // Field names resolve against the index the clause is bound to; the
+    // operator without an index has none, so field syntax fails closed here
+    // (RFC §5.11).
+    crate::score::check_query_fields(&query, fields);
     let document = tokenize_doc(document, tokenizer);
     evaluate(&query, &document)
         .map(|result| result.matched)
@@ -137,6 +143,7 @@ fn evaluate_text(document: &str, query_text: &str) -> Result<bool, String> {
     evaluate_with(
         document,
         query_text,
+        None,
         default_spec(),
         tokenizer::presets::default_pipeline(),
     )
@@ -159,7 +166,8 @@ pub fn stannum_text_cmpfunc_indexed(document: &str, query: indexed_query) -> boo
     let spec = unsafe { crate::storage::spec_by_oid(pg_sys::Oid::from(query.index)) };
     let tokenizer =
         crate::storage::tokenizer_for(&spec, crate::storage::dictionary_fingerprint(&spec));
-    evaluate_with(document, &query.query, spec, &tokenizer)
+    let fields = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    evaluate_with(document, &query.query, fields.as_ref(), spec, &tokenizer)
         .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}"))
 }
 
@@ -541,7 +549,8 @@ pub(crate) unsafe fn bind_to_index(
         }
         crate::score::matching_stannum_indexes((*rte).relid, varno, document)
             .into_iter()
-            .find(|&index_oid| predicate_holds(root, varno, index_oid))
+            .find(|(index_oid, _)| predicate_holds(root, varno, *index_oid))
+            .map(|(index_oid, _)| index_oid)
     }
 }
 
@@ -610,6 +619,10 @@ fn stannum_text_cmpfunc_support(request: Internal) -> Internal {
         let Some(index) = bind_to_index(request.root, document) else {
             return unhandled();
         };
+        // The clause answers one column, so a field group must name it. The
+        // binding is where both the column and the query text are known, so
+        // the rejection cannot depend on the chosen plan (RFC §5.11).
+        check_clause_field_scope(document, query, index);
         let Some(operand) = bound_operand(query, index) else {
             return unhandled();
         };
@@ -634,6 +647,135 @@ fn stannum_text_cmpfunc_support(request: Internal) -> Internal {
         (*expr).opfuncid = opfuncid;
         (*expr).location = (*request.fcall).location;
         Internal::from(Some(pg_sys::Datum::from(expr as usize)))
+    }
+}
+
+/// The field names a query text scopes, in the order they appear.
+///
+/// Parsed as the surface AST: the names are a syntactic property of the text,
+/// so this needs neither the index's tokenizer nor its dictionary.
+fn field_scope_names(text: &str) -> Vec<String> {
+    fn walk(expr: &tinql::Expr, out: &mut Vec<String>) {
+        match expr {
+            tinql::Expr::Field { name, inner } => {
+                out.push(name.clone());
+                walk(inner, out);
+            }
+            tinql::Expr::And(a, b)
+            | tinql::Expr::Or(a, b)
+            | tinql::Expr::Then {
+                left: a, right: b, ..
+            }
+            | tinql::Expr::Near {
+                left: a, right: b, ..
+            } => {
+                walk(a, out);
+                walk(b, out);
+            }
+            tinql::Expr::AndNot { positive, negative } => {
+                walk(positive, out);
+                walk(negative, out);
+            }
+            tinql::Expr::Encloses { big, little }
+            | tinql::Expr::NotEncloses { big, little }
+            | tinql::Expr::EnclosedBy { little, big }
+            | tinql::Expr::NotEnclosedBy { little, big }
+            | tinql::Expr::Overlapping { a: big, b: little }
+            | tinql::Expr::NotOverlapping { a: big, b: little }
+            | tinql::Expr::Before { a: big, b: little }
+            | tinql::Expr::After { a: big, b: little } => {
+                walk(big, out);
+                walk(little, out);
+            }
+            tinql::Expr::First { inner, .. }
+            | tinql::Expr::Last { inner, .. }
+            | tinql::Expr::Middle { inner, .. }
+            | tinql::Expr::Between { inner, .. }
+            | tinql::Expr::Within { inner, .. }
+            | tinql::Expr::Boost { inner, .. } => walk(inner, out),
+            tinql::Expr::Alternatives(items) | tinql::Expr::AtLeast { exprs: items, .. } => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            tinql::Expr::Phrase { elements, .. } => {
+                for element in elements {
+                    if let tinql::PhraseElement::Alternatives(items) = element {
+                        for item in items {
+                            walk(item, out);
+                        }
+                    }
+                }
+            }
+            tinql::Expr::Term(_)
+            | tinql::Expr::MatchAll
+            | tinql::Expr::MatchNone
+            | tinql::Expr::Fuzzy { .. }
+            | tinql::Expr::Wildcard(_)
+            | tinql::Expr::Regex(_)
+            | tinql::Expr::Range { .. } => {}
+        }
+    }
+    let Ok(expr) = tinql::parse(text, tinql::ImplicitOp::And) else {
+        // A malformed text fails when it is parsed for execution.
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    walk(&expr, &mut names);
+    names
+}
+
+/// Errors when a `==>` clause's query scopes a field other than the column
+/// the clause answers: the operator has one left operand, and
+/// `stannum.search()` is the all-fields form (RFC §5.11).
+unsafe fn check_clause_field_scope(
+    document: *mut pg_sys::Node,
+    query: *mut pg_sys::Node,
+    index: pg_sys::Oid,
+) {
+    unsafe {
+        let Some(text) = crate::customscan::const_text(query) else {
+            // A parameter's text is not known here; the scan and the operator
+            // check it when it resolves.
+            return;
+        };
+        let names = field_scope_names(&text);
+        if names.is_empty() {
+            return;
+        }
+        let relation = pgrx::PgRelation::with_lock(index, pg_sys::AccessShareLock as _);
+        let fields = crate::storage::fields_meta(relation.as_ptr());
+        let Some(fields) = fields else {
+            pgrx::error!("stannum: field syntax requires a multi-column index");
+        };
+        for name in &names {
+            if !fields.names.iter().any(|field| field == name) {
+                pgrx::error!("stannum: unknown field '{name}'");
+            }
+        }
+        let document = pg_sys::strip_implicit_coercions(document);
+        let attnum = if !document.is_null() && (*document).type_ == pg_sys::NodeTag::T_Var {
+            (*document.cast::<pg_sys::Var>()).varattno
+        } else {
+            0
+        };
+        let Some(metadata) = (*relation.as_ptr()).rd_index.as_ref() else {
+            return;
+        };
+        let keys = std::slice::from_raw_parts(
+            metadata.indkey.values.as_ptr(),
+            metadata.indnkeyatts as usize,
+        );
+        let ordinal = keys.iter().position(|key| *key == attnum);
+        let column = ordinal.and_then(|field| fields.names.get(field));
+        for name in &names {
+            if column != Some(name) {
+                let column = column.map_or("", String::as_str);
+                pgrx::error!(
+                    "stannum: this ==> clause answers '{column}'; use stannum.search() for '{name}'"
+                );
+            }
+        }
     }
 }
 

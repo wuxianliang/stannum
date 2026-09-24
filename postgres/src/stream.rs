@@ -11,7 +11,7 @@
 use segment::{Tid, pages, set};
 use tinql::runtime::{
     Query,
-    plan::{Limits, page_plan, plan, prefers_pages},
+    plan::{Limits, page_plan_scoped, plan_scoped, prefers_pages},
 };
 
 use crate::storage::{View, codec_in};
@@ -60,6 +60,8 @@ impl CandidateStream {
         // This is the same owning-reader pattern used by IndexScorer.
         let view = unsafe { std::mem::transmute::<&View, &'static View>(&self.view) };
         let limits = Limits::default();
+        // Field names resolve against the view's plan; a fieldless index has none.
+        let fields = crate::storage::field_scope(view.fields.as_ref());
         self.page_masks = view.sources.iter().any(|(source, _)| {
             prefers_pages(&self.query, source)
                 .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"))
@@ -68,7 +70,7 @@ impl CandidateStream {
             let mut inputs: Vec<Box<dyn pages::Cursor>> = Vec::new();
             for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
                 pgrx::check_for_interrupts!();
-                let planned = page_plan(&self.query, source, &limits)
+                let planned = page_plan_scoped(&self.query, source, &limits, fields)
                     .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
                 self.recheck |= !planned.exact;
                 let mut cursor = planned.cursor;
@@ -86,7 +88,7 @@ impl CandidateStream {
             let mut inputs: Vec<Box<dyn set::Cursor>> = Vec::new();
             for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
                 pgrx::check_for_interrupts!();
-                let planned = plan(&self.query, source, &limits)
+                let planned = plan_scoped(&self.query, source, &limits, fields)
                     .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
                 self.recheck |= !planned.exact;
                 let mut cursor = planned.cursor;

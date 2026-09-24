@@ -33,7 +33,7 @@
 use std::fmt;
 
 use crate::forward::ForwardRecord;
-use crate::postings::{BLOCK_POSTINGS, BlockBound, Postings};
+use crate::postings::{BLOCK_POSTINGS, BlockBound, FieldBlockBound, Postings};
 use crate::segment::{Format, Segment};
 use crate::set::{Cursor, collect};
 use crate::tf_bucket::TfBucket;
@@ -213,6 +213,8 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
     let format = segment.format();
     report.format = Some(format);
     report.legacy = segment.is_legacy();
+    let fields = format.has_fields();
+    let field_count = if fields { segment.field_count() } else { 1 };
     if report.legacy {
         findings.warning(
             "header",
@@ -240,25 +242,39 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
         );
     }
     let lengths = segment.lengths();
+    // Per document: its unweighted token total, and on `LSG4` its full
+    // per-field length row (the field bounds and per-field position counts
+    // are checked against the row, not the total).
     let mut length_of = Vec::with_capacity(documents.len());
+    let mut field_length_of = Vec::with_capacity(documents.len());
     let mut total = 0u64;
+    let mut field_total = vec![0u64; usize::from(field_count)];
     for (ordinal, tid) in documents.iter().enumerate() {
-        match lengths.get(ordinal as u32) {
-            Ok(length) => {
-                if length == 0 {
-                    findings.error(
-                        format!("document {}", describe(*tid)),
-                        "length is zero; the builder never records empty documents",
-                    );
+        let mut row = Vec::with_capacity(usize::from(field_count));
+        let mut row_ok = true;
+        for field in 0..field_count {
+            match lengths.field_get(ordinal as u32, field) {
+                Ok(length) => {
+                    field_total[usize::from(field)] += u64::from(length);
+                    row.push(length);
                 }
-                total += u64::from(length);
-                length_of.push(length);
-            }
-            Err(error) => {
-                findings.error(format!("document {}", describe(*tid)), error);
-                length_of.push(0);
+                Err(error) => {
+                    findings.error(format!("document {}", describe(*tid)), error);
+                    row.push(0);
+                    row_ok = false;
+                }
             }
         }
+        let row_total: u32 = row.iter().sum();
+        if row_ok && row_total == 0 {
+            findings.error(
+                format!("document {}", describe(*tid)),
+                "length is zero; the builder never records empty documents",
+            );
+        }
+        total += u64::from(row_total);
+        length_of.push(row_total);
+        field_length_of.push(row);
     }
     if table_ok && total != segment.total_length() {
         findings.error(
@@ -269,10 +285,25 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
             ),
         );
     }
+    if fields {
+        for (field, summed) in field_total.iter().enumerate() {
+            match segment.field_total(field as u8) {
+                Ok(recorded) if recorded == *summed => {}
+                Ok(recorded) => findings.error(
+                    "header",
+                    format!(
+                        "field_total {field} is {recorded} but the document rows sum to {summed}"
+                    ),
+                ),
+                Err(error) => findings.error("header", error),
+            }
+        }
+    }
 
-    // Positions counted per document across every term, to compare with
-    // the length table once the dictionary has been walked completely.
-    let mut positions_of = vec![0u64; documents.len()];
+    // Positions counted per document across every term — per field on
+    // `LSG4` — to compare with the length rows once the dictionary has been
+    // walked completely.
+    let mut positions_of = vec![vec![0u64; usize::from(field_count)]; documents.len()];
     let mut complete = table_ok;
 
     let dictionary = match segment.dictionary() {
@@ -292,6 +323,7 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
     let mut tids = Vec::new();
     let mut ordinals = Vec::new();
     let mut scores: Vec<(u8, u32)> = Vec::new();
+    let mut field_scores: Vec<Vec<(u8, u8, u32)>> = Vec::new();
     let mut expected = Vec::new();
     let mut bounds = Vec::new();
     let blocks = dictionary.map_or(0, |d| d.index().blocks());
@@ -482,12 +514,45 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
             }
             let mut cursor = payload.cursor();
             scores.clear();
-            scores.reserve(tids.len());
+            field_scores.clear();
             let mut max_bucket = 0u8;
             let mut payload_ok = true;
             for (index, tid) in tids.iter().enumerate() {
                 if index as u32 >= payload.count() {
                     break;
+                }
+                if fields {
+                    // LSG4 entry: per-field groups, validated in full by the
+                    // decoder (hit count, ascending in-range field ids,
+                    // per-field increasing positions, bucket quantization).
+                    let field_entry = match cursor.next_fields() {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            findings.error(
+                                location(),
+                                format!("payload entry {index} for {}: {error}", describe(*tid)),
+                            );
+                            payload_ok = false;
+                            break;
+                        }
+                    };
+                    let mut posting_scores = Vec::with_capacity(field_entry.fields.len());
+                    for hit in &field_entry.fields {
+                        max_bucket = max_bucket.max(hit.tf_bucket);
+                        if let Some(ordinal) = ordinals[index] {
+                            positions_of[ordinal][usize::from(hit.field)] +=
+                                hit.positions.len() as u64;
+                            posting_scores.push((
+                                hit.field,
+                                hit.tf_bucket,
+                                field_length_of[ordinal][usize::from(hit.field)],
+                            ));
+                        }
+                    }
+                    if ordinals[index].is_some() {
+                        field_scores.push(posting_scores);
+                    }
+                    continue;
                 }
                 let (bucket, position_count) = match cursor.next_count() {
                     Ok(counted) => counted,
@@ -513,7 +578,7 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
                 }
                 max_bucket = max_bucket.max(bucket);
                 if let Some(ordinal) = ordinals[index] {
-                    positions_of[ordinal] += position_count as u64;
+                    positions_of[ordinal][0] += position_count as u64;
                     scores.push((bucket, length_of[ordinal]));
                 }
             }
@@ -533,6 +598,66 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
 
             // Score bounds: what the postings and lengths imply, in the
             // layout the segment's format writes.
+            if fields {
+                let mut field_bounds = Vec::new();
+                match posting_cursor.field_block_bounds_into(&mut field_bounds) {
+                    Ok(()) => (),
+                    Err(error) => {
+                        findings.error(location(), format!("field block bounds: {error}"));
+                        continue;
+                    }
+                };
+                if field_bounds.is_empty() {
+                    if !tids.is_empty() {
+                        findings.error(location(), "postings carry no block bounds");
+                    }
+                    continue;
+                }
+                if postings.count() <= BLOCK_POSTINGS && !postings.has_term_bound() {
+                    findings.warning(
+                        location(),
+                        "postings of one block carry a block table where LSG4 writes a term bound",
+                    );
+                }
+                if unknown > 0 || field_scores.len() != tids.len() {
+                    // Lengths are unknown for postings outside the table; the
+                    // finding above already covers this term.
+                    continue;
+                }
+                let expected: Vec<FieldBlockBound> = tids
+                    .chunks(BLOCK_POSTINGS as usize)
+                    .zip(field_scores.chunks(BLOCK_POSTINGS as usize))
+                    .map(|(block, scores)| {
+                        let flattened: Vec<_> =
+                            scores.iter().flat_map(|v| v.iter().copied()).collect();
+                        FieldBlockBound::over(&flattened, block[block.len() - 1], field_count)
+                    })
+                    .collect();
+                if field_bounds.len() != expected.len() {
+                    findings.error(
+                        location(),
+                        format!(
+                            "{} block bounds for {} blocks of postings",
+                            field_bounds.len(),
+                            expected.len()
+                        ),
+                    );
+                    continue;
+                }
+                for (index, (found, wanted)) in field_bounds.iter().zip(&expected).enumerate() {
+                    if found != wanted {
+                        findings.error(
+                            location(),
+                            format!(
+                                "field block bound {index} (last {}) disagrees with its postings (last {})",
+                                describe(found.last),
+                                describe(wanted.last)
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
             match posting_cursor.block_bounds_into(&mut bounds) {
                 Ok(()) => (),
                 Err(error) => {
@@ -560,7 +685,7 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
                         );
                     }
                 }
-                Format::Lsg3 => {
+                Format::Lsg3 | Format::Lsg4 => {
                     if one_block && !postings.has_term_bound() {
                         findings.warning(
                             location(),
@@ -608,14 +733,16 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
 
     if complete {
         for (ordinal, tid) in documents.iter().enumerate() {
-            if positions_of[ordinal] != u64::from(length_of[ordinal]) {
-                findings.error(
-                    format!("document {}", describe(*tid)),
-                    format!(
-                        "length is {} but its terms hold {} positions",
-                        length_of[ordinal], positions_of[ordinal]
-                    ),
-                );
+            for (field, counted) in positions_of[ordinal].iter().enumerate() {
+                if *counted != u64::from(field_length_of[ordinal][field]) {
+                    findings.error(
+                        format!("document {}", describe(*tid)),
+                        format!(
+                            "field {field} length is {} but its terms hold {counted} positions",
+                            field_length_of[ordinal][field]
+                        ),
+                    );
+                }
             }
         }
     }
@@ -722,6 +849,54 @@ pub fn verify_forward_stream(bytes: &[u8]) -> ForwardReport {
     report
 }
 
+/// Checks a field-coded forward stream (an `LSG4` write buffer's contents):
+/// the legacy checks plus `doc_len == Σ field_lengths` for every record.
+pub fn verify_forward_stream_fields(bytes: &[u8], field_count: u8) -> ForwardReport {
+    let mut report = ForwardReport::default();
+    let mut findings = Findings::default();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        match ForwardRecord::decode_fields(&bytes[at..], field_count) {
+            Ok((record, consumed)) => {
+                let counted: u32 = record.field_lengths.iter().sum();
+                if counted != record.doc_len {
+                    findings.error(
+                        format!("record {} at byte {at}", report.records),
+                        format!(
+                            "document {} has length {} but its fields sum to {counted}",
+                            describe(record.tid),
+                            record.doc_len
+                        ),
+                    );
+                }
+                report.tids.push(record.tid);
+                report.records += 1;
+                at += consumed;
+            }
+            Err(error) => {
+                let what = match error {
+                    Error::Truncated => "record runs past the end of the buffer".to_owned(),
+                    other => other.to_string(),
+                };
+                findings.error(format!("record {} at byte {at}", report.records), what);
+                break;
+            }
+        }
+    }
+    let mut sorted = report.tids.clone();
+    sorted.sort_unstable();
+    for pair in sorted.windows(2) {
+        if pair[0] == pair[1] {
+            findings.error(
+                "write buffer",
+                format!("document {} is recorded twice", describe(pair[0])),
+            );
+        }
+    }
+    report.findings = findings.finish();
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -769,6 +944,137 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A field-aware sample: shared terms across fields (positions restarting
+    /// at 0 per field), a term with more than one bound block, a term with a
+    /// skip table, and per-field lengths that differ.
+    fn sample_fields(field_count: u8) -> Vec<u8> {
+        let mut builder = crate::segment::SegmentBuilder::default();
+        for i in 0..300u32 {
+            let tid = tid(i / 3, (i % 3 + 1) as u16);
+            let mut tokens = Vec::new();
+            for field in 0..field_count {
+                // "common" in every field of every document, with term
+                // frequencies spanning buckets; positions restart at 0 per
+                // field and climb within it.
+                let mut position = 0u32;
+                for _ in 0..=(i % 4) + u32::from(field) {
+                    tokens.push((field, "common", position));
+                    position += 1;
+                }
+                if field == 0 && i.is_multiple_of(2) {
+                    tokens.push((field, "even", position));
+                    position += 1;
+                }
+                if field == 1 && i.is_multiple_of(3) {
+                    tokens.push((field, "third", position));
+                    position += 1;
+                }
+                if field == field_count - 1 {
+                    tokens.push((field, "last-only", position));
+                }
+            }
+            builder
+                .add_document_fields(tid, field_count, tokens)
+                .unwrap();
+        }
+        builder.finish_fields()
+    }
+
+    #[test]
+    fn a_valid_lsg4_segment_is_clean_with_field_checks() {
+        for field_count in [2u8, 3, 16] {
+            let bytes = sample_fields(field_count);
+            assert_eq!(&bytes[..4], b"LSG4");
+            let report = verify_segment(&bytes);
+            assert!(report.is_clean(), "{}", messages(&report.findings));
+            assert_eq!(report.format, Some(Format::Lsg4));
+            assert_eq!(report.documents.len(), 300);
+            let segment = Segment::parse(&bytes).unwrap();
+            assert_eq!(segment.field_count(), field_count);
+            for field in 0..field_count {
+                assert!(segment.field_total(field).unwrap() > 0);
+            }
+            // A term hitting every field of every document carries a bounds
+            // table (300 postings > BLOCK_POSTINGS) and round-trips.
+            let common = segment.term("common").unwrap().unwrap();
+            assert_eq!(common.df(), 300);
+            let bounds = common.cursor().unwrap().field_block_bounds().unwrap();
+            assert_eq!(bounds.len(), 3);
+            assert_eq!(bounds[0].field_count, field_count);
+            assert_eq!(bounds[0].present_fields, ((1u32 << field_count) - 1) as u16);
+            // The records rebuild byte-identically through the forward path.
+            let records = segment.records(|_| false).unwrap();
+            let mut stream = Vec::new();
+            for record in &records {
+                record.encode(&mut stream).unwrap();
+            }
+            let forward = verify_forward_stream_fields(&stream, field_count);
+            assert!(
+                forward.findings.is_empty(),
+                "{}",
+                messages(&forward.findings)
+            );
+            let mut rebuilt = crate::segment::SegmentBuilder::default();
+            for record in &records {
+                rebuilt.add_record(record).unwrap();
+            }
+            assert_eq!(rebuilt.finish_fields(), bytes);
+        }
+    }
+
+    #[test]
+    fn lsg4_field_corruptions_are_attributed_to_their_field() {
+        let bytes = sample_fields(2);
+        let segment = Segment::parse(&bytes).unwrap();
+        // Locate a field-1 length cell: document 0's row is two u32s at the
+        // blob's end region; patch field 1 of the first document.
+        let lengths_at = bytes.len() - 300 * 2 * 4;
+        let at = lengths_at + 4; // first document, field 1
+        let mut tampered = bytes.clone();
+        tampered[at..at + 4].copy_from_slice(&999u32.to_le_bytes());
+        let report = verify_segment(&tampered);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.location == "header" && f.message.contains("field_total 1")),
+            "{}",
+            messages(&report.findings)
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.message.contains("field 1 length")),
+            "{}",
+            messages(&report.findings)
+        );
+        // A tampered field bound: zero the field mask of the first table
+        // entry of "common". Its postings stream is form u8, count varint,
+        // bounds_len varint, then the table — walk the varints to the mask.
+        let common_entry = segment.term("common").unwrap().unwrap().entry;
+        let sections = segment.sections();
+        let postings_at =
+            sections.header + sections.dictionary + common_entry.postings.offset as usize;
+        let mut reader = crate::reader::Reader::new(&bytes[postings_at..]);
+        reader.u8().unwrap();
+        reader.varint().unwrap();
+        reader.varint().unwrap();
+        let mask_at = postings_at + reader.position();
+        assert_eq!(bytes[mask_at], 0b11);
+        let mut tampered = bytes.clone();
+        tampered[mask_at] = 0;
+        let report = verify_segment(&tampered);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.message.contains("field bound mask")),
+            "{}",
+            messages(&report.findings)
+        );
     }
 
     #[test]
@@ -1105,6 +1411,93 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        #[test]
+        fn valid_field_segments_never_yield_findings(
+            field_count in 1u8..=4,
+            docs in prop::collection::btree_map(
+                (0u32..64, 1u16..=40).prop_map(|(b, o)| Tid::new(b, o).unwrap()),
+                prop::collection::vec((0u8..12, 1u32..4, proptest::bool::ANY), 1..30),
+                0..60,
+            ),
+        ) {
+            let mut builder = crate::segment::SegmentBuilder::default();
+            for (tid, tokens) in &docs {
+                let mut per_field = vec![0u32; usize::from(field_count)];
+                let mut body = Vec::new();
+                for (term, gap, field) in tokens {
+                    let field = *field as u8 % field_count;
+                    per_field[usize::from(field)] += *gap;
+                    body.push((field, format!("t{term}"), per_field[usize::from(field)]));
+                }
+                builder
+                    .add_document_fields(
+                        *tid,
+                        field_count,
+                        body.iter().map(|(f, t, p)| (*f, t.as_str(), *p)),
+                    )
+                    .unwrap();
+            }
+            let bytes = builder.finish_auto();
+            if docs.is_empty() {
+                // A builder with no documents writes the legacy empty segment.
+                prop_assert_eq!(&bytes[..4], b"LSG3");
+                return Ok(());
+            }
+            prop_assert_eq!(&bytes[..4], b"LSG4");
+            let report = verify_segment(&bytes);
+            prop_assert!(report.is_clean(), "{}", messages(&report.findings));
+            // The forward records rebuild byte-identically.
+            let records = Segment::parse(&bytes).unwrap().records(|_| false).unwrap();
+            let mut stream = Vec::new();
+            for record in &records {
+                record.encode(&mut stream).unwrap();
+            }
+            let forward = verify_forward_stream_fields(&stream, field_count);
+            prop_assert!(forward.findings.is_empty(), "{}", messages(&forward.findings));
+            let mut rebuilt = crate::segment::SegmentBuilder::default();
+            for record in &records {
+                rebuilt.add_record(record).unwrap();
+            }
+            prop_assert_eq!(rebuilt.finish_auto(), bytes);
+        }
+
+        #[test]
+        fn mutated_field_segments_never_panic(
+            field_count in 1u8..=3,
+            docs in prop::collection::btree_map(
+                (0u32..16, 1u16..=8).prop_map(|(b, o)| Tid::new(b, o).unwrap()),
+                prop::collection::vec((0u8..6, 1u32..3), 1..12),
+                1..20,
+            ),
+            edits in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..6),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let mut builder = crate::segment::SegmentBuilder::default();
+            for (tid, tokens) in &docs {
+                let mut per_field = vec![0u32; usize::from(field_count)];
+                let mut body = Vec::new();
+                for (term, gap) in tokens {
+                    let field = *gap as u8 % field_count;
+                    per_field[usize::from(field)] += *gap;
+                    body.push((field, format!("t{term}"), per_field[usize::from(field)]));
+                }
+                builder
+                    .add_document_fields(
+                        *tid,
+                        field_count,
+                        body.iter().map(|(f, t, p)| (*f, t.as_str(), *p)),
+                    )
+                    .unwrap();
+            }
+            let mut bytes = builder.finish_auto();
+            for (at, value) in &edits {
+                let at = at.index(bytes.len());
+                bytes[at] = *value;
+            }
+            let _ = verify_segment(&bytes);
+            let _ = verify_segment(&bytes[..cut.index(bytes.len())]);
+        }
 
         #[test]
         fn ordered_membership_matches_independent_search(

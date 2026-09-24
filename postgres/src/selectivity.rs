@@ -133,7 +133,8 @@ pub unsafe fn clause_estimate(
             return None;
         }
         let candidates = crate::score::matching_stannum_indexes((*rte).relid, varno, left);
-        let index_oid = crate::score::pick_index(&candidates, crate::operator::bound_index(right))?;
+        let (index_oid, _) =
+            crate::score::pick_index(&candidates, crate::operator::bound_index(right))?;
         estimate_query(index_oid, &query)
     }
 }

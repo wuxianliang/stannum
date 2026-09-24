@@ -15,6 +15,13 @@
 //!           positions: first absolute, then (delta - 1)
 //! ```
 //!
+//! `LSG4` keeps the framing and widens each entry by a field dimension
+//! (RFC §5.4): `field_hit_count varint`, then that many groups in ascending
+//! field order, each `field_id << 4 | tf_bucket` packed into one byte
+//! followed by that field's positions. Positions are independent per field:
+//! two fields may both start at 0. `LSG4` payloads are parsed through
+//! [`Payload::parse_fields`], which carries the field count the entries are
+//! validated against.//!
 //! Skip slot `i` holds the byte offset (relative to `data`) of entry
 //! `(i + 1) * SKIP_INTERVAL`; entry 0 is at offset 0 and has no slot. Offsets
 //! are fixed-width so a seek jumps to its slot in constant time; a ranked
@@ -29,6 +36,7 @@
 
 use crate::reader::Reader;
 use crate::segment::Format;
+use crate::tf_bucket::TfBucket;
 use crate::{Error, Result, varint};
 
 pub const SKIP_INTERVAL: u32 = 32;
@@ -43,6 +51,47 @@ pub struct PayloadBuilder {
 }
 
 impl PayloadBuilder {
+    /// Adds one `LSG4` posting entry: `field_hit_count` groups in ascending
+    /// field order, each the packed `field_id << 4 | tf_bucket` byte followed
+    /// by that field's positions (RFC §5.4). Every rule of the decoder's
+    /// validation set is checked here, so writer output always revalidates.
+    pub fn push_fields(&mut self, groups: &[(u8, u8, &[u32])], field_count: u8) -> Result<()> {
+        if groups.is_empty()
+            || groups.len() > usize::from(field_count)
+            || field_count == 0
+            || field_count > 16
+        {
+            return Err(Error::Corrupt("payload field hit count"));
+        }
+        let mut previous = None;
+        let mut owned = Vec::with_capacity(groups.len());
+        for (field, bucket, positions) in groups {
+            if usize::from(*field) >= usize::from(field_count)
+                || previous.is_some_and(|p| p >= *field)
+            {
+                return Err(Error::Corrupt("payload field order"));
+            }
+            if *bucket > MAX_TF_BUCKET
+                || TfBucket::from_count(positions.len() as u32).value() != *bucket
+            {
+                return Err(Error::Corrupt("payload frequency bucket"));
+            }
+            validate_positions(positions)?;
+            previous = Some(*field);
+            owned.push((*field, *bucket, positions.to_vec()));
+        }
+        if self.count.is_multiple_of(SKIP_INTERVAL) {
+            self.skips.push(self.data.len());
+        }
+        self.count += 1;
+        varint::put(&mut self.data, owned.len() as u64);
+        for (field, bucket, positions) in &owned {
+            self.data.push((*field << 4) | bucket);
+            encode_positions(&mut self.data, positions);
+        }
+        Ok(())
+    }
+
     /// `positions` must be non-empty and strictly increasing.
     pub fn push(&mut self, tf_bucket: u8, positions: &[u32]) -> Result<()> {
         if tf_bucket > MAX_TF_BUCKET {
@@ -92,6 +141,11 @@ impl PayloadBuilder {
                 }
             }
             Format::Lsg3 => {
+                for skip in self.skips.iter().skip(1) {
+                    out.extend_from_slice(&fixed_skip(*skip).to_le_bytes());
+                }
+            }
+            Format::Lsg4 => {
                 for skip in self.skips.iter().skip(1) {
                     out.extend_from_slice(&fixed_skip(*skip).to_le_bytes());
                 }
@@ -163,6 +217,18 @@ pub struct Entry {
     pub positions: Vec<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldHit {
+    pub field: u8,
+    pub tf_bucket: u8,
+    pub positions: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldEntry {
+    pub fields: Vec<FieldHit>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Payload<'a> {
     bytes: &'a [u8],
@@ -172,6 +238,8 @@ pub struct Payload<'a> {
     /// Entries per skip; 64 with varint deltas in the `LSG1` layout.
     interval: u32,
     format: Format,
+    /// The segment header's field count; meaningful for `LSG4` only.
+    field_count: u8,
 }
 
 impl<'a> Payload<'a> {
@@ -185,11 +253,30 @@ impl<'a> Payload<'a> {
         Self::parse_format(bytes, Format::Lsg1)
     }
 
-    /// Parses the layout written by segments of `format`.
+    /// Parses the layout written by segments of `format`. `LSG4` payloads
+    /// hold field groups and need the header's field count; parse them with
+    /// [`Payload::parse_fields`].
     pub fn parse_format(bytes: &'a [u8], format: Format) -> Result<Self> {
+        if format == Format::Lsg4 {
+            return Err(Error::Corrupt("payload format"));
+        }
+        Self::parse_inner(bytes, format, 1)
+    }
+
+    /// Parses an `LSG4` payload whose segment header declares `field_count`
+    /// fields; entries are decoded and validated field-aware through
+    /// [`PayloadCursor::next_fields`] and [`PayloadCursor::skip_fields`].
+    pub fn parse_fields(bytes: &'a [u8], field_count: u8) -> Result<Self> {
+        if field_count == 0 || field_count > 16 {
+            return Err(Error::Corrupt("segment field count"));
+        }
+        Self::parse_inner(bytes, Format::Lsg4, field_count)
+    }
+
+    fn parse_inner(bytes: &'a [u8], format: Format, field_count: u8) -> Result<Self> {
         let interval = match format {
             Format::Lsg1 => LEGACY_SKIP_INTERVAL,
-            Format::Lsg2 | Format::Lsg3 => SKIP_INTERVAL,
+            Format::Lsg2 | Format::Lsg3 | Format::Lsg4 => SKIP_INTERVAL,
         };
         let mut reader = Reader::new(bytes);
         let count = reader.varint_u32()?;
@@ -202,7 +289,7 @@ impl<'a> Payload<'a> {
                 }
                 skip_count
             }
-            Format::Lsg3 => slots.saturating_sub(1),
+            Format::Lsg3 | Format::Lsg4 => slots.saturating_sub(1),
         };
         let skips_at = reader.position();
         match format {
@@ -211,7 +298,7 @@ impl<'a> Payload<'a> {
                     reader.varint()?;
                 }
             }
-            Format::Lsg2 | Format::Lsg3 => reader.skip(slots * 4)?,
+            Format::Lsg2 | Format::Lsg3 | Format::Lsg4 => reader.skip(slots * 4)?,
         }
         Ok(Self {
             bytes,
@@ -220,6 +307,7 @@ impl<'a> Payload<'a> {
             data_at: reader.position(),
             interval,
             format,
+            field_count,
         })
     }
 
@@ -261,7 +349,7 @@ impl<'a> Payload<'a> {
                 offset
             }
             Format::Lsg2 => fixed(slot),
-            Format::Lsg3 => match slot.checked_sub(1) {
+            Format::Lsg3 | Format::Lsg4 => match slot.checked_sub(1) {
                 Some(slot) => fixed(slot),
                 None => 0,
             },
@@ -319,13 +407,28 @@ impl PayloadCursor<'_> {
             self.next_ordinal = start;
         }
         while self.next_ordinal < ordinal {
-            self.next_bucket()?;
+            self.skip_entry()?;
         }
         Ok(())
     }
 
+    /// Advances past one entry of whichever layout the stream is in,
+    /// validating it. The seek path's internal step.
+    fn skip_entry(&mut self) -> Result<()> {
+        if self.payload.format == Format::Lsg4 {
+            self.skip_fields()
+        } else {
+            self.next_bucket().map(|_| ())
+        }
+    }
+
     /// Decodes the next entry's term-frequency bucket, skipping its positions.
+    /// Field-aware (`LSG4`) entries have no single bucket; they fail closed
+    /// here so a legacy caller cannot misparse one.
     pub fn next_bucket(&mut self) -> Result<u8> {
+        if self.payload.format == Format::Lsg4 {
+            return Err(Error::Corrupt("payload format"));
+        }
         if self.next_ordinal >= self.payload.count {
             return Err(Error::Corrupt("payload read past end"));
         }
@@ -339,8 +442,12 @@ impl PayloadCursor<'_> {
     }
 
     /// Decodes the next entry, appending its positions to `positions` and
-    /// returning its term-frequency bucket.
+    /// returning its term-frequency bucket. Field-aware (`LSG4`) entries
+    /// fail closed; use [`PayloadCursor::next_fields`].
     pub fn next_into(&mut self, positions: &mut Vec<u32>) -> Result<u8> {
+        if self.payload.format == Format::Lsg4 {
+            return Err(Error::Corrupt("payload format"));
+        }
         if self.next_ordinal >= self.payload.count {
             return Err(Error::Corrupt("payload read past end"));
         }
@@ -356,6 +463,9 @@ impl PayloadCursor<'_> {
     /// Validate every position and return its count without materializing it.
     /// Unlike `next_bucket`, this checks cumulative position overflow as well.
     pub(crate) fn next_count(&mut self) -> Result<(u8, usize)> {
+        if self.payload.format == Format::Lsg4 {
+            return Err(Error::Corrupt("payload format"));
+        }
         if self.next_ordinal >= self.payload.count {
             return Err(Error::Corrupt("payload read past end"));
         }
@@ -375,6 +485,82 @@ impl PayloadCursor<'_> {
             tf_bucket,
             positions,
         })
+    }
+
+    /// Decodes one `LSG4` entry and validates the full RFC §5.3 rule set:
+    /// field hit count, ascending field ids in range, per-field strictly
+    /// increasing positions, and the bucket-quantization cross-check.
+    pub fn next_fields(&mut self) -> Result<FieldEntry> {
+        if self.payload.format != Format::Lsg4 || self.next_ordinal >= self.payload.count {
+            return Err(Error::Corrupt("payload format"));
+        }
+        let field_count = self.payload.field_count;
+        let hit_count = self.reader.varint_u32()?;
+        if hit_count == 0
+            || hit_count > u32::from(field_count)
+            || field_count == 0
+            || field_count > 16
+        {
+            return Err(Error::Corrupt("payload field hit count"));
+        }
+        let mut fields = Vec::with_capacity(hit_count as usize);
+        let mut previous = None;
+        for _ in 0..hit_count {
+            let packed = self.reader.u8()?;
+            let field = packed >> 4;
+            let bucket = packed & 0x0f;
+            if field >= field_count || previous.is_some_and(|p| p >= field) {
+                return Err(Error::Corrupt("payload field order"));
+            }
+            let mut positions = Vec::new();
+            let count = decode_positions(&mut self.reader, &mut positions)?;
+            if TfBucket::from_count(count as u32).value() != bucket {
+                return Err(Error::Corrupt("payload frequency bucket"));
+            }
+            previous = Some(field);
+            fields.push(FieldHit {
+                field,
+                tf_bucket: bucket,
+                positions,
+            });
+        }
+        self.next_ordinal += 1;
+        Ok(FieldEntry { fields })
+    }
+
+    /// Skips one `LSG4` entry without materializing its positions, validating
+    /// everything [`PayloadCursor::next_fields`] would: the maintenance and
+    /// merge paths advance dead postings through this, and a dead entry is
+    /// as malformed-proof as a live one.
+    pub fn skip_fields(&mut self) -> Result<()> {
+        if self.payload.format != Format::Lsg4 || self.next_ordinal >= self.payload.count {
+            return Err(Error::Corrupt("payload format"));
+        }
+        let field_count = self.payload.field_count;
+        let hit_count = self.reader.varint_u32()?;
+        if hit_count == 0
+            || hit_count > u32::from(field_count)
+            || field_count == 0
+            || field_count > 16
+        {
+            return Err(Error::Corrupt("payload field hit count"));
+        }
+        let mut previous = None;
+        for _ in 0..hit_count {
+            let packed = self.reader.u8()?;
+            let field = packed >> 4;
+            let bucket = packed & 0x0f;
+            if field >= field_count || previous.is_some_and(|p| p >= field) {
+                return Err(Error::Corrupt("payload field order"));
+            }
+            let count = visit_positions(&mut self.reader, |_| {})?;
+            if TfBucket::from_count(count as u32).value() != bucket {
+                return Err(Error::Corrupt("payload frequency bucket"));
+            }
+            previous = Some(field);
+        }
+        self.next_ordinal += 1;
+        Ok(())
     }
 }
 

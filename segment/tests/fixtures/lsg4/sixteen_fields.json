@@ -1,0 +1,509 @@
+{
+  "schema": "stannum.lsg4-golden/1",
+  "case": "sixteen_fields",
+  "kind": "valid",
+  "generator": {"git": "db68b07+", "tool": "SegmentBuilder::add_document_fields + finish_fields"},
+  "format": "LSG4",
+  "layout_revision": 1,
+  "fields": [
+    {"name": "col0", "weight": 1},
+    {"name": "col1", "weight": 1},
+    {"name": "col2", "weight": 1},
+    {"name": "col3", "weight": 1},
+    {"name": "col4", "weight": 1},
+    {"name": "col5", "weight": 1},
+    {"name": "col6", "weight": 1},
+    {"name": "col7", "weight": 1},
+    {"name": "col8", "weight": 1},
+    {"name": "col9", "weight": 1},
+    {"name": "col10", "weight": 1},
+    {"name": "col11", "weight": 1},
+    {"name": "col12", "weight": 1},
+    {"name": "col13", "weight": 1},
+    {"name": "col14", "weight": 1},
+    {"name": "col15", "weight": 1}
+  ],
+  "documents": [
+    {"tid": [0, 1], "tokens": [
+        {"field": 0, "term": "omni", "position": 1},
+        {"field": 0, "term": "f0", "position": 2},
+        {"field": 1, "term": "omni", "position": 1},
+        {"field": 1, "term": "omni", "position": 2},
+        {"field": 1, "term": "f1", "position": 3},
+        {"field": 2, "term": "omni", "position": 1},
+        {"field": 2, "term": "omni", "position": 2},
+        {"field": 2, "term": "omni", "position": 3},
+        {"field": 2, "term": "f2", "position": 4},
+        {"field": 3, "term": "omni", "position": 1},
+        {"field": 3, "term": "omni", "position": 2},
+        {"field": 3, "term": "omni", "position": 3},
+        {"field": 3, "term": "f3", "position": 4},
+        {"field": 4, "term": "omni", "position": 1},
+        {"field": 4, "term": "omni", "position": 2},
+        {"field": 4, "term": "omni", "position": 3},
+        {"field": 4, "term": "f4", "position": 4},
+        {"field": 5, "term": "omni", "position": 1},
+        {"field": 5, "term": "omni", "position": 2},
+        {"field": 5, "term": "omni", "position": 3},
+        {"field": 5, "term": "f5", "position": 4},
+        {"field": 6, "term": "omni", "position": 1},
+        {"field": 6, "term": "omni", "position": 2},
+        {"field": 6, "term": "omni", "position": 3},
+        {"field": 6, "term": "f6", "position": 4},
+        {"field": 7, "term": "omni", "position": 1},
+        {"field": 7, "term": "omni", "position": 2},
+        {"field": 7, "term": "omni", "position": 3},
+        {"field": 7, "term": "f7", "position": 4},
+        {"field": 8, "term": "omni", "position": 1},
+        {"field": 8, "term": "omni", "position": 2},
+        {"field": 8, "term": "omni", "position": 3},
+        {"field": 8, "term": "f8", "position": 4},
+        {"field": 9, "term": "omni", "position": 1},
+        {"field": 9, "term": "omni", "position": 2},
+        {"field": 9, "term": "omni", "position": 3},
+        {"field": 9, "term": "f9", "position": 4},
+        {"field": 10, "term": "omni", "position": 1},
+        {"field": 10, "term": "omni", "position": 2},
+        {"field": 10, "term": "omni", "position": 3},
+        {"field": 10, "term": "f10", "position": 4},
+        {"field": 11, "term": "omni", "position": 1},
+        {"field": 11, "term": "omni", "position": 2},
+        {"field": 11, "term": "omni", "position": 3},
+        {"field": 11, "term": "f11", "position": 4},
+        {"field": 12, "term": "omni", "position": 1},
+        {"field": 12, "term": "omni", "position": 2},
+        {"field": 12, "term": "omni", "position": 3},
+        {"field": 12, "term": "f12", "position": 4},
+        {"field": 13, "term": "omni", "position": 1},
+        {"field": 13, "term": "omni", "position": 2},
+        {"field": 13, "term": "omni", "position": 3},
+        {"field": 13, "term": "f13", "position": 4},
+        {"field": 14, "term": "omni", "position": 1},
+        {"field": 14, "term": "omni", "position": 2},
+        {"field": 14, "term": "omni", "position": 3},
+        {"field": 14, "term": "f14", "position": 4},
+        {"field": 15, "term": "omni", "position": 1},
+        {"field": 15, "term": "omni", "position": 2},
+        {"field": 15, "term": "omni", "position": 3},
+        {"field": 15, "term": "f15", "position": 4}
+    ]},
+    {"tid": [1, 2], "tokens": [
+        {"field": 0, "term": "omni", "position": 1},
+        {"field": 0, "term": "omni", "position": 2},
+        {"field": 0, "term": "f0", "position": 3},
+        {"field": 1, "term": "omni", "position": 1},
+        {"field": 1, "term": "omni", "position": 2},
+        {"field": 1, "term": "omni", "position": 3},
+        {"field": 1, "term": "f1", "position": 4},
+        {"field": 2, "term": "omni", "position": 1},
+        {"field": 2, "term": "omni", "position": 2},
+        {"field": 2, "term": "omni", "position": 3},
+        {"field": 2, "term": "omni", "position": 4},
+        {"field": 2, "term": "f2", "position": 5},
+        {"field": 3, "term": "omni", "position": 1},
+        {"field": 3, "term": "omni", "position": 2},
+        {"field": 3, "term": "omni", "position": 3},
+        {"field": 3, "term": "omni", "position": 4},
+        {"field": 3, "term": "f3", "position": 5},
+        {"field": 4, "term": "omni", "position": 1},
+        {"field": 4, "term": "omni", "position": 2},
+        {"field": 4, "term": "omni", "position": 3},
+        {"field": 4, "term": "omni", "position": 4},
+        {"field": 4, "term": "f4", "position": 5},
+        {"field": 5, "term": "omni", "position": 1},
+        {"field": 5, "term": "omni", "position": 2},
+        {"field": 5, "term": "omni", "position": 3},
+        {"field": 5, "term": "omni", "position": 4},
+        {"field": 5, "term": "f5", "position": 5},
+        {"field": 6, "term": "omni", "position": 1},
+        {"field": 6, "term": "omni", "position": 2},
+        {"field": 6, "term": "omni", "position": 3},
+        {"field": 6, "term": "omni", "position": 4},
+        {"field": 6, "term": "f6", "position": 5},
+        {"field": 7, "term": "omni", "position": 1},
+        {"field": 7, "term": "omni", "position": 2},
+        {"field": 7, "term": "omni", "position": 3},
+        {"field": 7, "term": "omni", "position": 4},
+        {"field": 7, "term": "f7", "position": 5},
+        {"field": 8, "term": "omni", "position": 1},
+        {"field": 8, "term": "omni", "position": 2},
+        {"field": 8, "term": "omni", "position": 3},
+        {"field": 8, "term": "omni", "position": 4},
+        {"field": 8, "term": "f8", "position": 5},
+        {"field": 9, "term": "omni", "position": 1},
+        {"field": 9, "term": "omni", "position": 2},
+        {"field": 9, "term": "omni", "position": 3},
+        {"field": 9, "term": "omni", "position": 4},
+        {"field": 9, "term": "f9", "position": 5},
+        {"field": 10, "term": "omni", "position": 1},
+        {"field": 10, "term": "omni", "position": 2},
+        {"field": 10, "term": "omni", "position": 3},
+        {"field": 10, "term": "omni", "position": 4},
+        {"field": 10, "term": "f10", "position": 5},
+        {"field": 11, "term": "omni", "position": 1},
+        {"field": 11, "term": "omni", "position": 2},
+        {"field": 11, "term": "omni", "position": 3},
+        {"field": 11, "term": "omni", "position": 4},
+        {"field": 11, "term": "f11", "position": 5},
+        {"field": 12, "term": "omni", "position": 1},
+        {"field": 12, "term": "omni", "position": 2},
+        {"field": 12, "term": "omni", "position": 3},
+        {"field": 12, "term": "omni", "position": 4},
+        {"field": 12, "term": "f12", "position": 5},
+        {"field": 13, "term": "omni", "position": 1},
+        {"field": 13, "term": "omni", "position": 2},
+        {"field": 13, "term": "omni", "position": 3},
+        {"field": 13, "term": "omni", "position": 4},
+        {"field": 13, "term": "f13", "position": 5},
+        {"field": 14, "term": "omni", "position": 1},
+        {"field": 14, "term": "omni", "position": 2},
+        {"field": 14, "term": "omni", "position": 3},
+        {"field": 14, "term": "omni", "position": 4},
+        {"field": 14, "term": "f14", "position": 5},
+        {"field": 15, "term": "omni", "position": 1},
+        {"field": 15, "term": "omni", "position": 2},
+        {"field": 15, "term": "omni", "position": 3},
+        {"field": 15, "term": "omni", "position": 4},
+        {"field": 15, "term": "f15", "position": 5}
+    ]},
+    {"tid": [2, 3], "tokens": [
+        {"field": 0, "term": "omni", "position": 1},
+        {"field": 0, "term": "omni", "position": 2},
+        {"field": 0, "term": "omni", "position": 3},
+        {"field": 0, "term": "f0", "position": 4},
+        {"field": 1, "term": "omni", "position": 1},
+        {"field": 1, "term": "omni", "position": 2},
+        {"field": 1, "term": "omni", "position": 3},
+        {"field": 1, "term": "omni", "position": 4},
+        {"field": 1, "term": "f1", "position": 5},
+        {"field": 2, "term": "omni", "position": 1},
+        {"field": 2, "term": "omni", "position": 2},
+        {"field": 2, "term": "omni", "position": 3},
+        {"field": 2, "term": "omni", "position": 4},
+        {"field": 2, "term": "omni", "position": 5},
+        {"field": 2, "term": "f2", "position": 6},
+        {"field": 3, "term": "omni", "position": 1},
+        {"field": 3, "term": "omni", "position": 2},
+        {"field": 3, "term": "omni", "position": 3},
+        {"field": 3, "term": "omni", "position": 4},
+        {"field": 3, "term": "omni", "position": 5},
+        {"field": 3, "term": "f3", "position": 6},
+        {"field": 4, "term": "omni", "position": 1},
+        {"field": 4, "term": "omni", "position": 2},
+        {"field": 4, "term": "omni", "position": 3},
+        {"field": 4, "term": "omni", "position": 4},
+        {"field": 4, "term": "omni", "position": 5},
+        {"field": 4, "term": "f4", "position": 6},
+        {"field": 5, "term": "omni", "position": 1},
+        {"field": 5, "term": "omni", "position": 2},
+        {"field": 5, "term": "omni", "position": 3},
+        {"field": 5, "term": "omni", "position": 4},
+        {"field": 5, "term": "omni", "position": 5},
+        {"field": 5, "term": "f5", "position": 6},
+        {"field": 6, "term": "omni", "position": 1},
+        {"field": 6, "term": "omni", "position": 2},
+        {"field": 6, "term": "omni", "position": 3},
+        {"field": 6, "term": "omni", "position": 4},
+        {"field": 6, "term": "omni", "position": 5},
+        {"field": 6, "term": "f6", "position": 6},
+        {"field": 7, "term": "omni", "position": 1},
+        {"field": 7, "term": "omni", "position": 2},
+        {"field": 7, "term": "omni", "position": 3},
+        {"field": 7, "term": "omni", "position": 4},
+        {"field": 7, "term": "omni", "position": 5},
+        {"field": 7, "term": "f7", "position": 6},
+        {"field": 8, "term": "omni", "position": 1},
+        {"field": 8, "term": "omni", "position": 2},
+        {"field": 8, "term": "omni", "position": 3},
+        {"field": 8, "term": "omni", "position": 4},
+        {"field": 8, "term": "omni", "position": 5},
+        {"field": 8, "term": "f8", "position": 6},
+        {"field": 9, "term": "omni", "position": 1},
+        {"field": 9, "term": "omni", "position": 2},
+        {"field": 9, "term": "omni", "position": 3},
+        {"field": 9, "term": "omni", "position": 4},
+        {"field": 9, "term": "omni", "position": 5},
+        {"field": 9, "term": "f9", "position": 6},
+        {"field": 10, "term": "omni", "position": 1},
+        {"field": 10, "term": "omni", "position": 2},
+        {"field": 10, "term": "omni", "position": 3},
+        {"field": 10, "term": "omni", "position": 4},
+        {"field": 10, "term": "omni", "position": 5},
+        {"field": 10, "term": "f10", "position": 6},
+        {"field": 11, "term": "omni", "position": 1},
+        {"field": 11, "term": "omni", "position": 2},
+        {"field": 11, "term": "omni", "position": 3},
+        {"field": 11, "term": "omni", "position": 4},
+        {"field": 11, "term": "omni", "position": 5},
+        {"field": 11, "term": "f11", "position": 6},
+        {"field": 12, "term": "omni", "position": 1},
+        {"field": 12, "term": "omni", "position": 2},
+        {"field": 12, "term": "omni", "position": 3},
+        {"field": 12, "term": "omni", "position": 4},
+        {"field": 12, "term": "omni", "position": 5},
+        {"field": 12, "term": "f12", "position": 6},
+        {"field": 13, "term": "omni", "position": 1},
+        {"field": 13, "term": "omni", "position": 2},
+        {"field": 13, "term": "omni", "position": 3},
+        {"field": 13, "term": "omni", "position": 4},
+        {"field": 13, "term": "omni", "position": 5},
+        {"field": 13, "term": "f13", "position": 6},
+        {"field": 14, "term": "omni", "position": 1},
+        {"field": 14, "term": "omni", "position": 2},
+        {"field": 14, "term": "omni", "position": 3},
+        {"field": 14, "term": "omni", "position": 4},
+        {"field": 14, "term": "omni", "position": 5},
+        {"field": 14, "term": "f14", "position": 6},
+        {"field": 15, "term": "omni", "position": 1},
+        {"field": 15, "term": "omni", "position": 2},
+        {"field": 15, "term": "omni", "position": 3},
+        {"field": 15, "term": "omni", "position": 4},
+        {"field": 15, "term": "omni", "position": 5},
+        {"field": 15, "term": "f15", "position": 6}
+    ]}
+  ],
+  "expected": {
+    "doc_count": 3,
+    "total_length": 231,
+    "field_total": [9, 12, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15],
+    "documents": [
+        {"tid": [0, 1], "lengths": [2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]},
+        {"tid": [1, 2], "lengths": [3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]},
+        {"tid": [2, 3], "lengths": [4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]}
+    ],
+    "terms": [
+      {"term": "f0", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 0, "bucket": 0, "positions": [2]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 0, "bucket": 0, "positions": [3]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 0, "bucket": 0, "positions": [4]}
+          ]}
+      ]},
+      {"term": "f1", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 1, "bucket": 0, "positions": [3]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 1, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 1, "bucket": 0, "positions": [5]}
+          ]}
+      ]},
+      {"term": "f10", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 10, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 10, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 10, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f11", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 11, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 11, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 11, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f12", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 12, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 12, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 12, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f13", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 13, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 13, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 13, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f14", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 14, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 14, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 14, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f15", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 15, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 15, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 15, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f2", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 2, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 2, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 2, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f3", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 3, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 3, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 3, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f4", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 4, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 4, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 4, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f5", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 5, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 5, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 5, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f6", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 6, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 6, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 6, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f7", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 7, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 7, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 7, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f8", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 8, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 8, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 8, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "f9", "df": 3, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 9, "bucket": 0, "positions": [4]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 9, "bucket": 0, "positions": [5]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 9, "bucket": 0, "positions": [6]}
+          ]}
+      ]},
+      {"term": "omni", "df": 3, "max_tf_bucket": 3, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 0, "bucket": 0, "positions": [1]},
+              {"field": 1, "bucket": 1, "positions": [1, 2]},
+              {"field": 2, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 3, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 4, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 5, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 6, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 7, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 8, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 9, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 10, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 11, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 12, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 13, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 14, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 15, "bucket": 2, "positions": [1, 2, 3]}
+          ]},
+          {"tid": [1, 2], "fields": [
+              {"field": 0, "bucket": 1, "positions": [1, 2]},
+              {"field": 1, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 2, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 3, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 4, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 5, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 6, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 7, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 8, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 9, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 10, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 11, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 12, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 13, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 14, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 15, "bucket": 2, "positions": [1, 2, 3, 4]}
+          ]},
+          {"tid": [2, 3], "fields": [
+              {"field": 0, "bucket": 2, "positions": [1, 2, 3]},
+              {"field": 1, "bucket": 2, "positions": [1, 2, 3, 4]},
+              {"field": 2, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 3, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 4, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 5, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 6, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 7, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 8, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 9, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 10, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 11, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 12, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 13, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 14, "bucket": 3, "positions": [1, 2, 3, 4, 5]},
+              {"field": 15, "bucket": 3, "positions": [1, 2, 3, 4, 5]}
+          ]}
+      ]}
+    ]
+  }
+}

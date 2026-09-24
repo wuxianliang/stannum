@@ -1343,8 +1343,15 @@ Work-item mapping (implementation-order steps → agent dispatches):
 
 ALL SIX WORK ITEMS COMPLETE 2026-09-24. Deferred: step 9 pin bump (needs fork push first, user decision). Remaining plan steps 11-13 gated on lsg4-rfc.md acceptance.
 - [x] WI-6: step 10 — docs/designs/lsg4-rfc.md (RFC only, no code). DONE 2026-09-22: 760-line RFC, all 12 freeze items covered; judgment call: field_count==1 LSG4 blobs valid on disk (write path requires ≥2) to enable the bit-equality fixture. Pending user acceptance.
-- Deferred: step 9 (STANNUM_COMMIT pin bump) — requires the stannum commits to be pushed to wuxianliang/stannum first; user decision.
-- Out of scope this cycle: steps 11-13 (LSG4 implementation, gated on RFC acceptance per resolved question 1).
+- Deferred: step 9 (STANNUM_COMMIT pin bump) — DONE 2026-09-24: pinned 7f58bbe, full bundle rebuilt, pin test fixed (stale e163585 assertion), pushed f85ff10.
+- Out of scope this cycle: steps 11-13 (LSG4 implementation, gated on RFC acceptance per resolved question 1). → RFC ACCEPTED by user 2026-09-24 (incl. the field_count==1 valid-on-disk judgment); steps 11-13 now unblocked.
+
+## 0.4.0 wave — LSG4 implementation (2026-09-24, post-acceptance)
+
+- [x] WI-11: step 11 — phase 1: LSG4 format + field-scoped terms. DONE 2026-09-25 (three dispatches: WI-11 foundations + WI-11b2 segment completion + WI-11c postgres half): full LSG4 read/write per accepted RFC, 24 golden vectors + independent decoder, BM25F with double-level bit-equality, Expr::Field grammar shipped WITH executor errors, multi-column operator scoping, amcanmulticol enabled, ALTER/rename guards; workspace 579→green, pg18 46/46, full pg_test 169, clippy clean (orchestrator fixed 4 pre-existing lints). search() still rejects multi-column (phase 2 relaxes).
+- [ ] WI-12: step 12 — phase 2: BM25F bounds + WAND on LSG4; prune-rate recorded; relax search() single-column check.
+- [ ] WI-13: step 13 — phase 3: same-field phrases, highlight overload + field fixture, fuzz/oracle field dimension, docs; release 0.4.0 SQL/version.
+- [ ] WI-14: final gates + commit + push 0.4.0 (stannum; then pgembed pin bump as its own follow-up).
 
 Dispatch order: WI-1 ∥ WI-6 → WI-2 → WI-3 → (WI-4 ∥ WI-5).
 

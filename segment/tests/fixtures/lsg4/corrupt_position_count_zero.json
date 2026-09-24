@@ -1,0 +1,9 @@
+{
+  "schema": "stannum.lsg4-golden/1",
+  "case": "corrupt_position_count_zero",
+  "kind": "invalid",
+  "generator": {"git": "db68b07+", "tool": "byte edits over corrupt_base"},
+  "format": "LSG4",
+  "layout_revision": 1,
+  "expected_error": "payload rule 5: position count is zero"
+}

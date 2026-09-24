@@ -244,6 +244,11 @@ fn evaluate_searchable(query: &Query, doc: &TokenizedDoc) -> Result<MatchResult,
                 Ok(MatchResult::hit(intervals))
             }
         }
+        // A scope is transparent here: the tokenized document *is* one
+        // column's text, so a scope over that column is satisfied by it. The
+        // callers that know the index resolve the name (and reject unknown
+        // ones) before evaluating a `Query::Field`.
+        Query::Field { inner, .. } => evaluate_searchable(inner, doc),
         Query::MatchAll => Ok(MatchResult::hit(Vec::new())),
         Query::Regex(pattern) => Ok(expanded_match_result(doc, |term| pattern.is_match(term))),
         Query::Range { lower, upper } => Ok(expanded_match_result(doc, |term| {
@@ -345,6 +350,7 @@ fn collect_highlight_matches(query: &Query, doc: &TokenizedDoc, out: &mut Vec<Hi
                 });
             }
         }
+        Query::Field { .. } => {}
         Query::And(left, right) | Query::Or(left, right) => {
             collect_highlight_matches(left, doc, out);
             collect_highlight_matches(right, doc, out);

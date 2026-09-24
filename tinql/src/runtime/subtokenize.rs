@@ -48,6 +48,13 @@ fn analyze<T: Tokenizer>(text: &str, tokenizer: &T) -> Vec<AnalyzedToken> {
 fn rewrite<T: Tokenizer>(expr: Expr, tokenizer: &T) -> Result<Expr, SubTokenizeError> {
     match expr {
         Expr::Term(s) => Ok(rewrite_term(&s, tokenizer)),
+        // A field scope rewrites its inner expression and keeps the wrapper:
+        // the dictionary stays one entry per term string, so no name prefix
+        // is added to the terms inside.
+        Expr::Field { name, inner } => Ok(Expr::Field {
+            name,
+            inner: Box::new(rewrite(*inner, tokenizer)?),
+        }),
         Expr::Fuzzy {
             term,
             prefix,

@@ -50,6 +50,16 @@ pub enum Expr {
         slop: Option<u32>,
     },
 
+    // -- Field scope --
+    /// Field-scoped group: `title:(beer ale)`.
+    ///
+    /// The only field syntax: the name, a `:`, and the group's opening paren
+    /// must be adjacent (a space breaks the scope, RFC §5.11's compound-atomic
+    /// `field_head`). `name` is folded the way PostgreSQL folds identifiers:
+    /// an unquoted name is ASCII-lowercased by the parser, a quoted one is kept
+    /// byte-exact.
+    Field { name: String, inner: Box<Expr> },
+
     /// Alternatives: `[beer, ale, lager]`
     Alternatives(Vec<Expr>),
 
@@ -222,6 +232,15 @@ impl Expr {
     }
 }
 
+/// Whether `name` is spelled like the grammar's `bare_ident`: an ASCII letter
+/// followed by ASCII alphanumerics and underscores. A name outside this shape
+/// is written quoted.
+pub fn is_bare_field_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Format an expression, wrapping in parens when `expr`'s precedence is
 /// below `min_prec`.
 fn fmt_expr(f: &mut fmt::Formatter<'_>, expr: &Expr, min_prec: u8) -> fmt::Result {
@@ -288,6 +307,12 @@ fn fmt_expr(f: &mut fmt::Formatter<'_>, expr: &Expr, min_prec: u8) -> fmt::Resul
             if let Some(n) = slop {
                 write!(f, "~{n}")?;
             }
+        }
+        Expr::Field { name, inner } => {
+            write!(f, "{}", FieldName(name))?;
+            write!(f, ":(")?;
+            fmt_expr(f, inner, 0)?;
+            write!(f, ")")?;
         }
         Expr::Alternatives(items) => {
             write!(f, "[")?;
@@ -511,6 +536,26 @@ pub enum AtLeastThreshold {
     Percent(u32),
     /// `ALL OF [...]` — every alternative must match.
     All,
+}
+
+/// A field name as the grammar writes it: bare when it has the `bare_ident`
+/// shape, otherwise a quoted identifier using the phrase escape rule.
+pub struct FieldName<'a>(pub &'a str);
+
+impl fmt::Display for FieldName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if is_bare_field_name(self.0) {
+            return f.write_str(self.0);
+        }
+        write!(f, "\"")?;
+        for c in self.0.chars() {
+            if matches!(c, '\\' | '"') {
+                write!(f, "\\")?;
+            }
+            write!(f, "{c}")?;
+        }
+        write!(f, "\"")
+    }
 }
 
 /// A component of a wildcard pattern.

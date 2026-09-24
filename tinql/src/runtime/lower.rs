@@ -24,6 +24,8 @@ use super::{
 pub enum LowerError {
     #[error("MatchAll (*) is not valid inside a span/positional context")]
     MatchAllInSpanContext,
+    #[error("a field scope is not valid inside a span/positional expression")]
+    FieldInSpanContext,
     #[error("{0}")]
     InvalidRegex(#[from] super::RegexError),
 }
@@ -94,6 +96,10 @@ fn lower_boolean(expr: &crate::Expr) -> Result<Query, LowerError> {
         }
         Expr::Boost { factor, inner } => Ok(Query::Boost {
             factor: factor.0,
+            inner: Box::new(lower_boolean(inner)?),
+        }),
+        Expr::Field { name, inner } => Ok(Query::Field {
+            name: name.clone(),
             inner: Box::new(lower_boolean(inner)?),
         }),
         // A single-term phrase is just a term — no span machinery needed.
@@ -204,6 +210,7 @@ impl SpanBuilder {
                 Ok(SpanExpr::Term(idx))
             }
             Expr::Phrase { elements, slop } => self.lower_phrase(elements, *slop),
+            Expr::Field { .. } => Err(LowerError::FieldInSpanContext),
             Expr::And(l, r) => {
                 let left = self.lower_span_expr(l)?;
                 let right = self.lower_span_expr(r)?;

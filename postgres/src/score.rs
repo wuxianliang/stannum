@@ -4,8 +4,8 @@
 // See LICENSE in the repository root for license terms.
 
 use crate::bm25::{
-    Bm25Overrides, DenseRatio, ScoreStopWords, ScoringTermInput, TermScorer, TermSetEdit,
-    compile_scoring_terms, sum_scores_in_order,
+    Bm25Overrides, Bm25fScorer, DenseRatio, ScoreStopWords, ScoringTermInput, TermScoreModel,
+    TermScorer, TermSetEdit, compile_scoring_terms, sum_scores_in_order,
 };
 use pgrx::iter::TableIterator;
 use pgrx::{
@@ -26,7 +26,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::{CStr, CString, c_void};
 use std::rc::Rc;
-use tinql::runtime::plan::{Limits, plan};
+use tinql::runtime::plan::{FieldScope, Limits, plan_scoped};
 use tinql::runtime::{
     CompiledRegex, FuzzyMatcher, Query, RangeBound, SpanTermSlot, evaluate, parse_tinql_to_query,
     range_matches, tokenize_doc,
@@ -34,6 +34,7 @@ use tinql::runtime::{
 use tokenizer::Tokenizer;
 
 use crate::storage::View;
+use crate::storage::layout::FieldMeta;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CacheKey {
@@ -66,7 +67,12 @@ pub(crate) struct IndexScorer {
     sources: Vec<SourceReader>,
     view: View,
     dead: Vec<std::rc::Rc<BTreeSet<Tid>>>,
-    terms: Vec<(String, TermScorer)>,
+    /// The scoring keys in canonical `(term bytes, field mask)` order, each
+    /// with the saturation model its source format asks for.
+    terms: Vec<((String, u16), TermScoreModel)>,
+    /// The index's field plan (names and weights); `None` on a single-column
+    /// index. Its weights build every document's weighted length.
+    fields: Option<FieldMeta>,
     query: Query,
     /// Computed on first request: the maximum over matching documents.
     max: Option<f32>,
@@ -96,14 +102,14 @@ impl SourceReader {
     /// # Safety
     /// `segment` must stay alive and unmoved for as long as this reader exists:
     /// the owning `IndexScorer` keeps it in `view` and drops readers first.
-    unsafe fn new(segment: &dyn Index, terms: &[(String, TermScorer)]) -> Self {
+    unsafe fn new(segment: &dyn Index, terms: &[((String, u16), TermScoreModel)]) -> Self {
         let segment: &'static (dyn Index + 'static) =
             unsafe { std::mem::transmute::<&dyn Index, &'static (dyn Index + 'static)>(segment) };
         let documents = segment_error(segment.documents());
         let terms = terms
             .iter()
-            .map(|(term, _)| {
-                segment_error(segment.term(term)).map(|term| TermReader {
+            .map(|((text, _), _)| {
+                segment_error(segment.term(text)).map(|term| TermReader {
                     postings: segment_error(term.cursor()),
                     payload: segment_error(term.payload()).cursor(),
                 })
@@ -439,9 +445,15 @@ impl IndexScorer {
                 continue;
             };
             let length = segment_error_in(reader.lengths.get(ordinal), label);
-            // Left-to-right f32 fold in lexical term order, as production does.
+            // A field-aware source scores at the weighted length
+            // `len* = Σ_f w_f · length_f`, folded once per document (§5.10).
+            let weighted = self
+                .fields
+                .as_ref()
+                .map(|plan| weighted_length(&reader.lengths, ordinal, &plan.weights, label));
+            // Left-to-right f32 fold in canonical key order, as production does.
             let mut total = 0.0_f32;
-            for (slot, (_, scorer)) in reader.terms.iter_mut().zip(&self.terms) {
+            for (slot, (_, model)) in reader.terms.iter_mut().zip(&self.terms) {
                 let Some(term) = slot else {
                     continue;
                 };
@@ -449,18 +461,43 @@ impl IndexScorer {
                     continue;
                 };
                 segment_error_in(term.payload.seek(posting), label);
-                let bucket = segment_error_in(term.payload.next_bucket(), label);
-                let bucket = TfBucket::new(bucket).unwrap_or_else(|| {
-                    crate::storage::corrupt(format!(
-                        "Stannum {label}: term-frequency bucket {bucket} out of range"
-                    ))
-                });
-                total += scorer.score_bucket(bucket, length);
+                let contribution = match model {
+                    TermScoreModel::Bm25(scorer) => {
+                        let bucket = segment_error_in(term.payload.next_bucket(), label);
+                        let bucket = TfBucket::new(bucket).unwrap_or_else(|| {
+                            crate::storage::corrupt(format!(
+                                "Stannum {label}: term-frequency bucket {bucket} out of range"
+                            ))
+                        });
+                        scorer.score_bucket(bucket, length)
+                    }
+                    TermScoreModel::Bm25f(scorer) => {
+                        let entry = segment_error_in(term.payload.next_fields(), label);
+                        scorer.score(
+                            &entry.fields,
+                            weighted.expect("a field-aware source has a weighted length"),
+                        )
+                    }
+                };
+                total += contribution;
             }
             return Some(total);
         }
         None
     }
+}
+
+/// The weighted document length `len* = Σ_f w_f · length_f`, one
+/// left-to-right f32 fold in field order (RFC §5.10). The fold starts at
+/// zero, so a single field of weight 1.0 reproduces the plain length exactly.
+fn weighted_length(lengths: &Lengths<'_>, ordinal: u32, weights: &[f32], label: &str) -> f32 {
+    let mut total = 0.0_f32;
+    for (field, weight) in weights.iter().enumerate() {
+        let field = u8::try_from(field).unwrap_or(u8::MAX);
+        let length = segment_error_in(lengths.field_get(ordinal, field), label);
+        total += weight * length as f32;
+    }
+    total
 }
 
 /// The root of the HOT chain holding `tid`, or `tid` itself when it is not a
@@ -560,8 +597,13 @@ impl IndexScorer {
         let mut candidates = BTreeSet::new();
         for (i, (segment, _)) in self.view.sources.iter().enumerate() {
             pgrx::check_for_interrupts!();
-            let planned = plan(&self.query, &**segment, &Limits::default())
-                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let planned = plan_scoped(
+                &self.query,
+                &**segment,
+                &Limits::default(),
+                crate::storage::field_scope(self.fields.as_ref()),
+            )
+            .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
             let mut cursor = planned.cursor;
             while let Some(tid) = cursor.current() {
                 if !self.dead[i].contains(&tid) {
@@ -765,7 +807,10 @@ impl Walk<'_, '_> {
     }
 
     fn bound_at(&mut self, i: usize, target: Tid) -> Option<(f32, Tid)> {
-        let scorer = &self.scorer.terms[self.cursors[i].slot].1;
+        let scorer = self.scorer.terms[self.cursors[i].slot]
+            .1
+            .bm25()
+            .expect("block-max pruning is single-field");
         self.cursors[i].bound_at(target, scorer)
     }
 
@@ -801,7 +846,15 @@ impl Walk<'_, '_> {
             let scorer = self.scorer;
             for &i in &pending {
                 let cursor = &mut self.cursors[i];
-                cursor.exact = Some(cursor.bound_for_length(length, &scorer.terms[cursor.slot].1));
+                cursor.exact = Some(
+                    cursor.bound_for_length(
+                        length,
+                        scorer.terms[cursor.slot]
+                            .1
+                            .bm25()
+                            .expect("block-max pruning is single-field"),
+                    ),
+                );
             }
             let optimistic = fold(&self.cursors, |c| present(c).then_some(c.exact).flatten());
             if !self.can_beat(optimistic, pivot) {
@@ -810,7 +863,10 @@ impl Walk<'_, '_> {
         }
         for (n, &i) in pending.iter().enumerate() {
             let bucket = self.cursors[i].bucket();
-            let scorer = &self.scorer.terms[self.cursors[i].slot].1;
+            let scorer = self.scorer.terms[self.cursors[i].slot]
+                .1
+                .bm25()
+                .expect("block-max pruning is single-field");
             self.cursors[i].exact = Some(scorer.score_bucket(bucket, length));
             if n + 1 < pending.len() && pruning {
                 let optimistic = fold(&self.cursors, |c| present(c).then_some(c.exact).flatten());
@@ -990,10 +1046,16 @@ impl Walk<'_, '_> {
                     );
                 }
                 let bound = fold(&self.cursors, |cursor| {
-                    Some(self.scorer.terms[cursor.slot].1.bound_with_min_length(
-                        &cursor.cached.as_ref().expect("bound loaded").0,
-                        min_length,
-                    ))
+                    Some(
+                        self.scorer.terms[cursor.slot]
+                            .1
+                            .bm25()
+                            .expect("block-max pruning is single-field")
+                            .bound_with_min_length(
+                                &cursor.cached.as_ref().expect("bound loaded").0,
+                                min_length,
+                            ),
+                    )
                 });
                 range = Some((boundary.expect("conjunction has terms"), bound));
             }
@@ -1035,6 +1097,12 @@ impl IndexScorer {
     /// exactly the scoring terms, or a source carries no block bounds; the
     /// caller then scores every candidate.
     pub(crate) fn top_k(&self, k: usize, events: &mut dyn FnMut(WalkEvent)) -> Option<TopK> {
+        // A field-aware source carries field block bounds (RFC §5.4), which
+        // this single-field walk cannot evaluate; phase 2 adds them. Score
+        // every candidate instead.
+        if self.fields.is_some() {
+            return None;
+        }
         let (combine, leaves) = prunable_shape(&self.query)?;
         // Every scoring term must be a leaf (no added terms), and a leaf that
         // is not a scoring term must be absent from the index altogether: it
@@ -1044,13 +1112,13 @@ impl IndexScorer {
         if self
             .terms
             .iter()
-            .any(|(term, _)| leaves.binary_search(&term.as_str()).is_err())
+            .any(|((text, _), _)| leaves.binary_search(&text.as_str()).is_err())
         {
             return None;
         }
         let mut absent = false;
         for leaf in &leaves {
-            if self.terms.iter().any(|(term, _)| term == leaf) {
+            if self.terms.iter().any(|((text, _), _)| text == leaf) {
                 continue;
             }
             if self
@@ -1117,7 +1185,12 @@ impl IndexScorer {
         events: &mut dyn FnMut(WalkEvent),
     ) -> Option<bool> {
         let mut cursors: Vec<TermCursor<'_>> = Vec::with_capacity(self.terms.len());
-        for (slot, (name, scorer)) in self.terms.iter().enumerate() {
+        for (slot, ((name, _), model)) in self.terms.iter().enumerate() {
+            // Pruning needs single-field bounds; a field-aware source falls
+            // back to exhaustive scoring.
+            let Some(scorer) = model.bm25() else {
+                return Some(false);
+            };
             let Some(term) = segment_error_in(source.term(name), label) else {
                 match combine {
                     // A missing term empties the conjunction in this source.
@@ -1433,8 +1506,8 @@ fn build_index_scorer(
     if !key.full && !dense.is_valid() {
         pgrx::error!("dense_ratio must be finite and non-negative");
     }
-    let query = parse_tinql_to_query(&key.query, tokenizer.as_ref())
-        .unwrap_or_else(|error| pgrx::error!("Stannum score query error: {error}"));
+    let fields = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    let query = parse_query(&key.query, tokenizer.as_ref(), fields.as_ref());
     let edit = TermSetEdit::from_bound_arrays(term_add, term_replace)
         .unwrap_or_else(|error| pgrx::error!("stannum.score(): {error}"))
         .analyzed_with(|text| {
@@ -1464,10 +1537,18 @@ fn build_index_scorer(
 
     let view = unsafe { crate::storage::view(index.oid()) };
     let segments: Vec<&dyn Index> = view.sources.iter().map(|(index, _)| &**index).collect();
+    let all_fields = all_fields_mask(fields.as_ref());
     let mut collected = Collected::default();
-    collect_score_terms(&query, 1.0, false, &mut collected);
+    collect_score_terms(
+        &query,
+        all_fields,
+        1.0,
+        false,
+        crate::storage::field_scope(fields.as_ref()),
+        &mut collected,
+    );
     let owned = collected.resolve(|expansion| expansion.expand_in(&segments));
-    let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref());
+    let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref(), all_fields);
     let dead = view.dead_sets.clone();
     // Statistics include dead documents until their segment is rewritten,
     // and buffered documents immediately; elision uses immutable segments only.
@@ -1479,11 +1560,34 @@ fn build_index_scorer(
         .filter(|(i, _)| is_immutable(*i))
         .map(|(_, s)| u64::from(s.document_count()))
         .sum();
-    let total_length: u64 = segments.iter().map(|s| s.total_length()).sum();
-    let average_length = if total_docs == 0 {
-        1.0
-    } else {
-        total_length as f32 / total_docs as f32
+    // A field-aware index averages its *weighted* per-field totals: the u64
+    // aggregates have the same shape the plain total uses, and one
+    // left-to-right f32 fold in field order follows (§5.10).
+    let average_length = match &fields {
+        Some(plan) => {
+            let mut weighted = 0.0_f32;
+            for (field, weight) in plan.weights.iter().enumerate() {
+                let field = u8::try_from(field).unwrap_or(u8::MAX);
+                let total: u64 = segments
+                    .iter()
+                    .map(|source| segment_error(source.field_total(field)))
+                    .sum();
+                weighted += weight * total as f32;
+            }
+            if total_docs == 0 {
+                1.0
+            } else {
+                weighted / total_docs as f32
+            }
+        }
+        None => {
+            let total_length: u64 = segments.iter().map(|s| s.total_length()).sum();
+            if total_docs == 0 {
+                1.0
+            } else {
+                total_length as f32 / total_docs as f32
+            }
+        }
     };
     let mut scorers = Vec::new();
     for term in terms {
@@ -1500,10 +1604,31 @@ fn build_index_scorer(
         if !term.is_retained(total_df, immutable_df, immutable_docs, ratio) {
             continue;
         }
-        let scorer =
-            TermScorer::from_statistics(total_docs, total_df, term.boost(), params, average_length)
-                .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}"));
-        scorers.push((term.text().to_owned(), scorer));
+        let model = match &fields {
+            Some(plan) => TermScoreModel::Bm25f(
+                Bm25fScorer::from_statistics(
+                    total_docs,
+                    total_df,
+                    term.boost(),
+                    params,
+                    average_length,
+                    &plan.weights,
+                    term.mask(),
+                )
+                .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}")),
+            ),
+            None => TermScoreModel::Bm25(
+                TermScorer::from_statistics(
+                    total_docs,
+                    total_df,
+                    term.boost(),
+                    params,
+                    average_length,
+                )
+                .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}")),
+            ),
+        };
+        scorers.push(((term.text().to_owned(), term.mask()), model));
     }
     drop(segments);
     let sources = view
@@ -1521,6 +1646,7 @@ fn build_index_scorer(
         view,
         dead,
         terms: scorers,
+        fields,
         query,
         max: None,
         known: FxHashMap::default(),
@@ -1536,8 +1662,13 @@ impl IndexScorer {
         }
         let mut candidates = BTreeSet::new();
         for (i, (segment, _)) in self.view.sources.iter().enumerate() {
-            let planned = plan(&self.query, &**segment, &Limits::default())
-                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let planned = plan_scoped(
+                &self.query,
+                &**segment,
+                &Limits::default(),
+                crate::storage::field_scope(self.fields.as_ref()),
+            )
+            .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
             let mut cursor = planned.cursor;
             while let Some(tid) = cursor.current() {
                 if !self.dead[i].contains(&tid) {
@@ -1595,6 +1726,12 @@ fn build_corpus(
     }
     let query = parse_tinql_to_query(&key.query, &tokenizer)
         .unwrap_or_else(|error| pgrx::error!("Stannum score query error: {error}"));
+    // This path scores the first key column's text, so a name resolves
+    // against the index's plan like any other path.
+    check_query_fields(
+        &query,
+        unsafe { crate::storage::fields_meta(index.as_ptr()) }.as_ref(),
+    );
     let edit = TermSetEdit::from_bound_arrays(term_add, term_replace)
         .unwrap_or_else(|error| pgrx::error!("stannum.score(): {error}"))
         .analyzed_with(|text| {
@@ -1626,7 +1763,16 @@ fn build_corpus(
     let tokenized: Vec<Vec<String>> = positioned.iter().map(|doc| doc.tokens().to_vec()).collect();
     let universe = corpus_universe(&tokenized);
     let mut collected = Collected::default();
-    collect_score_terms(&query, 1.0, false, &mut collected);
+    // This path scores one column's text, so every term is unscoped and
+    // there is no field plan to resolve a name against.
+    collect_score_terms(
+        &query,
+        1,
+        1.0,
+        false,
+        crate::storage::field_scope(None),
+        &mut collected,
+    );
     let owned = collected.resolve(|expansion| {
         let matcher = expansion.matcher();
         universe
@@ -1635,7 +1781,7 @@ fn build_corpus(
             .map(|term| (*term).to_owned())
             .collect()
     });
-    let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref());
+    let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref(), 1);
     // Token-less documents are not documents for scoring, as in TIN.
     let total_docs = tokenized.iter().filter(|tokens| !tokens.is_empty()).count() as u64;
     let average_length = if total_docs == 0 {
@@ -1822,11 +1968,12 @@ impl Expansion<'_> {
     }
 }
 
-/// Scoring inputs gathered from a query before expansions are resolved.
+/// Scoring inputs gathered from a query before expansions are resolved. Each
+/// carries the field mask its terms are scoped to (RFC §5.11).
 #[derive(Default)]
 struct Collected<'a> {
     terms: Vec<ScoringTermInput<'a>>,
-    expansions: Vec<(Expansion<'a>, f32, bool)>,
+    expansions: Vec<(Expansion<'a>, u16, f32, bool)>,
 }
 
 impl<'a> Collected<'a> {
@@ -1834,26 +1981,34 @@ impl<'a> Collected<'a> {
     fn resolve(
         self,
         mut expand: impl FnMut(&Expansion<'a>) -> Vec<String>,
-    ) -> Vec<(String, f32, bool)> {
-        let mut out: Vec<(String, f32, bool)> = self
+    ) -> Vec<(String, u16, f32, bool)> {
+        let mut out: Vec<(String, u16, f32, bool)> = self
             .terms
             .iter()
-            .map(|input| (input.text.to_owned(), input.boost, input.explicitly_boosted))
+            .map(|input| {
+                (
+                    input.text.to_owned(),
+                    input.mask,
+                    input.boost,
+                    input.explicitly_boosted,
+                )
+            })
             .collect();
-        for (expansion, boost, explicit) in &self.expansions {
+        for (expansion, mask, boost, explicit) in &self.expansions {
             for term in expand(expansion) {
-                out.push((term, *boost, *explicit));
+                out.push((term, *mask, *boost, *explicit));
             }
         }
         out
     }
 }
 
-fn inputs_of(owned: &[(String, f32, bool)]) -> impl Iterator<Item = ScoringTermInput<'_>> {
+fn inputs_of(owned: &[(String, u16, f32, bool)]) -> impl Iterator<Item = ScoringTermInput<'_>> {
     owned
         .iter()
-        .map(|(text, boost, explicit)| ScoringTermInput {
+        .map(|(text, mask, boost, explicit)| ScoringTermInput {
             text,
+            mask: *mask,
             boost: *boost,
             explicitly_boosted: *explicit,
         })
@@ -1864,13 +2019,16 @@ fn inputs_of(owned: &[(String, f32, bool)]) -> impl Iterator<Item = ScoringTermI
 /// they expand to with the node's boost.
 fn collect_score_terms<'a>(
     query: &'a Query,
+    scope: u16,
     boost: f32,
     explicitly_boosted: bool,
+    fields: &dyn FieldScope,
     out: &mut Collected<'a>,
 ) {
     let mut push = |text: &'a str| {
         out.terms.push(ScoringTermInput {
             text,
+            mask: scope,
             boost,
             explicitly_boosted,
         });
@@ -1887,27 +2045,33 @@ fn collect_score_terms<'a>(
                 prefix: *prefix,
                 distance: *distance,
             },
+            scope,
             boost,
             explicitly_boosted,
         )),
         Query::Regex(regex) => {
             out.expansions
-                .push((Expansion::Regex(regex), boost, explicitly_boosted))
+                .push((Expansion::Regex(regex), scope, boost, explicitly_boosted))
         }
-        Query::Range { lower, upper } => {
-            out.expansions
-                .push((Expansion::Range(lower, upper), boost, explicitly_boosted))
-        }
+        Query::Range { lower, upper } => out.expansions.push((
+            Expansion::Range(lower, upper),
+            scope,
+            boost,
+            explicitly_boosted,
+        )),
         Query::Span { term_slots, .. } | Query::SpanExpr { term_slots, .. } => {
             for slot in term_slots {
                 match slot {
                     SpanTermSlot::Term(text) => push(text),
-                    SpanTermSlot::Regex(regex) => {
-                        out.expansions
-                            .push((Expansion::Regex(regex), boost, explicitly_boosted))
-                    }
+                    SpanTermSlot::Regex(regex) => out.expansions.push((
+                        Expansion::Regex(regex),
+                        scope,
+                        boost,
+                        explicitly_boosted,
+                    )),
                     SpanTermSlot::Range { lower, upper } => out.expansions.push((
                         Expansion::Range(lower, upper),
+                        scope,
                         boost,
                         explicitly_boosted,
                     )),
@@ -1921,6 +2085,7 @@ fn collect_score_terms<'a>(
                             prefix: *prefix,
                             distance: *distance,
                         },
+                        scope,
                         boost,
                         explicitly_boosted,
                     )),
@@ -1928,19 +2093,269 @@ fn collect_score_terms<'a>(
             }
         }
         Query::And(left, right) | Query::Or(left, right) => {
-            collect_score_terms(left, boost, explicitly_boosted, out);
-            collect_score_terms(right, boost, explicitly_boosted, out);
+            collect_score_terms(left, scope, boost, explicitly_boosted, fields, out);
+            collect_score_terms(right, scope, boost, explicitly_boosted, fields, out);
         }
         Query::Conjunction(children)
         | Query::Disjunction { children, .. }
         | Query::AtLeast { children, .. } => {
             for child in children {
-                collect_score_terms(child, boost, explicitly_boosted, out);
+                collect_score_terms(child, scope, boost, explicitly_boosted, fields, out);
             }
         }
         Query::Not(_) | Query::MatchAll => {}
         Query::Boost { factor, inner } => {
-            collect_score_terms(inner, boost * *factor, true, out);
+            collect_score_terms(inner, scope, boost * *factor, true, fields, out);
+        }
+        Query::Field { name, inner } => {
+            let field = fields
+                .field_id(name)
+                .unwrap_or_else(|| pgrx::error!("stannum: unknown field '{name}'"));
+            collect_score_terms(inner, 1u16 << field, boost, explicitly_boosted, fields, out);
+        }
+    }
+}
+
+/// The mask covering every field of an index (`1` on a fieldless one).
+fn all_fields_mask(fields: Option<&FieldMeta>) -> u16 {
+    match fields {
+        None => 1,
+        Some(fields) if fields.names.len() >= 16 => u16::MAX,
+        Some(fields) => (1u16 << fields.names.len()) - 1,
+    }
+}
+
+/// Parses `text` and enforces the RFC's field-name contract: the grammar
+/// change ships only together with these errors (RFC §5.11).
+fn parse_query(
+    text: &str,
+    tokenizer: &tokenizer::CompiledTokenizerPipeline,
+    fields: Option<&FieldMeta>,
+) -> Query {
+    let query = parse_tinql_to_query(text, tokenizer)
+        .unwrap_or_else(|error| pgrx::error!("Stannum score query error: {error}"));
+    check_query_fields(&query, fields);
+    query
+}
+
+/// Resolves every field name a query scopes against: an unknown name, or
+/// field syntax on a fieldless (single-column) index, is an error.
+pub(crate) fn check_query_fields(query: &Query, fields: Option<&FieldMeta>) {
+    match query {
+        Query::Field { name, inner } => {
+            let Some(fields) = fields else {
+                pgrx::error!("stannum: field syntax requires a multi-column index");
+            };
+            if !fields.names.iter().any(|field| field == name) {
+                pgrx::error!("stannum: unknown field '{name}'");
+            }
+            check_query_fields(inner, Some(fields));
+        }
+        Query::And(left, right) | Query::Or(left, right) => {
+            check_query_fields(left, fields);
+            check_query_fields(right, fields);
+        }
+        Query::Conjunction(children)
+        | Query::Disjunction { children, .. }
+        | Query::AtLeast { children, .. } => {
+            for child in children {
+                check_query_fields(child, fields);
+            }
+        }
+        Query::Not(inner) | Query::Boost { inner, .. } => check_query_fields(inner, fields),
+        Query::Term(_)
+        | Query::Span { .. }
+        | Query::SpanExpr { .. }
+        | Query::MatchAll
+        | Query::Regex(_)
+        | Query::Range { .. }
+        | Query::Fuzzy { .. } => {}
+    }
+}
+
+/// Parses a scan's query text, resolves its field names and applies the
+/// scan key's implicit field scope, with the errors the RFC fixes (§5.11).
+pub(crate) fn scan_query_text(
+    text: &str,
+    tokenizer: &tokenizer::CompiledTokenizerPipeline,
+    fields: Option<&FieldMeta>,
+    field: u8,
+) -> Query {
+    let query = parse_tinql_to_query(text, tokenizer)
+        .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}"));
+    check_query_fields(&query, fields);
+    scope_scan_query(query, fields, field)
+}
+
+/// Restricts a `==>` query to the field its scan key names: the operator's
+/// left operand is one column, so every unscoped term in it is scoped to that
+/// column's field, and a field group naming another field is rejected
+/// (RFC §5.11). A fieldless (single-column) index needs no scope: its one
+/// field is every field.
+fn scope_scan_query(query: Query, fields: Option<&FieldMeta>, field: u8) -> Query {
+    let Some(plan) = fields else {
+        return query;
+    };
+    let Some(name) = plan.names.get(usize::from(field)) else {
+        pgrx::error!("stannum: this ==> clause's column is not a field of its index");
+    };
+    reject_foreign_fields(&query, name);
+    Query::Field {
+        name: name.clone(),
+        inner: Box::new(query),
+    }
+}
+
+/// Rejects a field group that names a field other than the scan key's: the
+/// whole clause answers one column, and `stannum.search()` is the all-fields
+/// form (RFC §5.11).
+fn reject_foreign_fields(query: &Query, name: &str) {
+    match query {
+        Query::Field { name: other, inner } => {
+            if other != name {
+                pgrx::error!(
+                    "stannum: this ==> clause answers '{name}'; use stannum.search() for '{other}'"
+                );
+            }
+            reject_foreign_fields(inner, name);
+        }
+        Query::And(left, right) | Query::Or(left, right) => {
+            reject_foreign_fields(left, name);
+            reject_foreign_fields(right, name);
+        }
+        Query::Conjunction(children)
+        | Query::Disjunction { children, .. }
+        | Query::AtLeast { children, .. } => {
+            for child in children {
+                reject_foreign_fields(child, name);
+            }
+        }
+        Query::Not(inner) | Query::Boost { inner, .. } => reject_foreign_fields(inner, name),
+        Query::Term(_)
+        | Query::Span { .. }
+        | Query::SpanExpr { .. }
+        | Query::MatchAll
+        | Query::Regex(_)
+        | Query::Range { .. }
+        | Query::Fuzzy { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bm25::Bm25Params;
+    use segment::segment::{Segment, SegmentBuilder};
+    use tokenizer::{Tokenizer, TokenizerPipelineSpec};
+
+    /// RFC §5.10 R-BIT, end-to-end level: the same tokens stored as a
+    /// single-field `LSG4` blob and as an `LSG3` blob must score bit for bit
+    /// alike through the score readers — one dequantize per posting, the
+    /// weighted length fold, and the canonical `(text, mask)` key order.
+    ///
+    /// A one-field `LSG4` segment is legal on disk but unreachable from SQL
+    /// (a single-column index writes `LSG3`, RFC §5.8), so the fixture is
+    /// built here rather than in a `pg_test`.
+    #[test]
+    fn one_field_lsg4_scores_bit_equal_to_lsg3() {
+        let pipeline = TokenizerPipelineSpec::stannum_default().compile().unwrap();
+        let documents = ["craft beer hops", "beer", "beer beer beer hops"];
+        let mut legacy = SegmentBuilder::default();
+        let mut fields = SegmentBuilder::default();
+        for (block, text) in documents.iter().enumerate() {
+            let tid = Tid::new(block as u32, 1).unwrap();
+            let tokens: Vec<(String, u32)> = pipeline
+                .tokenize(text)
+                .map(|token| (token.text.into_owned(), token.pos))
+                .collect();
+            legacy
+                .add_document(tid, tokens.iter().map(|(term, pos)| (term.as_str(), *pos)))
+                .unwrap();
+            fields
+                .add_document_fields(
+                    tid,
+                    1,
+                    tokens.iter().map(|(term, pos)| (0u8, term.as_str(), *pos)),
+                )
+                .unwrap();
+        }
+        let legacy_bytes = legacy.finish();
+        let fields_bytes = fields.finish_fields();
+        let legacy = Segment::parse(&legacy_bytes).unwrap();
+        let fields = Segment::parse(&fields_bytes).unwrap();
+        let params = Bm25Params::default_bm25();
+
+        // The statistics a scorer builds: the document count and either the
+        // plain average length or the weighted one (§5.10). One field of
+        // weight 1.0 makes them bit-equal through the field-total invariant
+        // (`Σ field_total == total_length`).
+        let documents = u64::from(legacy.document_count());
+        assert_eq!(documents, u64::from(fields.document_count()));
+        let plain_average = legacy.total_length() as f32 / documents as f32;
+        let mut weighted_total = 0.0_f32;
+        for field in 0..fields.field_count() {
+            weighted_total += 1.0 * fields.field_total(field).unwrap() as f32;
+        }
+        let weighted_average = weighted_total / documents as f32;
+        assert_eq!(weighted_average.to_bits(), plain_average.to_bits());
+
+        let keys = ["beer", "hops"];
+        let mut plain: FxHashMap<u32, f32> = FxHashMap::default();
+        let mut scoped: FxHashMap<u32, f32> = FxHashMap::default();
+        for key in keys {
+            let term = legacy.term(key).unwrap().expect("fixture term");
+            let scorer = TermScorer::from_statistics(
+                documents,
+                u64::from(term.df()),
+                1.0,
+                params,
+                plain_average,
+            )
+            .unwrap();
+            let mut postings = term.cursor().unwrap();
+            let mut payload = term.payload().unwrap().cursor();
+            while postings.current().is_some() {
+                let ordinal = postings.ordinal();
+                payload.seek(ordinal).unwrap();
+                let bucket = TfBucket::new(payload.next_bucket().unwrap()).unwrap();
+                let length = legacy.lengths().get(ordinal).unwrap();
+                *plain.entry(ordinal).or_insert(0.0) += scorer.score_bucket(bucket, length);
+                postings.advance().unwrap();
+            }
+
+            let term = fields.term(key).unwrap().expect("fixture term");
+            let scorer = Bm25fScorer::from_statistics(
+                documents,
+                u64::from(term.df()),
+                1.0,
+                params,
+                weighted_average,
+                &[1.0],
+                1,
+            )
+            .unwrap();
+            let mut postings = term.cursor().unwrap();
+            let mut payload = term.payload().unwrap().cursor();
+            while postings.current().is_some() {
+                let ordinal = postings.ordinal();
+                payload.seek(ordinal).unwrap();
+                let entry = payload.next_fields().unwrap();
+                let mut len_star = 0.0_f32;
+                for field in 0..fields.field_count() {
+                    len_star += 1.0 * fields.field_length(ordinal, field).unwrap() as f32;
+                }
+                *scoped.entry(ordinal).or_insert(0.0) += scorer.score(&entry.fields, len_star);
+                postings.advance().unwrap();
+            }
+        }
+        assert!(!plain.is_empty(), "the fixture must score something");
+        assert_eq!(plain.len(), scoped.len());
+        for (ordinal, score) in &plain {
+            assert_eq!(
+                scoped[ordinal].to_bits(),
+                score.to_bits(),
+                "document ordinal {ordinal}"
+            );
         }
     }
 }
@@ -1986,8 +2401,14 @@ fn score_inspect(
     crate::udfs::require_index_select(&index);
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
     let tokenizer = unsafe { crate::storage::tokenizer_by_oid(index.oid()) };
+    // Names must resolve before anything is scored, and the error names the
+    // field; the parsed query keeps its unbound form for the listing below.
     let parsed = parse_tinql_to_query(query, tokenizer.as_ref())
         .unwrap_or_else(|error| pgrx::error!("stannum.score_inspect() query error: {error}"));
+    check_query_fields(
+        &parsed,
+        unsafe { crate::storage::fields_meta(index.as_ptr()) }.as_ref(),
+    );
     let edit = TermSetEdit::from_bound_arrays(
         unwrap("term_add", term_add),
         unwrap("term_replace", term_replace),
@@ -2018,13 +2439,22 @@ fn score_inspect(
     if !ratio.is_valid() {
         pgrx::error!("dense_ratio must be finite and non-negative");
     }
+    let fields = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    let all_fields = all_fields_mask(fields.as_ref());
     let mut collected = Collected::default();
-    collect_score_terms(&parsed, 1.0, false, &mut collected);
+    collect_score_terms(
+        &parsed,
+        all_fields,
+        1.0,
+        false,
+        crate::storage::field_scope(fields.as_ref()),
+        &mut collected,
+    );
     let rows = if unsafe { crate::storage::present(index.as_ptr()) } {
         let view = unsafe { crate::storage::view(index.oid()) };
         let segments: Vec<&dyn Index> = view.sources.iter().map(|(index, _)| &**index).collect();
         let owned = collected.resolve(|expansion| expansion.expand_in(&segments));
-        let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref());
+        let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref(), all_fields);
         let is_immutable = |i: usize| i < view.immutable_sources;
         let immutable_docs: u64 = segments
             .iter()
@@ -2065,7 +2495,7 @@ fn score_inspect(
                 .map(|term| (*term).to_owned())
                 .collect()
         });
-        let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref());
+        let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref(), 1);
         let n = tokenized.iter().filter(|tokens| !tokens.is_empty()).count() as u64;
         terms
             .into_iter()
@@ -2134,30 +2564,38 @@ unsafe fn find_where_quals(node: *mut pg_sys::Node, binding: &mut QualBinding) {
 /// otherwise the first with the same tokenizer settings, so an index scan
 /// never disagrees with the clause's own evaluation.
 pub(crate) unsafe fn pick_index(
-    candidates: &[pg_sys::Oid],
+    candidates: &[(pg_sys::Oid, u8)],
     bound: Option<pg_sys::Oid>,
-) -> Option<pg_sys::Oid> {
+) -> Option<(pg_sys::Oid, u8)> {
     match bound {
-        Some(bound) if candidates.contains(&bound) => Some(bound),
+        Some(bound) if candidates.iter().any(|(index, _)| *index == bound) => candidates
+            .iter()
+            .copied()
+            .find(|(index, _)| *index == bound),
         Some(bound) => {
             let spec = unsafe { crate::storage::spec_by_oid(bound) };
             candidates
                 .iter()
                 .copied()
-                .find(|&candidate| unsafe { crate::storage::spec_by_oid(candidate) } == spec)
+                .find(|(candidate, _)| unsafe { crate::storage::spec_by_oid(*candidate) == spec })
         }
         None => candidates.first().copied(),
     }
 }
 
-/// Every valid, ready, single-key stannum index of `heap_oid` whose key is
-/// `operand` (a variable of range-table entry `query_varno`, or an
-/// expression), in OID order.
+/// Every valid, ready stannum index of `heap_oid` one of whose key columns
+/// is `operand` (a variable of range-table entry `query_varno`, or, on a
+/// single-column index, an expression), in OID order, with the *index field*
+/// (the column's position in the index's key list) the clause answers.
+///
+/// The clause's own attribute decides the match: a multi-column index can
+/// answer a clause on any of its key columns, and the matched column is the
+/// scan's implicit field scope (RFC §5.11).
 pub(crate) unsafe fn matching_stannum_indexes(
     heap_oid: pg_sys::Oid,
     query_varno: i32,
     operand: *mut pg_sys::Node,
-) -> Vec<pg_sys::Oid> {
+) -> Vec<(pg_sys::Oid, u8)> {
     let stannum_name = CString::new("stannum").expect("static access method name is valid");
     let stannum_am = unsafe { pg_sys::get_index_am_oid(stannum_name.as_ptr(), false) };
     let normalized = unsafe { pg_sys::copyObjectImpl(operand.cast()).cast::<pg_sys::Node>() };
@@ -2170,34 +2608,48 @@ pub(crate) unsafe fn matching_stannum_indexes(
         let index = unsafe { pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _) };
         let metadata = unsafe { &*(*index).rd_index };
         let is_stannum = unsafe { (*(*index).rd_rel).relam } == stannum_am;
-        let suitable =
-            is_stannum && metadata.indisvalid && metadata.indisready && metadata.indnkeyatts == 1;
-        let matches = if suitable {
-            let key = unsafe { *metadata.indkey.values.as_ptr() };
-            if key > 0 {
-                !normalized.is_null()
-                    && unsafe { (*normalized).type_ } == pg_sys::NodeTag::T_Var
-                    && unsafe {
-                        let var = &*normalized.cast::<pg_sys::Var>();
-                        var.varno == 1 && var.varlevelsup == 0 && var.varattno == key
-                    }
-            } else {
+        let suitable = is_stannum && metadata.indisvalid && metadata.indisready;
+        let matched_column = if suitable {
+            let keys = unsafe {
+                std::slice::from_raw_parts(
+                    metadata.indkey.values.as_ptr(),
+                    metadata.indnkeyatts as usize,
+                )
+            };
+            if keys.len() == 1 && keys[0] <= 0 {
+                // Expression keys are single-column only; a multi-column
+                // index rejects them at build time.
                 let expressions = unsafe { pg_sys::RelationGetIndexExpressions(index) };
                 if unsafe { pg_sys::list_length(expressions) } != 1 {
-                    false
+                    None
                 } else {
                     let indexed =
                         unsafe { pg_sys::list_nth(expressions, 0).cast::<pg_sys::Node>() };
                     let indexed = unsafe { pg_sys::strip_implicit_coercions(indexed) };
                     unsafe { pg_sys::equal(normalized.cast(), indexed.cast()) }
+                        .then_some((index_oid, 0))
+                }
+            } else if normalized.is_null()
+                || unsafe { (*normalized).type_ } != pg_sys::NodeTag::T_Var
+            {
+                None
+            } else {
+                let var = unsafe { &*normalized.cast::<pg_sys::Var>() };
+                if var.varno != 1 || var.varlevelsup != 0 || var.varattno <= 0 {
+                    None
+                } else {
+                    keys.iter()
+                        .position(|key| *key == var.varattno)
+                        .and_then(|field| u8::try_from(field).ok())
+                        .map(|field| (index_oid, field))
                 }
             }
         } else {
-            false
+            None
         };
         unsafe { pg_sys::index_close(index, pg_sys::AccessShareLock as _) };
-        if matches {
-            matched.push(index_oid);
+        if let Some(field) = matched_column {
+            matched.push(field);
         }
     }
     unsafe { pg_sys::table_close(heap, pg_sys::AccessShareLock as _) };
@@ -2312,7 +2764,8 @@ fn score_support(request: Internal) -> Internal {
                 .iter()
                 .find_map(|&(document, query, bound)| {
                     let candidates = matching_stannum_indexes((*rte).relid, ctid.varno, document);
-                    pick_index(&candidates, bound).map(|index_oid| (document, query, index_oid))
+                    pick_index(&candidates, bound)
+                        .map(|(index_oid, _)| (document, query, index_oid))
                 })
         else {
             return unhandled();

@@ -151,7 +151,7 @@ impl<'a, S: Source + ?Sized> DictionaryCursor<'a, S> {
         }
         let term = std::str::from_utf8(&self.scratch)
             .map_err(|_| Error::Corrupt("dictionary term is not UTF-8"))?;
-        let (df, max_tf_bucket) = if self.format == Format::Lsg3 {
+        let (df, max_tf_bucket) = if matches!(self.format, Format::Lsg3 | Format::Lsg4) {
             let packed = self.data.varint()?;
             (
                 u32::try_from(packed >> 4).map_err(|_| Error::Corrupt("dictionary df"))?,
@@ -199,7 +199,7 @@ impl<'a, S: Source + ?Sized> DictionaryCursor<'a, S> {
 
     fn extent(data: &mut Window<'a, S>, format: Format, end: &mut u64) -> Result<Extent> {
         let encoded = data.varint()?;
-        let offset = if format == Format::Lsg3 {
+        let offset = if matches!(format, Format::Lsg3 | Format::Lsg4) {
             let gap = ((encoded >> 1) as i64) ^ -((encoded & 1) as i64);
             end.checked_add_signed(gap)
                 .ok_or(Error::Corrupt("dictionary extent gap"))?

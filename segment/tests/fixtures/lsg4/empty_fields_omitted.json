@@ -1,0 +1,35 @@
+{
+  "schema": "stannum.lsg4-golden/1",
+  "case": "empty_fields_omitted",
+  "kind": "valid",
+  "generator": {"git": "db68b07+", "tool": "SegmentBuilder::add_document_fields + finish_fields"},
+  "format": "LSG4",
+  "layout_revision": 1,
+  "fields": [
+    {"name": "title", "weight": 1},
+    {"name": "body", "weight": 1}
+  ],
+  "documents": [
+    {"tid": [0, 1], "tokens": [
+        {"field": 0, "term": "kept", "position": 0}
+    ]},
+    {"tid": [0, 2], "tokens": [
+
+    ]}
+  ],
+  "expected": {
+    "doc_count": 1,
+    "total_length": 1,
+    "field_total": [1, 0],
+    "documents": [
+        {"tid": [0, 1], "lengths": [1, 0]}
+    ],
+    "terms": [
+      {"term": "kept", "df": 1, "max_tf_bucket": 0, "postings": [
+          {"tid": [0, 1], "fields": [
+              {"field": 0, "bucket": 0, "positions": [0]}
+          ]}
+      ]}
+    ]
+  }
+}

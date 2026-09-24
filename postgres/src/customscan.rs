@@ -33,7 +33,7 @@ use rustc_hash::FxHashSet;
 use segment::Tid;
 use segment::set::Cursor as _;
 use tinql::runtime::Query;
-use tinql::runtime::plan::{Limits, plan};
+use tinql::runtime::plan::{Limits, plan_scoped};
 
 use crate::score::rank;
 
@@ -168,6 +168,9 @@ unsafe fn descending(pathkey: *mut pg_sys::PathKey) -> bool {
 struct Match {
     clause: *mut pg_sys::OpExpr,
     index_oid: pg_sys::Oid,
+    /// The index field (the clause's column position in the index's key
+    /// list) the clause answers; it is the scan's implicit field scope.
+    field: u8,
     query: Option<String>,
     query_expr: *mut pg_sys::Node,
 }
@@ -250,16 +253,18 @@ unsafe fn find_match(
                 search.document,
             )
             .into_iter()
-            .filter(|&index_oid| {
-                crate::storage::is_segmented(index_oid) && predicate_proven(rel, index_oid)
+            .filter(|(index_oid, _)| {
+                crate::storage::is_segmented(*index_oid) && predicate_proven(rel, *index_oid)
             })
             .collect::<Vec<_>>();
-            let Some(index_oid) = crate::score::pick_index(&candidates, search.index) else {
+            let Some((index_oid, field)) = crate::score::pick_index(&candidates, search.index)
+            else {
                 continue;
             };
             return Some(Match {
                 clause: clause.cast(),
                 index_oid,
+                field,
                 query,
                 query_expr: search.query,
             });
@@ -397,6 +402,9 @@ struct Private {
     index_oid: u32,
     heap_oid: u32,
     query: String,
+    /// The index field this clause answers; the scan key's implicit field
+    /// scope, carried through the plan's private state (RFC §5.11).
+    field: u8,
     ordering: Option<Ordering>,
 }
 
@@ -434,6 +442,7 @@ impl Private {
                     list.push(make_int(ordering.top_k.map_or(-1, |k| k as i64)));
                 }
             }
+            list.push(make_int(i64::from(self.field)));
             list.into_pg()
         }
     }
@@ -459,6 +468,13 @@ impl Private {
                 })
             };
             let clause = pg_sys::list_nth(list, 3).cast::<pg_sys::OpExpr>();
+            // A plan from a binary without the field slot carries no such
+            // element; a single-column index has one field either way.
+            let field = if pg_sys::list_length(list) > 11 {
+                u8::try_from(int(11)).unwrap_or(0)
+            } else {
+                0
+            };
             let ordering = match int(4) {
                 -1 => None,
                 full => Some(Ordering {
@@ -476,6 +492,7 @@ impl Private {
                     index_oid: int(0) as u32,
                     heap_oid: int(1) as u32,
                     query: string(2),
+                    field,
                     ordering,
                 },
                 clause,
@@ -548,6 +565,7 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
             index_oid: found.index_oid.to_u32(),
             heap_oid: (*rte).relid.to_u32(),
             query: found.query.clone().unwrap_or_else(|| "<parameter>".into()),
+            field: found.field,
             ordering,
         };
         let mut path = pgrx::PgBox::<pg_sys::CustomPath>::alloc_node(pg_sys::NodeTag::T_CustomPath);
@@ -802,6 +820,7 @@ unsafe extern "C-unwind" fn upper_paths_hook(
             index_oid: found.index_oid.to_u32(),
             heap_oid: (*rte).relid.to_u32(),
             query: found.query.clone().unwrap_or_else(|| "<parameter>".into()),
+            field: found.field,
             ordering: None,
         };
         let mut path = pgrx::PgBox::<pg_sys::CustomPath>::alloc_node(pg_sys::NodeTag::T_CustomPath);
@@ -1174,11 +1193,14 @@ unsafe fn scan_query(exec: &ScanExec) -> Query {
         let index_oid = pg_sys::Oid::from(exec.private.index_oid);
         let index = pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _);
         let tokenizer = crate::storage::index_tokenizer(index);
+        let fields = crate::storage::fields_meta(index);
         pg_sys::index_close(index, pg_sys::AccessShareLock as _);
-        let query: Query =
-            tinql::runtime::parse_tinql_to_query(&exec.private.query, tokenizer.as_ref())
-                .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}"));
-        query
+        crate::score::scan_query_text(
+            &exec.private.query,
+            tokenizer.as_ref(),
+            fields.as_ref(),
+            exec.private.field,
+        )
     }
 }
 
@@ -1220,11 +1242,13 @@ unsafe fn candidates(exec: &mut ScanExec) -> Vec<Tid> {
 
 fn candidates_in_view(exec: &mut ScanExec, query: &Query, view: &crate::storage::View) -> Vec<Tid> {
     let limits = Limits::default();
+    // Field names resolve against the view's plan; a fieldless index has none.
+    let fields = crate::storage::field_scope(view.fields.as_ref());
     let mut tids = Vec::new();
     for (i, ((segment, dead), label)) in view.sources.iter().zip(&view.labels).enumerate() {
         note_source_visited(exec, i, view.immutable_sources);
         pgrx::check_for_interrupts!();
-        let planned = plan(query, segment, &limits)
+        let planned = plan_scoped(query, segment, &limits, fields)
             .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
         let mut cursor: Box<dyn segment::set::Cursor> = planned.cursor;
         // A capped expansion yields a superset; those rows are rechecked.
@@ -1655,10 +1679,13 @@ unsafe extern "C-unwind" fn exec_count(
             let index = pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _);
             let tokenizer = crate::storage::index_tokenizer(index);
             pg_sys::index_close(index, pg_sys::AccessShareLock as _);
-            let query =
-                tinql::runtime::parse_tinql_to_query(&exec.private.query, tokenizer.as_ref())
-                    .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}"));
             let view = crate::storage::view(index_oid);
+            let query = crate::score::scan_query_text(
+                &exec.private.query,
+                tokenizer.as_ref(),
+                view.fields.as_ref(),
+                exec.private.field,
+            );
             let mut use_pages = false;
             for (source, _) in &view.sources {
                 use_pages |= tinql::runtime::plan::prefers_pages(&query, source)
@@ -1697,9 +1724,13 @@ unsafe extern "C-unwind" fn exec_count(
                 {
                     note_source_visited(exec, i, view.immutable_sources);
                     pgrx::check_for_interrupts!();
-                    let planned =
-                        tinql::runtime::plan::page_plan(&query, source, &Limits::default())
-                            .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+                    let planned = tinql::runtime::plan::page_plan_scoped(
+                        &query,
+                        source,
+                        &Limits::default(),
+                        crate::storage::field_scope(view.fields.as_ref()),
+                    )
+                    .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
                     exec.recheck |= !planned.exact;
                     let mut cursor = planned.cursor;
                     if let Some(dead) = dead {

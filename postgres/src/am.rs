@@ -27,7 +27,11 @@ pub(crate) fn amhandler(_fcinfo: pg_sys::FunctionCallInfo) -> PgBox<pg_sys::Inde
         unsafe { PgBox::<pg_sys::IndexAmRoutine>::alloc_node(pg_sys::NodeTag::T_IndexAmRoutine) };
     routine.amstrategies = BOUND_STRATEGY;
     routine.amsupport = 0;
-    routine.amcanmulticol = false;
+    // Multi-column BM25F indexes are the point of the field plan: the AM
+    // stores one field per key column (RFC §4). Only the first key column
+    // participates in core's index paths; the rest are answered by the
+    // `==>` clause matcher and the scan key's own attribute.
+    routine.amcanmulticol = true;
     routine.amsearcharray = false;
     routine.amkeytype = pg_sys::InvalidOid;
     routine.ambuildphasename = Some(crate::progress::ambuildphasename);
@@ -227,6 +231,10 @@ unsafe extern "C-unwind" fn amrescan(
     let tokenizer = spec.as_ref().map(|spec| {
         crate::storage::tokenizer_for(spec, crate::storage::dictionary_fingerprint(spec))
     });
+    // The scan key's attribute is the clause's implicit field scope: a
+    // bitmap entry from a `body ==> ...` key must never answer a `title`
+    // clause, and its terms score in the key's own field (RFC §5.11).
+    let fields = selective.then(|| unsafe { crate::storage::fields_meta((*scan).indexRelation) });
     let mut queries = Vec::with_capacity(keys.len());
     for key in keys {
         if key.sk_flags != 0 {
@@ -250,11 +258,20 @@ unsafe extern "C-unwind" fn amrescan(
         } else {
             unsafe { String::from_datum(key.sk_argument, false) }.expect("non-null search key")
         };
+        // `sk_attno` numbers the index's key columns from one; field zero is
+        // the first column, and an expression key (attno 0) is the only field
+        // of a single-column index.
+        let field = u8::try_from(key.sk_attno.max(1) - 1).unwrap_or(0);
         let query = match &tokenizer {
-            Some(tokenizer) => tinql::runtime::parse_tinql_to_query(&text, tokenizer.as_ref()),
-            None => tinql::runtime::parse_tinql_to_query_default(&text),
-        }
-        .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}"));
+            Some(tokenizer) => crate::score::scan_query_text(
+                &text,
+                tokenizer.as_ref(),
+                fields.as_ref().and_then(Option::as_ref),
+                field,
+            ),
+            None => tinql::runtime::parse_tinql_to_query_default(&text)
+                .unwrap_or_else(|error| pgrx::error!("invalid ==> query: {error}")),
+        };
         queries.push(query);
     }
     state.plan = if selective {

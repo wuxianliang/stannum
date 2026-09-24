@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use rustc_hash::FxHashSet;
+use segment::payload::FieldHit;
 use segment::postings::BlockBound;
 use thiserror::Error;
 
@@ -194,6 +195,9 @@ pub(crate) enum TermSetEditError {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ScoringTermInput<'a> {
     pub(crate) text: &'a str,
+    /// The fields this occurrence is scoped to; bit i is field i, and an
+    /// unscoped term covers every field (RFC §5.11).
+    pub(crate) mask: u16,
     pub(crate) boost: f32,
     /// True for an explicit boost node, including an explicit `^1.0`.
     pub(crate) explicitly_boosted: bool,
@@ -202,6 +206,7 @@ pub(crate) struct ScoringTermInput<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ScoringTerm {
     text: String,
+    mask: u16,
     boost: f32,
     pinned: bool,
 }
@@ -210,6 +215,12 @@ impl ScoringTerm {
     #[must_use]
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The fields this term is scoped to.
+    #[must_use]
+    pub(crate) const fn mask(&self) -> u16 {
+        self.mask
     }
 
     #[must_use]
@@ -239,16 +250,20 @@ impl ScoringTerm {
     }
 }
 
-/// Applies stop words and analyzed term-set edits, returning lexical order.
-/// Repeated query occurrences add their boosts. Edit terms are idempotent,
-/// pin existing query terms without changing their weight, and enter at 1.0.
+/// Applies stop words and analyzed term-set edits, returning
+/// `(term bytes, field mask)` order. Repeated occurrences of one
+/// `(text, mask)` add their boosts; identical text under different masks
+/// stays separate (RFC §5.11). Edit terms are idempotent, unscoped (they
+/// cover every field), pin existing query terms without changing their
+/// weight, and enter at 1.0.
 #[must_use]
 pub(crate) fn compile_scoring_terms<'query>(
     query_terms: impl IntoIterator<Item = ScoringTermInput<'query>>,
     edit: &TermSetEdit,
     stop_words: Option<&ScoreStopWords>,
+    all_fields: u16,
 ) -> Vec<ScoringTerm> {
-    let mut terms = BTreeMap::<String, ScoringTerm>::new();
+    let mut terms = BTreeMap::<(String, u16), ScoringTerm>::new();
 
     if !matches!(edit, TermSetEdit::Replace(_)) {
         for input in query_terms {
@@ -256,9 +271,10 @@ pub(crate) fn compile_scoring_terms<'query>(
                 continue;
             }
             let entry = terms
-                .entry(input.text.to_owned())
+                .entry((input.text.to_owned(), input.mask))
                 .or_insert_with(|| ScoringTerm {
                     text: input.text.to_owned(),
+                    mask: input.mask,
                     boost: 0.0,
                     pinned: false,
                 });
@@ -275,11 +291,14 @@ pub(crate) fn compile_scoring_terms<'query>(
         if stop_words.is_some_and(|stop| stop.contains(text)) {
             continue;
         }
-        let entry = terms.entry(text.clone()).or_insert_with(|| ScoringTerm {
-            text: text.clone(),
-            boost: 1.0,
-            pinned: true,
-        });
+        let entry = terms
+            .entry((text.clone(), all_fields))
+            .or_insert_with(|| ScoringTerm {
+                text: text.clone(),
+                mask: all_fields,
+                boost: 1.0,
+                pinned: true,
+            });
         entry.pinned = true;
     }
 
@@ -422,6 +441,123 @@ impl TermScorer {
     }
 }
 
+/// The saturation model of one scoring term, the score reader's view of a
+/// scoring key (RFC §5.10).
+#[derive(Clone, Debug)]
+pub(crate) enum TermScoreModel {
+    /// One term-frequency bucket: the single-field expression.
+    Bm25(TermScorer),
+    /// Weighted field hits at the document's weighted length.
+    Bm25f(Bm25fScorer),
+}
+
+impl TermScoreModel {
+    /// The single-field scorer. Block-max pruning speaks only this model
+    /// until phase 2 adds field bounds, so the walk expects it.
+    #[must_use]
+    pub(crate) fn bm25(&self) -> Option<&TermScorer> {
+        match self {
+            Self::Bm25(scorer) => Some(scorer),
+            Self::Bm25f(_) => None,
+        }
+    }
+}
+
+/// BM25F saturation: the `TermScorer` expression evaluated at
+/// `tf* = Σ_f w_f · rep(tf_bucket_f)` over the term's scoped fields and the
+/// document's weighted length `len*` (RFC §5.10).
+///
+/// The field construction and the operation order mirror `TermScorer`, so a
+/// one-field weight-1.0 scope reproduces its score bit for bit.
+#[derive(Clone, Debug)]
+pub(crate) struct Bm25fScorer {
+    /// `idf * boost`, as `TermScorer` precomputes it.
+    multiplier: f32,
+    k1_plus_one: f32,
+    k1_one_minus_b: f32,
+    document_length_factor: f32,
+    /// Per field weights, in index attribute order.
+    weights: Vec<f32>,
+    /// The fields this term is scoped to; bit i is field i.
+    mask: u16,
+}
+
+impl Bm25fScorer {
+    pub(crate) fn from_statistics(
+        total_docs: u64,
+        df: u64,
+        boost: f32,
+        params: Bm25Params,
+        average_document_length: f32,
+        weights: &[f32],
+        mask: u16,
+    ) -> Result<Self, Bm25Error> {
+        Self::new(
+            bm25_idf(total_docs, df) as f32,
+            boost,
+            params,
+            average_document_length,
+            weights,
+            mask,
+        )
+    }
+
+    pub(crate) fn new(
+        idf: f32,
+        boost: f32,
+        params: Bm25Params,
+        average_document_length: f32,
+        weights: &[f32],
+        mask: u16,
+    ) -> Result<Self, Bm25Error> {
+        params.checked()?;
+        if !average_document_length.is_finite() || average_document_length <= 0.0 {
+            return Err(Bm25Error::AverageDocumentLength);
+        }
+        if !boost.is_finite() || boost < 0.0 {
+            return Err(Bm25Error::Boost);
+        }
+        Ok(Self {
+            multiplier: idf * boost,
+            k1_plus_one: params.k1 + 1.0,
+            k1_one_minus_b: params.k1 * (1.0 - params.b),
+            document_length_factor: params.k1 * params.b / average_document_length,
+            weights: weights.to_vec(),
+            mask,
+        })
+    }
+
+    /// `tf* = Σ_f w_f · dequantize(tf_bucket_f)` over the scoped fields: one
+    /// dequantize per field, never re-quantized, folded left to right in the
+    /// payload's field order.
+    #[must_use]
+    pub(crate) fn weighted_tf(&self, hits: &[FieldHit]) -> f32 {
+        let mut tf = 0.0_f32;
+        for hit in hits {
+            if self.mask & (1 << hit.field) == 0 {
+                continue;
+            }
+            let Some(weight) = self.weights.get(usize::from(hit.field)) else {
+                continue;
+            };
+            let count = TfBucket::new(hit.tf_bucket)
+                .expect("payload entries carry validated buckets")
+                .representative_count() as f32;
+            tf += weight * count;
+        }
+        tf
+    }
+
+    /// The term's contribution to a document of weighted length `len_star`.
+    #[must_use]
+    pub(crate) fn score(&self, hits: &[FieldHit], len_star: f32) -> f32 {
+        let tf = self.weighted_tf(hits);
+        let numerator = self.multiplier * tf * self.k1_plus_one;
+        let denominator = (tf + self.k1_one_minus_b) + self.document_length_factor * len_star;
+        numerator / denominator
+    }
+}
+
 /// Sums already ordered term contributions with production's left-to-right
 /// `f32` fold. Callers own the canonical term ordering.
 #[must_use]
@@ -512,6 +648,88 @@ mod tests {
         );
     }
 
+    /// RFC §5.10 R-BIT, arithmetic level: a one-field weight-1.0 scope must
+    /// reproduce `TermScorer::score_bucket` for every bucket over a covering
+    /// length grid, bit for bit. This pins `tf* = 0.0 + 1.0 · rep(b)` and
+    /// `len* = 0.0 + 1.0 · L` as exact and the multiply order
+    /// `multiplier * tf * k1_plus_one` as preserved.
+    #[test]
+    fn one_field_weight_one_matches_the_plain_scorer() {
+        let params = Bm25Params { k1: 1.2, b: 0.75 };
+        let average = 12.5_f32;
+        let plain = TermScorer::from_statistics(1000, 37, 2.5, params, average).unwrap();
+        let fields =
+            Bm25fScorer::from_statistics(1000, 37, 2.5, params, average, &[1.0], 1).unwrap();
+        for bucket in 0..BUCKET_COUNT {
+            let hits = [FieldHit {
+                field: 0,
+                tf_bucket: bucket as u8,
+                positions: vec![0],
+            }];
+            for length in [
+                0u32,
+                1,
+                2,
+                3,
+                7,
+                8,
+                15,
+                16,
+                17,
+                31,
+                63,
+                64,
+                100,
+                255,
+                256,
+                1000,
+                4096,
+                65535,
+                u32::MAX,
+            ] {
+                let len_star = 0.0_f32 + 1.0 * length as f32;
+                let expected = plain.score_bucket(TfBucket::new(bucket as u8).unwrap(), length);
+                let got = fields.score(&hits, len_star);
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "bucket {bucket} length {length}"
+                );
+            }
+        }
+    }
+
+    /// The scope selects fields and the weights scale them: a hit outside the
+    /// scope contributes nothing and one inside contributes its weight times
+    /// the bucket's representative count.
+    #[test]
+    fn bm25f_scope_selects_fields_and_weights_scale_them() {
+        let params = Bm25Params { k1: 1.2, b: 0.75 };
+        let hits = [
+            FieldHit {
+                field: 0,
+                tf_bucket: 2,
+                positions: vec![0],
+            },
+            FieldHit {
+                field: 1,
+                tf_bucket: 5,
+                positions: vec![0],
+            },
+        ];
+        let heavy = TfBucket::new(2).unwrap().representative_count() as f32;
+        let light = TfBucket::new(5).unwrap().representative_count() as f32;
+        let title = Bm25fScorer::new(1.0, 1.0, params, 10.0, &[3.0, 1.0], 0b01).unwrap();
+        let body = Bm25fScorer::new(1.0, 1.0, params, 10.0, &[3.0, 1.0], 0b10).unwrap();
+        let both = Bm25fScorer::new(1.0, 1.0, params, 10.0, &[3.0, 1.0], 0b11).unwrap();
+        assert_eq!(title.weighted_tf(&hits).to_bits(), (3.0 * heavy).to_bits());
+        assert_eq!(body.weighted_tf(&hits).to_bits(), light.to_bits());
+        assert_eq!(
+            both.weighted_tf(&hits).to_bits(),
+            (3.0 * heavy + light).to_bits()
+        );
+    }
+
     #[test]
     fn idf_matches_known_values_and_floors_stale_stats() {
         assert_eq!(bm25_idf(0, 0).to_bits(), std::f64::consts::LN_2.to_bits());
@@ -581,47 +799,72 @@ mod tests {
         let query = [
             ScoringTermInput {
                 text: "rare",
+                mask: 0b01,
                 boost: 1.0,
                 explicitly_boosted: false,
             },
             ScoringTermInput {
+                // The same text under one mask adds its boosts together.
                 text: "rare",
+                mask: 0b01,
                 boost: 2.5,
                 explicitly_boosted: true,
             },
             ScoringTermInput {
+                text: "rare",
+                mask: 0b10,
+                boost: 1.0,
+                explicitly_boosted: false,
+            },
+            ScoringTermInput {
                 text: "dense",
+                mask: 0b11,
                 boost: 1.0,
                 explicitly_boosted: false,
             },
             ScoringTermInput {
                 text: "stopped",
+                mask: 0b11,
                 boost: 9.0,
                 explicitly_boosted: true,
             },
         ];
         let edit = TermSetEdit::Add(vec!["dense".into(), "added".into(), "blocked".into()]);
-        let terms = compile_scoring_terms(query, &edit, Some(&stop));
+        let terms = compile_scoring_terms(query, &edit, Some(&stop), 0b11);
 
         assert_eq!(
-            terms.iter().map(ScoringTerm::text).collect::<Vec<_>>(),
-            ["added", "dense", "rare"]
+            terms
+                .iter()
+                .map(|term| (term.text(), term.mask()))
+                .collect::<Vec<_>>(),
+            [
+                ("added", 0b11),
+                ("dense", 0b11),
+                ("rare", 0b01),
+                ("rare", 0b10)
+            ]
         );
         assert_eq!(terms[0].boost(), 1.0);
         assert!(terms[0].pinned());
         assert_eq!(terms[1].boost(), 1.0);
         assert!(terms[1].pinned());
+        // Identical text under one mask sums its boosts; the same text under
+        // another mask stays a separate key (RFC §5.11).
         assert_eq!(terms[2].boost(), 3.5);
         assert!(terms[2].pinned());
+        assert_eq!(terms[3].boost(), 1.0);
+        assert!(!terms[3].pinned());
 
         let replaced = compile_scoring_terms(
             [ScoringTermInput {
                 text: "ignored",
+                mask: 0b11,
                 boost: 1.0,
                 explicitly_boosted: false,
             }],
             &TermSetEdit::Replace(vec!["replacement".into(), "replacement".into()]),
             None,
+            0b11,
         );
         assert_eq!(replaced.len(), 1);
         assert_eq!(replaced[0].text(), "replacement");
@@ -633,6 +876,7 @@ mod tests {
     fn retained_terms_distinguish_full_dense_and_absent_terms() {
         let plain = ScoringTerm {
             text: "x".into(),
+            mask: 1,
             boost: 1.0,
             pinned: false,
         };

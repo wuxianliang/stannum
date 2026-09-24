@@ -24,6 +24,14 @@ pub struct PostingEntry {
     pub completed_bound: Option<BlockBound>,
 }
 
+/// The field-aware (`LSG4`) sibling of [`PostingEntry`]: on the last posting
+/// of a scored block, the stored per-field bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldPostingEntry {
+    pub tid: Tid,
+    pub completed_bound: Option<crate::postings::FieldBlockBound>,
+}
+
 /// Two owned refill windows plus fixed-size page/bound state; no vector grows
 /// with the term or its score table. Source caching is outside this bound.
 /// Traversal validates stream counts, ordering, group framing, bitmap padding,
@@ -44,6 +52,9 @@ pub struct PostingsCursor<'a, S: Source + ?Sized> {
     scored: bool,
     compact: bool,
     minima: [u32; BUCKET_COUNT],
+    /// The segment header's field count; 0 when the stream is not `LSG4`.
+    field_count: u8,
+    field_minima_state: Option<FieldMinima>,
     bound_last: Option<Tid>,
     previous_bound: Option<Tid>,
     sparse_start: u64,
@@ -76,12 +87,138 @@ fn minima<S: Source + ?Sized>(reader: &mut Window<'_, S>) -> Result<[u32; BUCKET
     Ok(out)
 }
 
+/// One decoded posting and whether it completes a scored block; the public
+/// entry constructors stamp the format's bound onto it.
+struct Step {
+    tid: Tid,
+    completed: bool,
+}
+
+/// The per-`(field, bucket)` minima of one `LSG4` block, accumulated the
+/// same way the writer folds them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldMinima {
+    pub field_count: u8,
+    pub present_fields: u16,
+    pub min_doc_length: [[u32; 16]; 16],
+}
+
+impl FieldMinima {
+    pub fn new(field_count: u8) -> Self {
+        Self {
+            field_count,
+            present_fields: 0,
+            min_doc_length: [[u32::MAX; 16]; 16],
+        }
+    }
+
+    /// Records one field hit's `(field, bucket, field length)` triple.
+    pub fn record(&mut self, field: u8, bucket: u8, length: u32) {
+        if field >= self.field_count || field >= 16 || bucket >= BUCKET_COUNT as u8 {
+            return;
+        }
+        self.present_fields |= 1 << field;
+        self.min_doc_length[usize::from(field)][usize::from(bucket)] = self.min_doc_length
+            [usize::from(field)][usize::from(bucket)]
+        .min(length.min(u32::MAX - 1));
+    }
+
+    /// True when the accumulated minima are exactly the decoded bound's.
+    pub fn agrees_with(&self, bound: &crate::postings::FieldBlockBound) -> bool {
+        self.present_fields == bound.present_fields && self.min_doc_length == bound.min_doc_length
+    }
+
+    fn bound(&self, last: Tid) -> crate::postings::FieldBlockBound {
+        let mut max_tf_bucket = [0u8; 16];
+        for (field, maxima) in max_tf_bucket.iter_mut().enumerate() {
+            for (bucket, length) in self.min_doc_length[field].iter().enumerate() {
+                if *length != u32::MAX {
+                    *maxima = (*maxima).max(bucket as u8);
+                }
+            }
+        }
+        crate::postings::FieldBlockBound {
+            field_count: self.field_count,
+            present_fields: self.present_fields,
+            max_tf_bucket,
+            min_doc_length: self.min_doc_length,
+            last,
+        }
+    }
+}
+
+/// Reads one `LSG4` term bound (RFC §5.4) with its complete validation set:
+/// a non-empty field mask within `field_count`, a non-empty bucket mask per
+/// set field, and `min_len < u32::MAX` per set bucket.
+fn field_minima<S: Source + ?Sized>(
+    reader: &mut Window<'_, S>,
+    field_count: u8,
+) -> Result<FieldMinima> {
+    let field_mask = reader.u32()?;
+    if field_mask == 0 || field_mask >> field_count != 0 {
+        return Err(Error::Corrupt("field bound mask"));
+    }
+    let mut out = FieldMinima::new(field_count);
+    out.present_fields = field_mask as u16;
+    for field in 0..16u32 {
+        if field_mask & (1 << field) == 0 {
+            continue;
+        }
+        let bucket_mask = reader.u32()?;
+        if bucket_mask == 0 || bucket_mask >> BUCKET_COUNT != 0 {
+            return Err(Error::Corrupt("field bound buckets"));
+        }
+        for bucket in 0..BUCKET_COUNT {
+            if bucket_mask & (1 << bucket) == 0 {
+                continue;
+            }
+            let length = reader.u32()?;
+            if length == u32::MAX {
+                return Err(Error::Corrupt("field bound length"));
+            }
+            out.min_doc_length[field as usize][bucket] = length;
+        }
+    }
+    Ok(out)
+}
+
 impl<'a, S: Source + ?Sized> PostingsCursor<'a, S> {
     pub fn new(
         source: &'a S,
         start: u64,
         len: u64,
         format: Format,
+        window_bytes: usize,
+    ) -> Result<Self> {
+        if format == Format::Lsg4 {
+            // Field bounds need the header's field count; a legacy decode
+            // would misparse the field-bound bytes.
+            return Err(Error::Corrupt("postings format"));
+        }
+        Self::new_inner(source, start, len, format, 0, window_bytes)
+    }
+
+    /// The field-aware (`LSG4`) constructor; `field_count` is the segment
+    /// header value the bounds are validated against.
+    pub fn new_fields(
+        source: &'a S,
+        start: u64,
+        len: u64,
+        field_count: u8,
+        window_bytes: usize,
+    ) -> Result<Self> {
+        if field_count == 0 || field_count > 16 {
+            return Err(Error::Corrupt("segment field count"));
+        }
+        Self::new_inner(source, start, len, Format::Lsg4, field_count, window_bytes)
+    }
+
+    fn new_inner(
+        source: &'a S,
+        start: u64,
+        len: u64,
+        format: Format,
+        field_count: u8,
         window_bytes: usize,
     ) -> Result<Self> {
         let end = start.checked_add(len).ok_or(Error::Truncated)?;
@@ -94,10 +231,13 @@ impl<'a, S: Source + ?Sized> PostingsCursor<'a, S> {
         let grouped = form & 1 != 0;
         let scored = form & 6 != 0;
         let compact = form & 4 != 0;
+        // `LSG3` and `LSG4` write a term bound for one-block streams and a
+        // table otherwise; `LSG2` writes a table however few blocks.
+        let term_bound_layout = matches!(format, Format::Lsg3 | Format::Lsg4);
         if scored
             && (format == Format::Lsg1
-                || (compact && (format != Format::Lsg3 || count == 0 || count > BLOCK_POSTINGS))
-                || (!compact && format == Format::Lsg3 && count <= BLOCK_POSTINGS))
+                || (compact && (!term_bound_layout || count == 0 || count > BLOCK_POSTINGS))
+                || (!compact && term_bound_layout && count <= BLOCK_POSTINGS))
         {
             return Err(Error::Corrupt("postings bounds layout for format"));
         }
@@ -113,7 +253,11 @@ impl<'a, S: Source + ?Sized> PostingsCursor<'a, S> {
             )
         } else if compact {
             let at = header.at;
-            minima(&mut header)?;
+            if field_count != 0 {
+                field_minima(&mut header, field_count)?;
+            } else {
+                minima(&mut header)?;
+            }
             (at, header.at)
         } else {
             (header.at, header.at)
@@ -132,6 +276,8 @@ impl<'a, S: Source + ?Sized> PostingsCursor<'a, S> {
             scored,
             compact,
             minima: [u32::MAX; BUCKET_COUNT],
+            field_count,
+            field_minima_state: None,
             bound_last: None,
             previous_bound: None,
             sparse_start: 0,
@@ -171,12 +317,52 @@ impl<'a, S: Source + ?Sized> PostingsCursor<'a, S> {
         if self.failed {
             return Err(Error::Corrupt("maintenance cursor failed"));
         }
+        if self.field_count != 0 {
+            return Err(Error::Corrupt("postings format"));
+        }
         let result = checkpoint().and_then(|_| self.next_inner());
         self.failed = result.is_err();
-        result
+        match result? {
+            None => Ok(None),
+            Some(step) => Ok(Some(PostingEntry {
+                tid: step.tid,
+                completed_bound: step.completed.then_some(BlockBound {
+                    min_len: self.minima,
+                    last: step.tid,
+                }),
+            })),
+        }
     }
 
-    fn next_inner(&mut self) -> Result<Option<PostingEntry>> {
+    /// The field-aware sibling of [`PostingsCursor::next_with`]: one
+    /// checkpoint per posting, and the block's stored field bound on the
+    /// last posting of each scored block.
+    pub fn next_fields_with(
+        &mut self,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<Option<FieldPostingEntry>> {
+        if self.failed {
+            return Err(Error::Corrupt("maintenance cursor failed"));
+        }
+        if self.field_count == 0 {
+            return Err(Error::Corrupt("postings format"));
+        }
+        let result = checkpoint().and_then(|_| self.next_inner());
+        self.failed = result.is_err();
+        match result? {
+            None => Ok(None),
+            Some(step) => Ok(Some(FieldPostingEntry {
+                tid: step.tid,
+                completed_bound: step.completed.then(|| {
+                    self.field_minima_state
+                        .expect("read at the block start")
+                        .bound(step.tid)
+                }),
+            })),
+        }
+    }
+
+    fn next_inner(&mut self) -> Result<Option<Step>> {
         if self.ordinal == self.count {
             if self.grouped {
                 self.finish_group()?;
@@ -213,27 +399,20 @@ impl<'a, S: Source + ?Sized> PostingsCursor<'a, S> {
         }
         self.previous = Some(tid);
         self.ordinal += 1;
-        let completed_bound = if self.scored
-            && (self.ordinal.is_multiple_of(BLOCK_POSTINGS) || self.ordinal == self.count)
-        {
-            if self.bound_last.is_some_and(|last| last != tid) {
-                return Err(Error::Corrupt("block bound endpoint"));
-            }
-            Some(BlockBound {
-                min_len: self.minima,
-                last: tid,
-            })
-        } else {
-            None
-        };
-        Ok(Some(PostingEntry {
-            tid,
-            completed_bound,
-        }))
+        let completed = self.scored
+            && (self.ordinal.is_multiple_of(BLOCK_POSTINGS) || self.ordinal == self.count);
+        if completed && self.bound_last.is_some_and(|last| last != tid) {
+            return Err(Error::Corrupt("block bound endpoint"));
+        }
+        Ok(Some(Step { tid, completed }))
     }
 
     fn read_bound(&mut self) -> Result<()> {
-        self.minima = minima(&mut self.bounds)?;
+        if self.field_count != 0 {
+            self.field_minima_state = Some(field_minima(&mut self.bounds, self.field_count)?);
+        } else {
+            self.minima = minima(&mut self.bounds)?;
+        }
         if !self.compact {
             let block = self
                 .previous_bound
@@ -562,6 +741,86 @@ mod tests {
         let last = list.len() - 2;
         list[last] = 1;
         assert!(validate(&list, Format::Lsg3, 1).is_err());
+    }
+
+    /// Field-scored streams: `(field, bucket)` per posting and the doc's
+    /// per-field length row.
+    fn build_fields(tids: &[Tid], field_count: u8) -> Vec<u8> {
+        let mut builder = PostingsBuilder::default();
+        for (i, tid) in tids.iter().enumerate() {
+            let lens: Vec<u32> = (0..field_count)
+                .map(|field| 10 + u32::from(field) * 3 + (i % 7) as u32)
+                .collect();
+            let fields: Vec<(u8, u8)> = (0..field_count)
+                .filter(|field| (i + usize::from(*field)) % 3 != 0)
+                .map(|field| (field, ((i + usize::from(field) + 1) % 16) as u8))
+                .collect();
+            if !fields.is_empty() {
+                builder.push_scored_fields(*tid, &fields, &lens).unwrap();
+            }
+        }
+        builder.finish_as(Format::Lsg4)
+    }
+
+    fn validate_fields(bytes: &[u8], field_count: u8, window: usize) -> Result<()> {
+        let mut cursor =
+            PostingsCursor::new_fields(bytes, 0, bytes.len() as u64, field_count, window)?;
+        while cursor.next_fields_with(|| Ok(()))?.is_some() {}
+        Ok(())
+    }
+
+    #[test]
+    fn field_streams_match_the_query_reader_in_all_windows() {
+        let field_count = 4u8;
+        for tids in [
+            sparse(0),
+            sparse(1),
+            sparse(128),
+            sparse(129),
+            sparse(301),
+            dense(3),
+            dense(260),
+        ] {
+            let bytes = build_fields(&tids, field_count);
+            let expected = Postings::parse_fields(&bytes, field_count)
+                .unwrap()
+                .cursor()
+                .unwrap()
+                .field_block_bounds()
+                .unwrap();
+            for window in [1, 2, 7, 127, 4096] {
+                let mut cursor =
+                    PostingsCursor::new_fields(&bytes, 0, bytes.len() as u64, field_count, window)
+                        .unwrap();
+                let mut rows = Vec::new();
+                let mut bounds = Vec::new();
+                while let Some(entry) = cursor.next_fields_with(|| Ok(())).unwrap() {
+                    rows.push(entry.tid);
+                    if let Some(bound) = entry.completed_bound {
+                        bounds.push(bound);
+                    }
+                    assert!(cursor.retained_bytes() <= 2 * window);
+                }
+                assert_eq!(rows, tids);
+                assert_eq!(bounds, expected);
+                assert_eq!(cursor.retained_bytes(), 0);
+            }
+            // The legacy constructor refuses the format, and corruption in
+            // the bound bytes is caught, not trusted.
+            assert!(PostingsCursor::new(&bytes, 0, bytes.len() as u64, Format::Lsg4, 8).is_err());
+            let postings = Postings::parse_fields(&bytes, field_count).unwrap();
+            if let Some((at, _)) = postings.bounds_position() {
+                let mut tampered = bytes.clone();
+                tampered[at] = 0;
+                assert!(validate_fields(&tampered, field_count, 3).is_err());
+            }
+            for cut in 0..bytes.len() {
+                assert!(
+                    validate_fields(&bytes[..cut], field_count, 3).is_err(),
+                    "cut {cut}"
+                );
+            }
+        }
     }
 
     #[test]

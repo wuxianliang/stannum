@@ -32,14 +32,17 @@ pub mod layout;
 pub mod verify;
 pub mod wal;
 
+use tinql::runtime::plan::FieldScope;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::CStr;
 use std::rc::Rc;
 
 use layout::{
-    BufferState, CHAIN_CAPACITY, FLAG_REMOVAL_HORIZONS, KIND_BUFFER, KIND_FREE, KIND_META,
-    KIND_RUN, MAX_PENDING, MAX_SEGMENTS, Meta, NONE, PAGE_SIZE, Pending, Run, SPECIAL_SIZE,
-    SegmentEntry,
+    BufferState, CHAIN_CAPACITY, FLAG_REMOVAL_HORIZONS, FieldMeta, KIND_BUFFER, KIND_FREE,
+    KIND_META, KIND_RUN, MAX_PENDING, MAX_SEGMENTS, Meta, NONE, PAGE_SIZE, Pending, Run,
+    SPECIAL_SIZE, SegmentEntry,
 };
 use pgrx::{
     FromDatum, GucContext, GucFlags, GucRegistry, GucSetting, PgLogLevel, PgRelation,
@@ -464,10 +467,11 @@ fn restamp(meta: &Meta, released: &[u32], horizon: u32) -> Option<Meta> {
 
 // --- Tokenizers ---------------------------------------------------------------
 
+type TokenizerCache =
+    HashMap<([u8; crate::options::SPEC_BYTES], u64), Rc<CompiledTokenizerPipeline>>;
+
 thread_local! {
-    static TOKENIZERS: RefCell<
-        HashMap<([u8; crate::options::SPEC_BYTES], u64), Rc<CompiledTokenizerPipeline>>,
-    > = RefCell::new(HashMap::new());
+    static TOKENIZERS: RefCell<TokenizerCache> = RefCell::new(HashMap::new());
 }
 
 /// The tokenizer an index was built with, compiled once per backend.
@@ -951,6 +955,18 @@ impl Index for MemoizedSegment {
     fn lengths(&self) -> Lengths<'_> {
         self.reader.lengths()
     }
+
+    fn field_count(&self) -> u8 {
+        self.reader.field_count()
+    }
+
+    fn field_length(&self, ordinal: u32, field: u8) -> segment::Result<u32> {
+        self.reader.field_length(ordinal, field)
+    }
+
+    fn field_total(&self, field: u8) -> segment::Result<u64> {
+        self.reader.field_total(field)
+    }
 }
 
 /// Cached readers by (index identity, segment generation).
@@ -1290,6 +1306,7 @@ unsafe fn buffer_index(
 
 /// What this backend's caches hold, for tests.
 #[cfg(any(test, feature = "pg_test"))]
+#[allow(dead_code)] // only exercised under the pg_test feature
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheProbe {
     pub cached_segments: usize,
@@ -1301,6 +1318,7 @@ pub struct CacheProbe {
 }
 
 #[cfg(any(test, feature = "pg_test"))]
+#[allow(dead_code)] // only exercised under the pg_test feature
 pub fn cache_probe() -> CacheProbe {
     let (cached_segments, memoized_terms) = SEGMENT_READERS.with_borrow(|readers| {
         (
@@ -1467,7 +1485,7 @@ unsafe fn replace_buffer(index: pg_sys::Relation, state: &mut BufferState, data:
 
 fn finish_builder(builder: SegmentBuilder) -> (Vec<u8>, u32, u64) {
     let docs = builder.document_count() as u32;
-    let blob = builder.finish();
+    let blob = builder.finish_auto();
     let total_length = codec(Segment::parse(&blob)).total_length();
     (blob, docs, total_length)
 }
@@ -1650,12 +1668,18 @@ unsafe fn merge(index: pg_sys::Relation, meta: &mut Meta, mut positions: Vec<usi
             old.push(meta.segments.remove(position));
         }
         old.reverse();
+        // A multi-column index merges in the LSG4 layout; LSG3 and LSG4
+        // segments never mix (RFC §5.8).
+        let fields = meta
+            .fields
+            .as_ref()
+            .map(|fields| u8::try_from(fields.names.len()).expect("at most 16 fields"));
         let (blob, docs, total_length) = match direct_merge_limits(&old) {
-            Some(limits) => merge_segments_direct(index, &old, limits),
+            Some(limits) => merge_segments_direct(index, &old, limits, fields),
             // Aggregate input can exceed one run's u32 byte/document limit
             // while dropping dead tuples still produces a representable run.
             // Preserve the old per-input reconstruction path in that case.
-            None => merge_segments_reconstructed(index, &old),
+            None => merge_segments_reconstructed(index, &old, fields),
         };
         let (run, map) = write_segment_run(index, &blob);
         let entry = new_entry(meta, run, map, docs, total_length);
@@ -1688,6 +1712,7 @@ unsafe fn merge_segments_direct(
     index: pg_sys::Relation,
     entries: &[SegmentEntry],
     limits: segment::merge::MergeLimits,
+    fields: Option<u8>,
 ) -> (Vec<u8>, u32, u64) {
     use segment::merge::{MergeError, MergeInput};
     // Owned input bytes are released when this function returns, before WAL
@@ -1702,14 +1727,18 @@ unsafe fn merge_segments_direct(
         .iter()
         .map(|(bytes, dead)| MergeInput { bytes, dead })
         .collect::<Vec<_>>();
-    let blob = segment::merge::merge(&inputs, limits, || {
+    let checkpoint = || {
         // PostgreSQL defers interrupts while the metadata LWLock is held.
         // Do not bypass that protection; insert checks again after release.
         race_point("merge:checkpoint");
         pgrx::check_for_interrupts!();
         Ok(())
-    })
-    .unwrap_or_else(|error| match error {
+    };
+    let merged = match fields {
+        Some(_) => segment::merge::merge_fields(&inputs, limits, checkpoint),
+        None => segment::merge::merge(&inputs, limits, checkpoint),
+    };
+    let blob = merged.unwrap_or_else(|error| match error {
         MergeError::Codec(_) | MergeError::InvalidInput { .. } => {
             let generations = entries
                 .iter()
@@ -1732,8 +1761,14 @@ unsafe fn merge_segments_direct(
 unsafe fn merge_segments_reconstructed(
     index: pg_sys::Relation,
     entries: &[SegmentEntry],
+    fields: Option<u8>,
 ) -> (Vec<u8>, u32, u64) {
-    let mut builder = SegmentBuilder::default();
+    // An empty field-aware output still records its field count, so the
+    // index never mixes formats (RFC §5.8).
+    let mut builder = match fields {
+        Some(field_count) => SegmentBuilder::with_field_count(field_count),
+        None => SegmentBuilder::default(),
+    };
     for entry in entries {
         pgrx::check_for_interrupts!();
         let label = generation_label(entry.generation);
@@ -1814,6 +1849,60 @@ pub unsafe fn build_empty(index: pg_sys::Relation) {
 }
 
 /// A fresh main/init fork always starts with a meta page and buffer head.
+unsafe fn field_meta(index: pg_sys::Relation) -> Option<FieldMeta> {
+    unsafe {
+        let metadata = (*index).rd_index.as_ref()?;
+        let count = usize::try_from(metadata.indnkeyatts).ok()?;
+        if count < 2 {
+            if crate::options::field_weights(index)
+                .is_some_and(|weights| !weights.trim().is_empty())
+            {
+                pgrx::error!("field_weights applies to multi-column stannum indexes");
+            }
+            return None;
+        }
+        if count > 16 {
+            pgrx::error!("stannum multi-column indexes support at most 16 key columns");
+        }
+        let heap = metadata.indrelid;
+        let mut names = Vec::with_capacity(count);
+        for i in 0..count {
+            let attnum = *metadata.indkey.values.as_ptr().add(i);
+            if attnum <= 0 {
+                pgrx::error!("stannum multi-column indexes reject expression keys");
+            }
+            let ptr = pg_sys::get_attname(heap, attnum, false);
+            if ptr.is_null() {
+                pgrx::error!("stannum index attribute no longer exists");
+            }
+            names.push(CStr::from_ptr(ptr).to_string_lossy().into_owned());
+        }
+        let mut weights = vec![1.0f32; count];
+        if let Some(raw) = crate::options::field_weights(index) {
+            let mut seen = HashSet::new();
+            for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let (name, value) = item
+                    .split_once(':')
+                    .unwrap_or_else(|| pgrx::error!("field_weights entries must be name:weight"));
+                let value: f32 = value.parse().unwrap_or_else(|_| {
+                    pgrx::error!("field_weights weights must be finite positive numbers")
+                });
+                if !value.is_finite() || value <= 0.0 || !seen.insert(name) {
+                    pgrx::error!("invalid field_weights");
+                }
+                let pos = names.iter().position(|n| n == name).unwrap_or_else(|| {
+                    pgrx::error!("field_weights names must match index columns")
+                });
+                weights[pos] = value;
+            }
+            if seen.len() != count {
+                pgrx::error!("field_weights names must be a permutation of index columns");
+            }
+        }
+        Some(FieldMeta { names, weights })
+    }
+}
+
 unsafe fn empty_meta(index: pg_sys::Relation) -> Meta {
     unsafe {
         let spec = crate::options::tokenizer_spec(index);
@@ -1835,6 +1924,7 @@ unsafe fn empty_meta(index: pg_sys::Relation) -> Meta {
             segments: Vec::new(),
             pending: Vec::new(),
             analysis: crate::dict::stamp(&crate::options::encode_spec(&spec)),
+            fields: field_meta(index),
         }
     }
 }
@@ -1894,6 +1984,7 @@ pub unsafe fn build_init_fork(index: pg_sys::Relation) {
 pub struct Builder {
     tokenizer: Option<Rc<CompiledTokenizerPipeline>>,
     segment: SegmentBuilder,
+    fields: Option<FieldMeta>,
 }
 
 impl Builder {
@@ -1903,6 +1994,7 @@ impl Builder {
         let tokenizer = unsafe { present(index) }.then(|| unsafe { index_tokenizer(index) });
         Self {
             tokenizer,
+            fields: unsafe { field_meta(index) },
             segment: SegmentBuilder::default(),
         }
     }
@@ -1920,15 +2012,35 @@ impl Builder {
             return;
         };
         unsafe {
-            if *isnull {
-                return;
+            if let Some(fields) = &self.fields {
+                let key_count = fields.names.len();
+                let mut all = Vec::new();
+                for ordinal in 0..key_count {
+                    if *isnull.add(ordinal) {
+                        continue;
+                    }
+                    let text = String::from_datum(*values.add(ordinal), false)
+                        .expect("non-null indexed text");
+                    for (term, pos) in tokens_of(&tokenizer, &text) {
+                        all.push((ordinal as u8, term, pos));
+                    }
+                }
+                codec(self.segment.add_document_fields(
+                    tid_of(*tid),
+                    key_count as u8,
+                    all.iter().map(|(f, t, p)| (*f, t.as_str(), *p)),
+                ));
+            } else {
+                if *isnull {
+                    return;
+                }
+                let text = String::from_datum(*values, false).expect("non-null indexed text");
+                let tokens = tokens_of(&tokenizer, &text);
+                codec(self.segment.add_document(
+                    tid_of(*tid),
+                    tokens.iter().map(|(term, pos)| (term.as_str(), *pos)),
+                ));
             }
-            let text = String::from_datum(*values, false).expect("non-null indexed text");
-            let tokens = tokens_of(&tokenizer, &text);
-            codec(self.segment.add_document(
-                tid_of(*tid),
-                tokens.iter().map(|(term, pos)| (term.as_str(), *pos)),
-            ));
             if self.segment.document_count() >= BUILD_SEGMENT_DOCS.get().max(1) as usize {
                 crate::progress::update_subphase(crate::progress::SUBPHASE_SEGMENT_FLUSH);
                 self.flush(index);
@@ -1974,35 +2086,86 @@ pub unsafe fn insert(
     tid: pg_sys::ItemPointer,
 ) {
     unsafe {
-        if *isnull || !present(index) {
+        if !present(index) {
             return;
         }
-        let text = String::from_datum(*values, false).expect("non-null indexed text");
         let (meta_buffer, mut meta, bytes) = loop {
             pgrx::check_for_interrupts!();
-            let (identity, spec) = {
+            let (identity, spec, fields) = {
                 let (guard, captured) = read_meta(index, false);
-                let settings = (captured.identity, captured.spec);
+                // The tag *bytes* join (identity, spec): a concurrent REINDEX
+                // that changed the field count must not let this row's record
+                // through against the rebuilt index (RFC §5.7).
+                let fields = captured
+                    .fields
+                    .as_ref()
+                    .map(layout::fields_tag_bytes)
+                    .map(|record| {
+                        record.unwrap_or_else(|| {
+                            corrupt("Stannum index metadata: undecodable fields record")
+                        })
+                    });
+                let settings = (captured.identity, captured.spec, fields);
                 drop(guard);
                 settings
             };
             // Text preparation touches no index pages. In particular, long
             // documents must not serialize readers and other writers while
             // tokenization and forward-record encoding run.
+            let key_count = match &fields {
+                None => 1,
+                Some(record) => usize::from(*record.first().expect("a fields record has one byte")),
+            };
+            if (0..key_count).all(|i| *isnull.add(i)) {
+                return;
+            }
             let bytes = {
                 let tokenizer = tokenizer_for(&spec, dictionary_fingerprint(&spec));
-                let tokens = tokens_of(&tokenizer, &text);
-                let record = codec(ForwardRecord::from_tokens(
-                    tid_of(*tid),
-                    tokens.iter().map(|(term, pos)| (term.as_str(), *pos)),
-                ));
+                let record = if let Some(_record) = &fields {
+                    let mut all = Vec::new();
+                    for ordinal in 0..key_count {
+                        if *isnull.add(ordinal) {
+                            continue;
+                        }
+                        let value = String::from_datum(*values.add(ordinal), false)
+                            .expect("non-null indexed text");
+                        for (term, pos) in tokens_of(&tokenizer, &value) {
+                            all.push((ordinal as u8, term, pos));
+                        }
+                    }
+                    codec(ForwardRecord::from_tokens_fields(
+                        tid_of(*tid),
+                        u8::try_from(key_count).expect("a fields record holds at most 16 fields"),
+                        all.iter().map(|(f, t, p)| (*f, t.as_str(), *p)),
+                    ))
+                } else {
+                    if *isnull {
+                        return;
+                    }
+                    let text = String::from_datum(*values, false).expect("non-null indexed text");
+                    let tokens = tokens_of(&tokenizer, &text);
+                    codec(ForwardRecord::from_tokens(
+                        tid_of(*tid),
+                        tokens.iter().map(|(term, pos)| (term.as_str(), *pos)),
+                    ))
+                };
                 let mut bytes = Vec::new();
                 codec(record.encode(&mut bytes));
                 bytes
             };
             race_point("insert:prepared");
             let (guard, current) = read_meta(index, true);
-            if current.identity == identity && current.spec == spec {
+            let current_fields =
+                current
+                    .fields
+                    .as_ref()
+                    .map(layout::fields_tag_bytes)
+                    .map(|record| {
+                        record.unwrap_or_else(|| {
+                            corrupt("Stannum index metadata: undecodable fields record")
+                        })
+                    });
+            if current.identity == identity && current.spec == spec && current_fields == fields {
                 // Use the latest buffer/directory. Appends, folds and VACUUM
                 // during preparation do not invalidate this row's encoding.
                 break (guard, current, bytes);
@@ -2047,8 +2210,81 @@ pub struct View {
     /// `write buffer`.
     pub labels: Vec<String>,
     /// Each source's dead list as a set, decoded once per backend and dead
-    /// run rather than once per statement; empty for the write buffer.
+    /// Run rather than once per statement; empty for the write buffer.
     pub dead_sets: Vec<DeadSet>,
+    /// The index's field plan from its meta trailer (RFC §5.7); `None` on a
+    /// single-column (LSG3) index. Field syntax in a query resolves against
+    /// these names, and their weights build every weighted length.
+    pub fields: Option<FieldMeta>,
+}
+
+/// The field names a plan resolves `Query::Field` against: a fieldless index
+/// knows none.
+pub(crate) fn field_scope(fields: Option<&FieldMeta>) -> &dyn FieldScope {
+    match fields {
+        Some(fields) => fields,
+        None => &tinql::runtime::plan::NoFields,
+    }
+}
+
+impl FieldScope for FieldMeta {
+    fn field_id(&self, name: &str) -> Option<u8> {
+        self.names
+            .iter()
+            .position(|field| field == name)
+            .and_then(|field| u8::try_from(field).ok())
+    }
+}
+
+/// The recorded field plan of a present index, without drift warnings.
+///
+/// # Safety
+/// `index` is a live index relation the caller may read.
+pub(crate) unsafe fn fields_meta(index: pg_sys::Relation) -> Option<FieldMeta> {
+    if !unsafe { present(index) } {
+        return None;
+    }
+    unsafe { read_meta(index, false) }.1.fields
+}
+
+/// The recorded field plan must still describe the relation: opening an
+/// index whose columns were renamed (or whose key list changed) is an error
+/// until REINDEX rewrites the trailer (RFC §5.7).
+unsafe fn check_fields(index: pg_sys::Relation, meta: &Meta) {
+    unsafe {
+        let Some(recorded) = &meta.fields else {
+            return;
+        };
+        let Some(metadata) = (*index).rd_index.as_ref() else {
+            return;
+        };
+        let count = usize::try_from(metadata.indnkeyatts).unwrap_or(0);
+        let mut current = Vec::with_capacity(count);
+        for position in 0..count {
+            let attnum = *metadata.indkey.values.as_ptr().add(position);
+            if attnum <= 0 {
+                current.clear();
+                break;
+            }
+            let name = pg_sys::get_attname(metadata.indrelid, attnum, false);
+            if name.is_null() {
+                current.clear();
+                break;
+            }
+            current.push(CStr::from_ptr(name).to_string_lossy().into_owned());
+        }
+        if current != recorded.names {
+            let name = pg_sys::get_rel_name((*index).rd_id);
+            let name = if name.is_null() {
+                "?".to_owned()
+            } else {
+                CStr::from_ptr(name).to_string_lossy().into_owned()
+            };
+            pgrx::error!(
+                "stannum index {name}: the indexed columns changed since the index was built; REINDEX required"
+            );
+        }
+    }
 }
 
 /// Read metadata without drift warnings (the explicit analysis diagnostic).
@@ -2091,6 +2327,7 @@ unsafe fn view_inner(index_oid: pg_sys::Oid, enforce_analysis: bool) -> View {
             let (meta_buffer, meta) = read_meta(index, false);
             if enforce_analysis && !checked_analysis {
                 crate::dict::check_analysis(index_oid, &meta);
+                check_fields(index, &meta);
                 checked_analysis = true;
             }
             if recovery && !standby_reads_allowed(&meta_buffer) {
@@ -2150,6 +2387,7 @@ unsafe fn view_inner(index_oid: pg_sys::Oid, enforce_analysis: bool) -> View {
                 immutable_sources,
                 labels,
                 dead_sets,
+                fields: meta.fields.clone(),
             };
         }
     }
@@ -2529,7 +2767,11 @@ unsafe fn maintain_segments(index: pg_sys::Relation) {
             } else {
                 return;
             };
-        unsafe { replace_entries(index, meta.identity, &inputs) };
+        let fields = meta
+            .fields
+            .as_ref()
+            .map(|fields| u8::try_from(fields.names.len()).expect("at most 16 fields"));
+        unsafe { replace_entries(index, meta.identity, &inputs, fields) };
     }
 }
 
@@ -2565,6 +2807,7 @@ unsafe fn maintenance_merge_blob(
     index: pg_sys::Relation,
     identity: u64,
     inputs: &[SegmentEntry],
+    fields: Option<u8>,
 ) -> Option<Vec<u8>> {
     use segment::merge_strategy::{Facts, Policy, Strategy};
     let facts = Facts {
@@ -2578,8 +2821,12 @@ unsafe fn maintenance_merge_blob(
     };
     let plan = segment::merge_strategy::choose(facts, policy);
     pgrx::debug1!("Stannum VACUUM merge: {:?}: {}", plan.strategy, plan.reason);
-    if plan.strategy == Strategy::LegacyOversized {
-        return unsafe { maintenance_reconstruct_blob(index, identity, inputs) };
+    if plan.strategy == Strategy::LegacyOversized
+        || (fields.is_some() && plan.strategy != Strategy::Direct)
+    {
+        // A field-aware index never merges into the single-field layout, and
+        // the reconstruction path keeps the field count (RFC §5.8).
+        return unsafe { maintenance_reconstruct_blob(index, identity, inputs, fields) };
     }
     let limits = direct_merge_limits(inputs).expect("planner admitted aggregate format limits");
     let mut owned = Vec::with_capacity(inputs.len());
@@ -2599,11 +2846,15 @@ unsafe fn maintenance_merge_blob(
         .iter()
         .map(|(bytes, dead)| segment::merge::MergeInput { bytes, dead })
         .collect::<Vec<_>>();
-    let result = segment::merge_strategy::execute(plan.strategy, &sources, limits, || {
+    let checkpoint = || {
         race_point("maintenance:checkpoint");
         pgrx::check_for_interrupts!();
         Ok(())
-    });
+    };
+    let result = match fields {
+        Some(_) => segment::merge::merge_fields(&sources, limits, checkpoint),
+        None => segment::merge_strategy::execute(plan.strategy, &sources, limits, checkpoint),
+    };
     match result {
         Ok(blob) => Some(blob),
         Err(error) => {
@@ -2630,8 +2881,12 @@ unsafe fn maintenance_reconstruct_blob(
     index: pg_sys::Relation,
     identity: u64,
     inputs: &[SegmentEntry],
+    fields: Option<u8>,
 ) -> Option<Vec<u8>> {
-    let mut builder = SegmentBuilder::default();
+    let mut builder = match fields {
+        Some(field_count) => SegmentBuilder::with_field_count(field_count),
+        None => SegmentBuilder::default(),
+    };
     for entry in inputs {
         pgrx::check_for_interrupts!();
         let label = generation_label(entry.generation);
@@ -2660,8 +2915,13 @@ unsafe fn maintenance_reconstruct_blob(
 /// for entry including the dead-list run. Returns whether it published.
 /// Inputs without a live document leave the directory with no successor. A
 /// single input keeps its position; several merge to the end.
-unsafe fn replace_entries(index: pg_sys::Relation, identity: u64, inputs: &[SegmentEntry]) -> bool {
-    let Some(blob) = (unsafe { maintenance_merge_blob(index, identity, inputs) }) else {
+unsafe fn replace_entries(
+    index: pg_sys::Relation,
+    identity: u64,
+    inputs: &[SegmentEntry],
+    fields: Option<u8>,
+) -> bool {
+    let Some(blob) = (unsafe { maintenance_merge_blob(index, identity, inputs, fields) }) else {
         return false;
     };
     let segment = codec(Segment::parse(&blob));
@@ -3073,7 +3333,10 @@ mod hardening_tests {
             crosses_page |= pages.len() > 1;
             expected += pages.len() as i64;
         }
-        assert!(starts_mid_page, "fixture needs a non-aligned dictionary extent");
+        assert!(
+            starts_mid_page,
+            "fixture needs a non-aligned dictionary extent"
+        );
         assert!(crosses_page, "fixture must span dictionary pages");
         assert_eq!(
             Spi::get_one::<i64>(

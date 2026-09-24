@@ -51,6 +51,9 @@ impl fmt::Display for Query {
                     _ => write!(f, "({inner})^{factor}"),
                 }
             }
+            Query::Field { name, inner } => {
+                write!(f, "{}:({inner})", crate::ast::FieldName(name))
+            }
             Query::AtLeast { min, children } => {
                 write!(f, "ATLEAST({min}")?;
                 for child in children {

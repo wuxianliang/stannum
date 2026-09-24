@@ -52,6 +52,34 @@ pub enum PlanError {
     Segment(#[from] segment::Error),
     #[error("span evaluation failed: {0}")]
     Span(#[from] boldi_vigna::SpanError),
+    #[error("unknown field '{0}'")]
+    UnknownField(String),
+    #[error("field scopes are not supported for this query shape")]
+    FieldScopeShape,
+    #[error("field-scoped phrases and spans are not supported yet")]
+    FieldScopePositional,
+    #[error("positional queries over a multi-field index need a field scope")]
+    MultiFieldPositional,
+}
+
+/// Resolves the field names a query scopes against (`title:(…)`).
+///
+/// The segment format stores field ids, not names, so the name plan of an
+/// index comes from its metadata: a PostgreSQL adapter resolves the recorded
+/// column names, an in-memory segment has none.
+pub trait FieldScope {
+    /// The field id `name` names, or `None` when this index has no such
+    /// field (including a fieldless index).
+    fn field_id(&self, name: &str) -> Option<u8>;
+}
+
+/// The scope of an index with no field names: every name is unknown.
+pub struct NoFields;
+
+impl FieldScope for NoFields {
+    fn field_id(&self, _name: &str) -> Option<u8> {
+        None
+    }
 }
 
 type Result<T> = std::result::Result<T, PlanError>;
@@ -65,13 +93,29 @@ pub struct Plan<'a> {
     pub estimate: u64,
 }
 
-/// Compiles `query` against `segment`.
+/// Compiles `query` against `segment` with no field names: a `Query::Field`
+/// node cannot be resolved and fails as an unknown field.
 pub fn plan<'a, I: Index + ?Sized>(
     query: &Query,
     segment: &'a I,
     limits: &Limits,
 ) -> Result<Plan<'a>> {
-    Planner { segment, limits }.query(query)
+    plan_scoped(query, segment, limits, &NoFields)
+}
+
+/// Compiles `query` against `segment` with its field names.
+pub fn plan_scoped<'a, I: Index + ?Sized>(
+    query: &Query,
+    segment: &'a I,
+    limits: &Limits,
+    fields: &dyn FieldScope,
+) -> Result<Plan<'a>> {
+    Planner {
+        segment,
+        limits,
+        fields,
+    }
+    .query(query)
 }
 
 /// Prefer bulk execution when a Boolean term has dense grouped postings. Purely
@@ -117,9 +161,19 @@ pub fn page_plan<'a, I: Index + ?Sized>(
     segment: &'a I,
     limits: &Limits,
 ) -> Result<PagePlan<'a>> {
+    page_plan_scoped(query, segment, limits, &NoFields)
+}
+
+/// [`page_plan`] with the index's field names for `Query::Field` nodes.
+pub fn page_plan_scoped<'a, I: Index + ?Sized>(
+    query: &Query,
+    segment: &'a I,
+    limits: &Limits,
+    fields: &dyn FieldScope,
+) -> Result<PagePlan<'a>> {
     use segment::pages;
     let scalar = || -> Result<PagePlan<'a>> {
-        let plan = plan(query, segment, limits)?;
+        let plan = plan_scoped(query, segment, limits, fields)?;
         Ok(PagePlan {
             cursor: Box::new(pages::Rows::new(plan.cursor)?),
             exact: plan.exact,
@@ -128,7 +182,7 @@ pub fn page_plan<'a, I: Index + ?Sized>(
     let children = |queries: Vec<&Query>, intersection: bool| -> Result<PagePlan<'a>> {
         let plans = queries
             .into_iter()
-            .map(|q| page_plan(q, segment, limits))
+            .map(|q| page_plan_scoped(q, segment, limits, fields))
             .collect::<Result<Vec<_>>>()?;
         let exact = plans.iter().all(|p| p.exact);
         let cursors = plans.into_iter().map(|p| p.cursor).collect();
@@ -166,7 +220,12 @@ pub fn page_plan<'a, I: Index + ?Sized>(
             if !inner.exact {
                 return scalar();
             }
-            let universe = Planner { segment, limits }.universe()?;
+            let universe = Planner {
+                segment,
+                limits,
+                fields,
+            }
+            .universe()?;
             Ok(PagePlan {
                 cursor: Box::new(pages::Difference::new(
                     pages::Rows::new(universe.cursor)?,
@@ -190,9 +249,73 @@ pub fn matches<I: Index + ?Sized>(
     Ok((segment::set::collect(plan.cursor)?, plan.exact))
 }
 
+/// A term's postings restricted to a field mask.
+///
+/// Postings alone cannot field-restrict a term — `df` is aggregate over every
+/// field (§5.5) — so each candidate's payload entry is decoded and its field
+/// set checked (RFC §5.11). The payload cursor walks the same ordinals as the
+/// postings cursor, so each skip decodes one entry.
+struct FieldFilter<'a> {
+    postings: PostingsCursor<'a>,
+    payload: PayloadCursor<'a>,
+    /// Bit i set: field i satisfies the scope.
+    mask: u16,
+}
+
+impl<'a> FieldFilter<'a> {
+    fn new(
+        postings: PostingsCursor<'a>,
+        payload: PayloadCursor<'a>,
+        mask: u16,
+    ) -> segment::Result<Self> {
+        let mut filter = Self {
+            postings,
+            payload,
+            mask,
+        };
+        filter.skip_unscoped()?;
+        Ok(filter)
+    }
+
+    /// Advances past postings whose payload entry carries no field in the
+    /// mask, leaving the cursor on the first that does.
+    fn skip_unscoped(&mut self) -> segment::Result<()> {
+        while self.postings.current().is_some() {
+            self.payload.seek(self.postings.ordinal())?;
+            let entry = self.payload.next_fields()?;
+            if entry
+                .fields
+                .iter()
+                .any(|hit| self.mask & (1 << hit.field) != 0)
+            {
+                return Ok(());
+            }
+            self.postings.advance()?;
+        }
+        Ok(())
+    }
+}
+
+impl Cursor for FieldFilter<'_> {
+    fn current(&self) -> Option<Tid> {
+        self.postings.current()
+    }
+
+    fn advance(&mut self) -> segment::Result<()> {
+        self.postings.advance()?;
+        self.skip_unscoped()
+    }
+
+    fn seek(&mut self, target: Tid) -> segment::Result<()> {
+        self.postings.seek(target)?;
+        self.skip_unscoped()
+    }
+}
+
 struct Planner<'a, 'l, I: Index + ?Sized> {
     segment: &'a I,
     limits: &'l Limits,
+    fields: &'l dyn FieldScope,
 }
 
 enum Expansion<'a> {
@@ -303,13 +426,13 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
         })
     }
 
-    fn expansion_plan(&self, expansion: Expansion<'a>) -> Result<Plan<'a>> {
+    fn expansion_plan(&self, expansion: Expansion<'a>, scope: Option<u16>) -> Result<Plan<'a>> {
         match expansion {
             Expansion::Overflow => self.inexact_universe(),
             Expansion::Terms(terms) => {
                 let children = terms
                     .into_iter()
-                    .map(|term| Self::term_plan(Some(term)))
+                    .map(|term| self.term_scoped(Some(term), scope))
                     .collect::<Result<Vec<_>>>()?;
                 self.or(children)
             }
@@ -378,15 +501,24 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
         })
     }
 
-    fn query(&self, query: &Query) -> Result<Plan<'a>> {
+    /// Plans `query`, restricted to the fields in `scope` when one is set: a
+    /// `Query::Field` node pushes its field down to the leaves, which decode
+    /// each candidate's payload entry to check it (RFC §5.11 phase 1).
+    fn query_scoped(&self, query: &Query, scope: Option<u16>) -> Result<Plan<'a>> {
         match query {
-            Query::Term(term) => Self::term_plan(self.segment.term(term)?),
-            Query::And(left, right) => self.and(vec![self.query(left)?, self.query(right)?]),
-            Query::Or(left, right) => self.or(vec![self.query(left)?, self.query(right)?]),
+            Query::Term(term) => self.term_scoped(self.segment.term(term)?, scope),
+            Query::And(left, right) => self.and(vec![
+                self.query_scoped(left, scope)?,
+                self.query_scoped(right, scope)?,
+            ]),
+            Query::Or(left, right) => self.or(vec![
+                self.query_scoped(left, scope)?,
+                self.query_scoped(right, scope)?,
+            ]),
             Query::Conjunction(children) => self.and(
                 children
                     .iter()
-                    .map(|c| self.query(c))
+                    .map(|c| self.query_scoped(c, scope))
                     .collect::<Result<_>>()?,
             ),
             Query::Disjunction { min, children } | Query::AtLeast { min, children } => self
@@ -394,21 +526,28 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                     *min,
                     children
                         .iter()
-                        .map(|c| self.query(c))
+                        .map(|c| self.query_scoped(c, scope))
                         .collect::<Result<_>>()?,
                 ),
             Query::Not(inner) => {
-                let inner = self.query(inner)?;
+                let inner = self.query_scoped(inner, scope)?;
                 self.not(inner)
             }
-            Query::MatchAll => self.universe(),
+            Query::MatchAll => {
+                // A scope over the document universe is not a field-presence
+                // test; refuse it rather than widen the scope silently.
+                if scope.is_some() {
+                    return Err(PlanError::FieldScopeShape);
+                }
+                self.universe()
+            }
             Query::Regex(regex) => {
                 let expansion = self.expand_regex(regex)?;
-                self.expansion_plan(expansion)
+                self.expansion_plan(expansion, scope)
             }
             Query::Range { lower, upper } => {
                 let expansion = self.expand_range(lower, upper)?;
-                self.expansion_plan(expansion)
+                self.expansion_plan(expansion, scope)
             }
             Query::Fuzzy {
                 term,
@@ -416,9 +555,32 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                 distance,
             } => {
                 let expansion = self.expand_fuzzy(term, *prefix, *distance)?;
-                self.expansion_plan(expansion)
+                self.expansion_plan(expansion, scope)
             }
-            Query::Boost { inner, .. } => self.query(inner),
+            Query::Boost { inner, .. } => self.query_scoped(inner, scope),
+            Query::Field { name, inner } => {
+                let Some(field) = self.fields.field_id(name) else {
+                    return Err(PlanError::UnknownField(name.clone()));
+                };
+                // An inner scope wins over an outer one.
+                self.query_scoped(inner, Some(1u16 << field))
+            }
+            Query::Span { .. } | Query::SpanExpr { .. } => self.positional(query, scope),
+        }
+    }
+
+    /// The two positional shapes. Field-scoped phrases and spans land in
+    /// phase 3, and an unscoped one must not compare positions across a
+    /// multi-field payload (each field's positions start at zero), so both
+    /// fail closed (RFC §5.11).
+    fn positional(&self, query: &Query, scope: Option<u16>) -> Result<Plan<'a>> {
+        if scope.is_some() {
+            return Err(PlanError::FieldScopePositional);
+        }
+        if self.segment.field_count() > 1 {
+            return Err(PlanError::MultiFieldPositional);
+        }
+        match query {
             Query::Span {
                 term_slots,
                 span_query,
@@ -454,7 +616,33 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                     },
                 )
             }
+            _ => unreachable!("positional plans come from span nodes"),
         }
+    }
+
+    /// A term's plan, restricted to `scope`'s fields when one is set.
+    fn term_scoped(&self, term: Option<Term<'a>>, scope: Option<u16>) -> Result<Plan<'a>> {
+        let Some(term) = term else {
+            return Ok(Self::empty());
+        };
+        // `df` stays the estimate: it is aggregate over every field (§5.5),
+        // so it is a conservative upper bound whatever the scope.
+        let estimate = u64::from(term.df());
+        let cursor = term.cursor()?;
+        let cursor: DynCursor<'a> = match scope {
+            None => Box::new(cursor),
+            Some(mask) => Box::new(FieldFilter::new(cursor, term.payload()?.cursor(), mask)?),
+        };
+        Ok(Plan {
+            cursor,
+            exact: true,
+            estimate,
+        })
+    }
+
+    /// Compiles `query` against `segment`.
+    fn query(&self, query: &Query) -> Result<Plan<'a>> {
+        self.query_scoped(query, None)
     }
 
     /// Resolves every slot, or `None` if any expansion overflowed.
@@ -778,6 +966,12 @@ fn span_to_segment_error(error: PlanError) -> segment::Error {
     match error {
         PlanError::Segment(error) => error,
         PlanError::Span(_) => segment::Error::Corrupt("span solver failed after planning"),
+        PlanError::UnknownField(_)
+        | PlanError::FieldScopeShape
+        | PlanError::FieldScopePositional
+        | PlanError::MultiFieldPositional => {
+            segment::Error::Corrupt("field scope failed after planning")
+        }
     }
 }
 

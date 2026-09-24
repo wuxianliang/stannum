@@ -31,7 +31,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 ///
 /// Keep this in lockstep with the exact dependency pin in `Cargo.toml`; the
 /// unit test below also checks the workspace lockfile.
-pub const JIEBA_RS_VERSION: u32 = (0 << 16) | (7 << 8) | 4;
+pub const JIEBA_RS_VERSION: u32 = (7 << 8) | 4;
 
 /// Identity of the embedded dictionary before PostgreSQL governance loads it.
 /// Computed dictionary fingerprints (including the empty table) must never

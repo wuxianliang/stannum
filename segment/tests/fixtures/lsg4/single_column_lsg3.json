@@ -1,0 +1,11 @@
+{
+  "schema": "stannum.lsg4-golden/1",
+  "case": "single_column_lsg3",
+  "kind": "valid",
+  "generator": {"git": "db68b07+", "tool": "SegmentBuilder::add_document + finish"},
+  "format": "LSG3",
+  "layout_revision": null,
+  "fields": [],
+  "documents": [],
+  "expected": {}
+}

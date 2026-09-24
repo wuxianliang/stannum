@@ -19,13 +19,14 @@
 use crate::{Error, Result, segment::Format, source::Source, tf_bucket::TfBucket};
 
 mod validate;
+pub use validate::validate_terms_fields;
 pub use validate::{TermAreas, validate_terms};
 
 mod dictionary;
 pub use dictionary::DictionaryCursor;
 
 mod postings;
-pub use postings::{PostingEntry, PostingsCursor};
+pub use postings::{FieldMinima, FieldPostingEntry, PostingEntry, PostingsCursor};
 
 struct Window<'a, S: Source + ?Sized> {
     source: &'a S,
@@ -106,6 +107,15 @@ pub struct PayloadEntry {
     pub positions: u32,
 }
 
+/// Summary of one validated field-aware (`LSG4`) payload entry: per present
+/// field its bucket and position count, without materializing positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldPayloadEntry {
+    pub field_mask: u16,
+    pub buckets: [u8; 16],
+    pub positions: [u32; 16],
+}
+
 /// A payload extent read with at most two `window_bytes` buffers, regardless of
 /// entry count, skip-table size or positions per document. No positions Vec is
 /// allocated. The source may itself retain bytes; use a bounded source for a
@@ -119,6 +129,8 @@ pub struct PayloadCursor<'a, S: Source + ?Sized> {
     ordinal: u32,
     interval: u32,
     format: Format,
+    /// The segment header's field count; meaningful for `LSG4` only.
+    field_count: u8,
     skip_offset: u64,
     failed: bool,
 }
@@ -134,6 +146,18 @@ impl<'a, S: Source + ?Sized> PayloadCursor<'a, S> {
         Self::new_with_checkpoint(source, start, len, format, window_bytes, || Ok(()))
     }
 
+    /// The field-aware (`LSG4`) constructor: `new` refuses the format, since
+    /// its entries carry field groups only
+    /// [`PayloadCursor::next_fields_with`] can decode.
+    pub fn new_fields(
+        source: &'a S,
+        start: u64,
+        len: u64,
+        field_count: u8,
+        window_bytes: usize,
+    ) -> Result<Self> {
+        Self::new_fields_with_checkpoint(source, start, len, field_count, window_bytes, || Ok(()))
+    }
     /// As `new`, with a checkpoint before parsing and for each legacy LSG1
     /// skip-table slot. Use this for cancellable maintenance of large terms.
     pub fn new_with_checkpoint(
@@ -145,12 +169,53 @@ impl<'a, S: Source + ?Sized> PayloadCursor<'a, S> {
         mut checkpoint: impl FnMut() -> Result<()>,
     ) -> Result<Self> {
         checkpoint()?;
+        if format == Format::Lsg4 {
+            return Err(Error::Corrupt("payload format"));
+        }
+        Self::new_inner(source, start, len, format, 1, window_bytes, checkpoint)
+    }
+
+    /// The field-aware `new_with_checkpoint`.
+    pub fn new_fields_with_checkpoint(
+        source: &'a S,
+        start: u64,
+        len: u64,
+        field_count: u8,
+        window_bytes: usize,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        checkpoint()?;
+        if field_count == 0 || field_count > 16 {
+            return Err(Error::Corrupt("segment field count"));
+        }
+        Self::new_inner(
+            source,
+            start,
+            len,
+            Format::Lsg4,
+            field_count,
+            window_bytes,
+            checkpoint,
+        )
+    }
+
+    fn new_inner(
+        source: &'a S,
+        start: u64,
+        len: u64,
+        format: Format,
+        field_count: u8,
+        window_bytes: usize,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
         let end = start.checked_add(len).ok_or(Error::Truncated)?;
         let mut header = Window::new(source, start, end, window_bytes)?;
         let count = header.u32()?;
         let interval = if format == Format::Lsg1 { 64 } else { 32 };
         let slots = count.div_ceil(interval);
-        let slots = if format == Format::Lsg3 {
+        // LSG3 and LSG4 share the payload framing: no explicit slot count
+        // and no zero slot for entry 0.
+        let slots = if format == Format::Lsg3 || format == Format::Lsg4 {
             slots.saturating_sub(1)
         } else {
             if header.u32()? != slots {
@@ -181,6 +246,7 @@ impl<'a, S: Source + ?Sized> PayloadCursor<'a, S> {
             ordinal: 0,
             interval,
             format,
+            field_count,
             skip_offset: 0,
             failed: false,
         })
@@ -262,6 +328,87 @@ impl<'a, S: Source + ?Sized> PayloadCursor<'a, S> {
             tf_bucket,
             positions,
         }))
+    }
+
+    /// The field-aware (`LSG4`) entry decoder: streams every position of
+    /// every field group through `visit(field, position)`, validating the
+    /// complete RFC §5.3 rule set (hit count, ascending in-range field ids,
+    /// per-field increasing positions, bucket quantization). Returns the
+    /// per-field summary; like `next_with`, `None` certifies the extent.
+    pub fn next_fields_with(
+        &mut self,
+        visit: impl FnMut(u8, u32) -> Result<()>,
+    ) -> Result<Option<FieldPayloadEntry>> {
+        if self.failed {
+            return Err(Error::Corrupt("maintenance cursor failed"));
+        }
+        let result = self.next_fields_inner(visit);
+        self.failed = result.is_err();
+        result
+    }
+
+    fn next_fields_inner(
+        &mut self,
+        mut visit: impl FnMut(u8, u32) -> Result<()>,
+    ) -> Result<Option<FieldPayloadEntry>> {
+        if self.format != Format::Lsg4 {
+            return Err(Error::Corrupt("payload format"));
+        }
+        if self.ordinal == self.count {
+            if self.data.at != self.data.end || self.skips.at != self.skips.end {
+                return Err(Error::Corrupt("payload trailing bytes"));
+            }
+            self.data.bytes = Box::default();
+            self.skips.bytes = Box::default();
+            return Ok(None);
+        }
+        if self.ordinal.is_multiple_of(self.interval) && self.ordinal != 0 {
+            self.skip_offset = self.skips.fixed()?;
+            if self.skip_offset != self.data.at - self.data_start {
+                return Err(Error::Corrupt("payload skip offset"));
+            }
+        }
+        let field_count = self.field_count;
+        let hit_count = self.data.u32()?;
+        if hit_count == 0 || hit_count > u32::from(field_count) {
+            return Err(Error::Corrupt("payload field hit count"));
+        }
+        let mut summary = FieldPayloadEntry {
+            field_mask: 0,
+            buckets: [0; 16],
+            positions: [0; 16],
+        };
+        let mut previous = None;
+        for _ in 0..hit_count {
+            let packed = self.data.byte()?;
+            let field = packed >> 4;
+            let bucket = packed & 0x0f;
+            if field >= field_count || previous.is_some_and(|p: u8| p >= field) {
+                return Err(Error::Corrupt("payload field order"));
+            }
+            let count = self.data.u32()?;
+            if count == 0 {
+                return Err(Error::InvalidPositions);
+            }
+            let mut position = self.data.u32()?;
+            visit(field, position)?;
+            for _ in 1..count {
+                position = position
+                    .checked_add(self.data.u32()?)
+                    .and_then(|p| p.checked_add(1))
+                    .ok_or(Error::Corrupt("position overflow"))?;
+                visit(field, position)?;
+            }
+            if TfBucket::from_count(count).value() != bucket {
+                return Err(Error::Corrupt("payload frequency bucket"));
+            }
+            previous = Some(field);
+            summary.field_mask |= 1 << field;
+            summary.buckets[usize::from(field)] = bucket;
+            summary.positions[usize::from(field)] = count;
+        }
+        self.ordinal += 1;
+        Ok(Some(summary))
     }
 }
 

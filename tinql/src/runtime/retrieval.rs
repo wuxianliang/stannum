@@ -121,7 +121,8 @@ impl Segment {
             | Query::Fuzzy { .. }
             | Query::Disjunction { .. }
             | Query::AtLeast { .. }
-            | Query::SpanExpr { .. } => Candidates::All,
+            | Query::SpanExpr { .. }
+            | Query::Field { .. } => Candidates::All,
         }
     }
 

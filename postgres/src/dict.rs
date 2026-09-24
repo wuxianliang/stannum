@@ -197,10 +197,10 @@ fn reload(force: bool) -> u64 {
     register_xact();
     let statement = crate::score::current_statement();
     if !force {
-        if let Some((seen, fp)) = SEEN.get() {
-            if seen == statement {
-                return fp;
-            }
+        if let Some((seen, fp)) = SEEN.get()
+            && seen == statement
+        {
+            return fp;
         }
         if !DIRTY.load(Ordering::Relaxed) {
             let fp = tokenizer::jieba_current_fingerprint();
@@ -220,7 +220,6 @@ fn reload(force: bool) -> u64 {
             client
                 .select(&query, None, &[])
                 .expect("read jieba_words")
-                .into_iter()
                 .map(|row| {
                     pgrx::check_for_interrupts!();
                     (
@@ -450,6 +449,7 @@ pub(crate) fn check_analysis(index_oid: pg_sys::Oid, meta: &Meta) {
     }
 }
 #[pg_extern(stable, parallel_unsafe, strict)]
+#[allow(clippy::type_complexity)] // the SRF row shape is fixed public SQL surface
 fn index_analysis(
     index: PgRelation,
 ) -> TableIterator<

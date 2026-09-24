@@ -13,7 +13,9 @@
 use crate::dictionary::{DictionaryBuilder, Extent, TermEntry};
 use crate::payload::PayloadBuilder;
 use crate::postings::PostingsBuilder;
-use crate::segment::{Format, Segment};
+#[cfg(test)]
+use crate::segment::SegmentBuilder;
+use crate::segment::{AreaFetch, Format, Segment};
 use crate::set::Cursor;
 use crate::{Error, Result, Tid, varint};
 use std::cmp::Reverse;
@@ -63,6 +65,20 @@ pub fn merge(
     checkpoint: impl FnMut() -> std::result::Result<(), MergeError>,
 ) -> std::result::Result<Vec<u8>, MergeError> {
     merge_as(inputs, limits, Format::CURRENT, checkpoint)
+}
+
+/// Validate and merge field-aware (`LSG4`) segments, preserving per-field
+/// lengths and field-tagged payload groups. Every input must be `LSG4` with
+/// the same field count: an index never mixes `LSG3` and `LSG4` segments,
+/// and a merge across the two is refused with a clear error instead of
+/// silently flattening the field dimension. Merging zero inputs yields an
+/// empty `LSG4` segment of one field (valid on disk, RFC §5.8).
+pub fn merge_fields(
+    inputs: &[MergeInput<'_>],
+    limits: MergeLimits,
+    checkpoint: impl FnMut() -> std::result::Result<(), MergeError>,
+) -> std::result::Result<Vec<u8>, MergeError> {
+    merge_as(inputs, limits, Format::Lsg4, checkpoint)
 }
 
 fn check(actual: usize, limit: usize, name: &'static str) -> std::result::Result<(), MergeError> {
@@ -164,6 +180,29 @@ fn skip_dead(
     Ok(None)
 }
 
+/// The field-aware sibling of [`skip_dead`]: live documents carry their full
+/// per-field length row, and dead `LSG4` payload entries are skipped through
+/// the validating field decoder, not the single-bucket one.
+fn skip_dead_fields(
+    postings: &mut crate::postings::PostingsCursor<'_>,
+    payload: &mut crate::payload::PayloadCursor<'_>,
+    live_rows: &HashMap<Tid, (Vec<u32>, usize)>,
+    source: usize,
+    checkpoint: &mut impl FnMut() -> std::result::Result<(), MergeError>,
+) -> std::result::Result<Option<Vec<u32>>, MergeError> {
+    while let Some(tid) = postings.current() {
+        if let Some((row, owner)) = live_rows.get(&tid)
+            && *owner == source
+        {
+            return Ok(Some(row.clone()));
+        }
+        checkpoint()?;
+        payload.skip_fields()?;
+        postings.advance()?;
+    }
+    Ok(None)
+}
+
 fn merge_as(
     inputs: &[MergeInput<'_>],
     limits: MergeLimits,
@@ -175,6 +214,31 @@ fn merge_as(
         .iter()
         .map(|input| Segment::parse(input.bytes))
         .collect::<Result<Vec<_>>>()?;
+    let fields = format.has_fields();
+    // An index never mixes field-aware and fieldless segments: refuse a merge
+    // whose inputs disagree with the output about the field dimension, and
+    // one whose field-aware inputs disagree about the field count.
+    for (index, segment) in segments.iter().enumerate() {
+        if segment.format().has_fields() != fields {
+            return Err(MergeError::InvalidInput {
+                index,
+                detail: format!("cannot merge {} and {} segments", segment.format(), format),
+            });
+        }
+    }
+    let field_count = segments.first().map_or(1, |segment| segment.field_count());
+    if fields
+        && segments
+            .iter()
+            .any(|segment| segment.field_count() != field_count)
+    {
+        return Err(MergeError::InvalidInput {
+            index: 0,
+            detail: format!(
+                "cannot merge segments of differing field counts ({field_count} and others)"
+            ),
+        });
+    }
     let mut docs = segments
         .iter()
         .map(Segment::documents)
@@ -186,26 +250,50 @@ fn merge_as(
         }
     }
     let mut live_lengths = HashMap::new();
+    let mut live_field_rows = HashMap::new();
     let mut doc_builder = PostingsBuilder::default();
     let mut length_bytes = Vec::new();
     let mut total_length = 0u64;
+    let mut field_total = vec![0u64; usize::from(field_count)];
     while let Some(Reverse((tid, i))) = heap.pop() {
         checkpoint()?;
         if !inputs[i].dead.contains(&tid) {
-            let len = segments[i].length_at(docs[i].ordinal())?;
-            if live_lengths.insert(tid, (len, i)).is_some() {
-                return Err(Error::Unordered.into());
-            }
             doc_builder.push(tid)?;
-            length_bytes.extend_from_slice(&len.to_le_bytes());
-            total_length = total_length
-                .checked_add(u64::from(len))
-                .ok_or(MergeError::Limit("total document length"))?;
+            if fields {
+                let ordinal = docs[i].ordinal();
+                let row = (0..field_count)
+                    .map(|field| segments[i].field_length(ordinal, field))
+                    .collect::<Result<Vec<u32>>>()?;
+                if live_field_rows.insert(tid, (row.clone(), i)).is_some() {
+                    return Err(Error::Unordered.into());
+                }
+                for (field, len) in row.iter().enumerate() {
+                    length_bytes.extend_from_slice(&len.to_le_bytes());
+                    field_total[field] = field_total[field]
+                        .checked_add(u64::from(*len))
+                        .ok_or(MergeError::Limit("total document length"))?;
+                }
+            } else {
+                let len = segments[i].length_at(docs[i].ordinal())?;
+                if live_lengths.insert(tid, (len, i)).is_some() {
+                    return Err(Error::Unordered.into());
+                }
+                length_bytes.extend_from_slice(&len.to_le_bytes());
+                total_length = total_length
+                    .checked_add(u64::from(len))
+                    .ok_or(MergeError::Limit("total document length"))?;
+            }
         }
         docs[i].advance()?;
         if let Some(tid) = docs[i].current() {
             heap.push(Reverse((tid, i)));
         }
+    }
+    if fields {
+        total_length = field_total
+            .iter()
+            .try_fold(0u64, |sum, len| sum.checked_add(*len))
+            .ok_or(MergeError::Limit("total document length"))?;
     }
     let mut dictionaries = segments
         .iter()
@@ -226,6 +314,8 @@ fn merge_as(
     let mut positions = Vec::new();
     let mut term_inputs = Vec::new();
     let mut cursors = Vec::new();
+    // Field rows aligned with `cursors`, for `LSG4` merges.
+    let mut rows: Vec<Option<Vec<u32>>> = Vec::new();
     let mut postings_heap = BinaryHeap::new();
     while let Some(Reverse((term, first))) = terms.pop() {
         checkpoint()?;
@@ -237,14 +327,21 @@ fn merge_as(
         }
         cursors.clear();
         postings_heap.clear();
+        rows.clear();
         for &i in &term_inputs {
             let resolved =
                 segments[i].resolve(entries[i].take().expect("each queued term owns an entry"))?;
             let mut postings = resolved.cursor()?;
             if resolved.df() == 1
-                && postings
-                    .current()
-                    .is_some_and(|tid| live_lengths.get(&tid).is_none_or(|&(_, owner)| owner != i))
+                && postings.current().is_some_and(|tid| {
+                    if fields {
+                        live_field_rows
+                            .get(&tid)
+                            .is_none_or(|&(_, owner)| owner != i)
+                    } else {
+                        live_lengths.get(&tid).is_none_or(|&(_, owner)| owner != i)
+                    }
+                })
             {
                 // This fully validated source term has no surviving posting.
                 // No payload cursor will be consumed for it.
@@ -252,13 +349,25 @@ fn merge_as(
                 continue;
             }
             let mut payload = resolved.payload()?.cursor();
-            let length = skip_dead(
-                &mut postings,
-                &mut payload,
-                &live_lengths,
-                i,
-                &mut checkpoint,
-            )?;
+            let length = if fields {
+                let row = skip_dead_fields(
+                    &mut postings,
+                    &mut payload,
+                    &live_field_rows,
+                    i,
+                    &mut checkpoint,
+                )?;
+                rows.push(row);
+                None
+            } else {
+                skip_dead(
+                    &mut postings,
+                    &mut payload,
+                    &live_lengths,
+                    i,
+                    &mut checkpoint,
+                )?
+            };
             if let Some(tid) = postings.current() {
                 postings_heap.push(Reverse((tid, cursors.len())));
             }
@@ -271,17 +380,57 @@ fn merge_as(
         while let Some(Reverse((tid, c))) = postings_heap.pop() {
             checkpoint()?;
             let (i, cursor, positions_cursor, length) = &mut cursors[c];
-            positions.clear();
-            let bucket = positions_cursor.next_into(&mut positions)?;
-            let len = length.ok_or(Error::Corrupt("posting missing document"))?;
-            postings.push_scored(tid, bucket, len)?;
-            payload.push(bucket, &positions)?;
-            count = count
-                .checked_add(1)
-                .ok_or(MergeError::Limit("postings count"))?;
-            max_bucket = max_bucket.max(bucket);
+            if fields {
+                let field_entry = positions_cursor.next_fields()?;
+                let row = rows[c]
+                    .as_ref()
+                    .ok_or(Error::Corrupt("posting missing document"))?;
+                let scores: Vec<(u8, u8)> = field_entry
+                    .fields
+                    .iter()
+                    .map(|hit| (hit.field, hit.tf_bucket))
+                    .collect();
+                let groups: Vec<(u8, u8, &[u32])> = field_entry
+                    .fields
+                    .iter()
+                    .map(|hit| (hit.field, hit.tf_bucket, hit.positions.as_slice()))
+                    .collect();
+                postings.push_scored_fields(tid, &scores, row)?;
+                payload.push_fields(&groups, field_count)?;
+                count = count
+                    .checked_add(1)
+                    .ok_or(MergeError::Limit("postings count"))?;
+                max_bucket = max_bucket.max(
+                    field_entry
+                        .fields
+                        .iter()
+                        .map(|hit| hit.tf_bucket)
+                        .max()
+                        .unwrap_or(0),
+                );
+            } else {
+                positions.clear();
+                let bucket = positions_cursor.next_into(&mut positions)?;
+                let len = length.ok_or(Error::Corrupt("posting missing document"))?;
+                postings.push_scored(tid, bucket, len)?;
+                payload.push(bucket, &positions)?;
+                count = count
+                    .checked_add(1)
+                    .ok_or(MergeError::Limit("postings count"))?;
+                max_bucket = max_bucket.max(bucket);
+            }
             cursor.advance()?;
-            *length = skip_dead(cursor, positions_cursor, &live_lengths, *i, &mut checkpoint)?;
+            if fields {
+                rows[c] = skip_dead_fields(
+                    cursor,
+                    positions_cursor,
+                    &live_field_rows,
+                    *i,
+                    &mut checkpoint,
+                )?;
+            } else {
+                *length = skip_dead(cursor, positions_cursor, &live_lengths, *i, &mut checkpoint)?;
+            }
             if let Some(tid) = cursor.current() {
                 postings_heap.push(Reverse((tid, c)));
             }
@@ -329,11 +478,27 @@ fn merge_as(
     }
     let dictionary = dictionary.finish();
     let documents = doc_builder.finish();
+    let live_documents = if fields {
+        live_field_rows.len()
+    } else {
+        live_lengths.len()
+    };
     let mut header = Vec::new();
     header.extend_from_slice(format.magic());
+    if fields {
+        // RFC §5.1: revision, doc_count, total_length, field_count,
+        // field_total u64le × field_count, then the area lengths.
+        varint::put(&mut header, 1);
+    }
+    varint::put(&mut header, live_documents as u64);
+    varint::put(&mut header, total_length);
+    if fields {
+        varint::put(&mut header, u64::from(field_count));
+        for total in &field_total {
+            header.extend_from_slice(&total.to_le_bytes());
+        }
+    }
     for n in [
-        live_lengths.len() as u64,
-        total_length,
         dictionary.len() as u64,
         postings_area.len() as u64,
         payload_area.len() as u64,
@@ -342,6 +507,7 @@ fn merge_as(
         varint::put(&mut header, n);
     }
     drop(live_lengths);
+    drop(live_field_rows);
     let out = assemble(
         [
             header,
@@ -541,6 +707,85 @@ mod tests {
     }
 
     #[test]
+    fn field_merges_preserve_field_lengths_and_refuse_mixed_formats() {
+        for interleaved in [false, true] {
+            for deletion in [0, 1, 7] {
+                let (blobs, dead) = crate::direct_merge_poc::fixture_fields(
+                    3,
+                    65,
+                    40,
+                    67,
+                    interleaved,
+                    deletion,
+                    3,
+                );
+                let merged = merge_fields(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
+                assert_eq!(
+                    merged,
+                    crate::direct_merge_poc::reference_fields(&blobs, &dead, 3).unwrap(),
+                    "interleaved={interleaved} deletion={deletion}"
+                );
+                let report = crate::verify::verify_segment(&merged);
+                assert!(report.is_clean(), "{report:?}");
+                let segment = Segment::parse(&merged).unwrap();
+                assert_eq!(segment.format(), Format::Lsg4);
+                assert_eq!(segment.field_count(), 3);
+                if deletion != 1 {
+                    // deletion == 1 marks every document dead; the empty
+                    // output keeps the field count but all totals are zero.
+                    for field in 0..3 {
+                        assert!(segment.field_total(field).unwrap() > 0);
+                    }
+                }
+            }
+        }
+        // LSG3 × LSG4 is refused in both directions: the field merge refuses
+        // fieldless inputs and the fieldless merge refuses field inputs.
+        let (lsg4, dead4) = crate::direct_merge_poc::fixture_fields(1, 5, 6, 4, false, 0, 2);
+        let (lsg3, dead3) = crate::direct_merge_poc::fixture(1, 5, 6, 4, false, 0);
+        let mixed = [
+            MergeInput {
+                bytes: &lsg4[0],
+                dead: &dead4[0],
+            },
+            MergeInput {
+                bytes: &lsg3[0],
+                dead: &dead3[0],
+            },
+        ];
+        for result in [
+            merge_fields(&mixed, limits(), || Ok(())),
+            merge(&mixed, limits(), || Ok(())),
+        ] {
+            let Err(MergeError::InvalidInput { detail, .. }) = result else {
+                panic!("a mixed LSG3/LSG4 merge was accepted");
+            };
+            assert!(detail.contains("cannot merge"), "{detail}");
+        }
+        // Field-count disagreement between LSG4 inputs is refused too.
+        let (two, dead_two) = crate::direct_merge_poc::fixture_fields(1, 5, 6, 4, false, 0, 2);
+        let (three, dead_three) = crate::direct_merge_poc::fixture_fields(1, 5, 6, 4, false, 0, 3);
+        let mismatched = [
+            MergeInput {
+                bytes: &two[0],
+                dead: &dead_two[0],
+            },
+            MergeInput {
+                bytes: &three[0],
+                dead: &dead_three[0],
+            },
+        ];
+        assert!(matches!(
+            merge_fields(&mismatched, limits(), || Ok(())),
+            Err(MergeError::InvalidInput { .. })
+        ));
+        // Merging nothing yields the empty one-field LSG4 blob.
+        let empty = merge_fields(&[], limits(), || Ok(())).unwrap();
+        assert_eq!(empty, SegmentBuilder::with_field_count(1).finish_fields());
+        assert_eq!(Segment::parse(&empty).unwrap().field_count(), 1);
+    }
+
+    #[test]
     fn rejects_unknown_dead_tids_and_duplicate_live_tids() {
         let (mut blobs, mut dead) = fixture(1, 1, 4, 2, true, 0);
         dead[0].insert(Tid::new(42, 1).unwrap());
@@ -608,9 +853,16 @@ mod tests {
             proptest::prop_assert_eq!(output,reference(&blobs,&dead,Format::CURRENT).unwrap());
         }
         #[test]
+        fn validated_field_merge_generated_equivalence(parts in 1usize..6,docs in 0usize..40,tokens in 1usize..40,vocab in 1usize..50,deletion in 0usize..8,interleaved in proptest::bool::ANY,fields in 1u8..=4) {
+            let (blobs,dead)=crate::direct_merge_poc::fixture_fields(parts,docs,tokens,vocab,interleaved,deletion,fields);
+            let output=merge_fields(&inputs(&blobs,&dead),limits(),|| Ok(())).unwrap();
+            proptest::prop_assert_eq!(output,crate::direct_merge_poc::reference_fields(&blobs,&dead,fields).unwrap());
+        }
+        #[test]
         fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(proptest::num::u8::ANY,0..1024)) {
             let dead=BTreeSet::new();
             let _=merge(&[MergeInput { bytes:&bytes,dead:&dead }],limits(),|| Ok(()));
+            let _=merge_fields(&[MergeInput { bytes:&bytes,dead:&dead }],limits(),|| Ok(()));
         }
     }
 

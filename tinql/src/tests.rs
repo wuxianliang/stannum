@@ -1646,6 +1646,94 @@ mod cases {
         );
     }
 
+    // ── Field scope ─────────────────────────────────────────────────────
+
+    fn field(name: &str, inner: Expr) -> Expr {
+        Expr::Field {
+            name: name.into(),
+            inner: Box::new(inner),
+        }
+    }
+
+    #[test]
+    fn field_scope_parses_a_group() {
+        assert_eq!(p("title:(beer)").unwrap(), field("title", term("beer")));
+        assert_eq!(
+            p("title:(beer ale)").unwrap(),
+            field("title", and(term("beer"), term("ale")))
+        );
+        assert_eq!(
+            p("title:(beer OR ale)").unwrap(),
+            field("title", or(term("beer"), term("ale")))
+        );
+    }
+
+    #[test]
+    fn bare_field_names_fold_ascii_case() {
+        // PostgreSQL folds an unquoted identifier; a quoted one is byte-exact.
+        assert_eq!(p("TITLE:(beer)").unwrap(), field("title", term("beer")));
+        assert_eq!(p("Title_2:(beer)").unwrap(), field("title_2", term("beer")));
+        assert_eq!(p("\"Title\":(beer)").unwrap(), field("Title", term("beer")));
+        assert_eq!(
+            p("\"my field\":(beer)").unwrap(),
+            field("my field", term("beer"))
+        );
+    }
+
+    #[test]
+    fn quoted_field_names_use_the_phrase_escape_rule() {
+        assert_eq!(
+            p(r#""a\"b\\c":(beer)"#).unwrap(),
+            field(r#"a"b\c"#, term("beer"))
+        );
+    }
+
+    #[test]
+    fn a_space_breaks_the_field_head() {
+        // `title: (beer)` is a word and a group, never a field scope: the
+        // head is compound atomic (RFC §5.11).
+        assert_eq!(
+            p("title: (beer)").unwrap(),
+            and(term("title:"), term("beer"))
+        );
+    }
+
+    #[test]
+    fn colon_without_a_paren_stays_one_word() {
+        assert_eq!(p("title:beer").unwrap(), term("title:beer"));
+    }
+
+    #[test]
+    fn field_scope_binds_one_primary() {
+        assert_eq!(
+            p("title:(beer) ale").unwrap(),
+            and(field("title", term("beer")), term("ale"))
+        );
+    }
+
+    #[test]
+    fn field_scope_takes_a_boost() {
+        assert_eq!(
+            p("title:(beer)^2").unwrap(),
+            boost(field("title", term("beer")), 2.0)
+        );
+        assert_eq!(
+            p("title:(beer^2)").unwrap(),
+            field("title", boost(term("beer"), 2.0))
+        );
+    }
+
+    #[test]
+    fn roundtrip_field_scopes() {
+        roundtrip("title:(beer)");
+        roundtrip("title:(beer ale)");
+        roundtrip("title:(beer) ale");
+        roundtrip("title:(beer)^2");
+        roundtrip("TITLE:(beer)");
+        roundtrip(r#""my field":(beer)"#);
+        roundtrip(r#""a\"b":(beer)"#);
+    }
+
     // ── Display roundtrip ───────────────────────────────────────────────
 
     fn roundtrip(input: &str) {

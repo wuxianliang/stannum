@@ -66,7 +66,8 @@ primary = { base ~ boost? }
 boost   = @{ "^" ~ number }
 
 base = {
-    grouped
+    field_expr
+  | grouped
   | all_of
   | at_least
   | alternatives
@@ -82,6 +83,21 @@ base = {
 contains_expr = ${ kw_CONTAINS ~ WHITESPACE+ ~ word_primary }
 
 grouped = { "(" ~ or_expr ~ ")" }
+
+// ── Field scope ─────────────────────────────────────────────────────
+// `name:(…)` scopes the group to one field; it is the FIRST alternative of
+// `base`. The head is compound atomic ($) so the name, the colon and the
+// opening paren must be adjacent: a space in `title: (foo)` is not field
+// syntax. A bare name is folded the way PostgreSQL folds an unquoted
+// identifier (the Rust builder lowercases it); a quoted name uses the
+// phrase escape rule and matches bytes exactly.
+field_expr        = { field_head ~ or_expr ~ ")" }
+field_head        = ${ field_name ~ ":" ~ "(" }
+field_name        = _{ bare_ident | quoted_ident }
+bare_ident        = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+quoted_ident      = ${ "\"" ~ quoted_ident_body ~ "\"" }
+quoted_ident_body = @{ quoted_ident_char* }
+quoted_ident_char = { "\\" ~ ANY | !"\"" ~ ANY }
 
 // ── ALL OF ──────────────────────────────────────────────────────────
 all_of = { kw_ALL ~ kw_OF ~ alternatives }
