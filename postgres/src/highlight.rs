@@ -171,9 +171,34 @@ pub(crate) fn positions_from_query(
             if m.start == m.end {
                 MatchPosition::point(m.part, m.start)
             } else {
-                MatchPosition::span(m.part, m.start, m.end)
+                MatchPosition::span(m.part, m.start, m.end, 0)
             }
         })
+        .collect()
+}
+
+/// [`positions_from_query`] restricted to one field of a multi-column
+/// document: the text passed is field `field`'s, named `field_name`, and a
+/// `Field` wrapper naming another field contributes no marks, so marks stay
+/// confined to the field being rendered (RFC §5.11). `field` is the id the
+/// positions carry. `field_name = None` is the single-column behavior with
+/// the positions of field 0.
+pub(crate) fn positions_from_query_for_field(
+    pipeline: &CompiledTokenizerPipeline,
+    tinql_text: &str,
+    text: &str,
+    field_name: Option<&str>,
+    field: u16,
+) -> Vec<MatchPosition> {
+    let query = match tinql::runtime::parse_tinql_to_query(tinql_text, pipeline) {
+        Ok(query) => query,
+        Err(_) => return Vec::new(),
+    };
+    let projected = tinql::runtime::project_to_field(&query, field_name);
+    let doc = tinql::runtime::tokenize_doc(text, pipeline);
+    tinql::runtime::evaluate_for_highlight(&projected, &doc)
+        .into_iter()
+        .map(|m| MatchPosition::span(m.part, m.start, m.end, field))
         .collect()
 }
 

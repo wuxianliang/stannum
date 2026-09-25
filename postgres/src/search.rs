@@ -3,7 +3,9 @@
 //
 // See LICENSE in the repository root for license terms.
 
-use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
+use crate::highlight::{
+    highlight_text, highlight_text_ansi, positions_from_query, positions_from_query_for_field,
+};
 use crate::score::{
     PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, visible_tid_pairs,
 };
@@ -16,27 +18,66 @@ use tokenizer::CompiledTokenizerPipeline;
 
 type SearchRow = (pg_sys::ItemPointerData, f32, Option<String>);
 
-/// Validates the index's shape for the SRF and returns the key attribute
+/// The key attributes snippets read from: one column as before, or every key
+/// column of a multi-column (field-aware, `LSG4`) index with the field names
+/// its plan recorded (RFC §5.11 highlights).
+#[derive(Debug)]
+enum SnippetKeys {
+    Single(i16),
+    Fields {
+        attnums: Vec<i16>,
+        names: Vec<String>,
+    },
+}
+
+/// Validates the index's shape for the SRF and returns the key attributes
 /// snippets read from.
 ///
-/// A single-column index behaves exactly as before. A multi-column
-/// (field-aware, `LSG4`) index scores through the BM25F path; its snippets
-/// are phase 3, so asking for one fails with an actionable degraded-mode
-/// error rather than highlighting the wrong column.
-fn validate_shape(index: &PgRelation, snippets: bool) -> i16 {
+/// A single-column index behaves exactly as before. A multi-column index
+/// scores through the BM25F path and its snippet renders one field: the one
+/// a single top-level field wrapper names, else the first field with a
+/// match, else the first non-NULL column (fetch_snippet picks).
+fn validate_shape(index: &PgRelation, snippets: bool) -> SnippetKeys {
     unsafe {
         let metadata = &*(*index.as_ptr()).rd_index;
-        let key = *metadata.indkey.values.as_ptr();
-        if metadata.indnkeyatts >= 2 {
-            if snippets {
-                pgrx::error!(
-                    "stannum.search() snippets on a multi-column index are not supported yet; use snippet => 'none' for degraded mode"
-                );
+        let keys = metadata.indnkeyatts;
+        if keys >= 2 {
+            if !snippets {
+                return SnippetKeys::Fields {
+                    attnums: key_attnums(metadata),
+                    names: field_names(index),
+                };
             }
-            return key;
+            // Multi-column indexes carry plain attribute keys; every key
+            // column must be a text-compatible value for snippets.
+            let heap_oid = pg_sys::IndexGetRelation(index.oid(), false);
+            let heap = pg_sys::table_open(heap_oid, pg_sys::AccessShareLock as _);
+            for attnum in key_attnums(metadata) {
+                if attnum <= 0 {
+                    pgrx::error!(
+                        "stannum.search() snippets require a positive text key; use snippet => 'none' for an expression index"
+                    );
+                }
+                let attribute = pg_sys::TupleDescAttr((*heap).rd_att, i32::from(attnum - 1));
+                let typid = pg_sys::getBaseType((*attribute).atttypid);
+                if !matches!(
+                    typid,
+                    pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID | pg_sys::NAMEOID
+                ) {
+                    pgrx::error!(
+                        "stannum.search() snippets require text-compatible key columns; use snippet => 'none' for degraded mode"
+                    );
+                }
+            }
+            pg_sys::table_close(heap, pg_sys::AccessShareLock as _);
+            return SnippetKeys::Fields {
+                attnums: key_attnums(metadata),
+                names: field_names(index),
+            };
         }
+        let key = *metadata.indkey.values.as_ptr();
         if !snippets {
-            return key;
+            return SnippetKeys::Single(key);
         }
         if key <= 0 {
             pgrx::error!(
@@ -57,7 +98,27 @@ fn validate_shape(index: &PgRelation, snippets: bool) -> i16 {
                 "stannum.search() snippets require a text-compatible key column; use snippet => 'none' for degraded mode"
             );
         }
-        key
+        SnippetKeys::Single(key)
+    }
+}
+
+/// The index's key attribute numbers, in key order.
+unsafe fn key_attnums(metadata: &pg_sys::FormData_pg_index) -> Vec<i16> {
+    let keys = metadata.indnkeyatts as usize;
+    let values = unsafe { metadata.indkey.values.as_slice(keys) };
+    (0..keys).map(|position| values[position]).collect()
+}
+
+/// The field names a multi-column index's meta trailer recorded. A segmented
+/// multi-column index always carries one; anything else cannot answer a
+/// field-scoped snippet.
+unsafe fn field_names(index: &PgRelation) -> Vec<String> {
+    unsafe {
+        crate::storage::fields_meta(index.as_ptr())
+            .map(|plan| plan.names)
+            .unwrap_or_else(|| {
+                pgrx::error!("stannum.search() requires a field-aware multi-column index")
+            })
     }
 }
 
@@ -156,7 +217,7 @@ fn accepted_pruned_rows(
 #[allow(clippy::too_many_arguments)] // snippet refetch bundles its fixed context
 fn fetch_snippet(
     heap_oid: pg_sys::Oid,
-    attnum: i16,
+    keys: &SnippetKeys,
     pipeline: &CompiledTokenizerPipeline,
     query: &str,
     mode: &str,
@@ -170,6 +231,20 @@ fn fetch_snippet(
             .map(|(score, row)| (pointer_of(row.visible_tid), score, None))
             .collect();
     }
+    // The query's single top-level field wrapper names the snippet's field;
+    // absent one, the first field holding a match wins, else the first
+    // non-NULL column renders plain (RFC §5.11).
+    let wrapper_field = top_level_field_name(pipeline, query);
+    let render = |text: &str, positions: &[crate::match_positions::MatchPosition]| -> String {
+        let rendered = if mode == "ansi" {
+            highlight_text_ansi(pipeline, text, positions)
+        } else {
+            highlight_text(pipeline, text, begin_tag, end_tag, positions)
+        };
+        rendered.unwrap_or_else(|error| {
+            pgrx::error!("stannum.search() snippet rendering failed: {error}")
+        })
+    };
     unsafe {
         let heap = pg_sys::table_open(heap_oid, pg_sys::AccessShareLock as _);
         let fetch = pg_sys::table_index_fetch_begin(heap);
@@ -201,22 +276,38 @@ fn fetch_snippet(
             if !found || tid_of((*slot).tts_tid) != row.visible_tid {
                 continue;
             }
-            let mut isnull = false;
-            let datum = pg_sys::slot_getattr(slot, i32::from(attnum), &mut isnull);
-            let snippet = if isnull {
-                None
-            } else {
-                let text = String::from_datum(datum, false)
-                    .unwrap_or_else(|| pgrx::error!("stannum.search() indexed column is not text"));
-                let positions = positions_from_query(pipeline, query, &text);
-                let rendered = if mode == "ansi" {
-                    highlight_text_ansi(pipeline, &text, &positions)
-                } else {
-                    highlight_text(pipeline, &text, begin_tag, end_tag, &positions)
-                };
-                Some(rendered.unwrap_or_else(|error| {
-                    pgrx::error!("stannum.search() snippet rendering failed: {error}")
-                }))
+            let snippet = match keys {
+                SnippetKeys::Single(attnum) => {
+                    let mut isnull = false;
+                    let datum = pg_sys::slot_getattr(slot, i32::from(*attnum), &mut isnull);
+                    if isnull {
+                        None
+                    } else {
+                        let text = String::from_datum(datum, false).unwrap_or_else(|| {
+                            pgrx::error!("stannum.search() indexed column is not text")
+                        });
+                        let positions = positions_from_query(pipeline, query, &text);
+                        Some(render(&text, &positions))
+                    }
+                }
+                SnippetKeys::Fields { attnums, names } => {
+                    let texts: Vec<Option<String>> = attnums
+                        .iter()
+                        .map(|attnum| {
+                            let mut isnull = false;
+                            let datum = pg_sys::slot_getattr(slot, i32::from(*attnum), &mut isnull);
+                            if isnull {
+                                None
+                            } else {
+                                Some(String::from_datum(datum, false).unwrap_or_else(|| {
+                                    pgrx::error!("stannum.search() indexed column is not text")
+                                }))
+                            }
+                        })
+                        .collect();
+                    snippet_of_fields(pipeline, query, &texts, names, wrapper_field.as_deref())
+                        .map(|(text, positions)| render(&text, &positions))
+                }
             };
             output.push((pointer_of(row.visible_tid), score, snippet));
         }
@@ -225,6 +316,59 @@ fn fetch_snippet(
         pg_sys::table_close(heap, pg_sys::AccessShareLock as _);
         output
     }
+}
+
+/// The name a query's single top-level `Field` wrapper carries (a root
+/// boost keeps it top-level): `title:(x) OR body:(y)` has none.
+fn top_level_field_name(pipeline: &CompiledTokenizerPipeline, query: &str) -> Option<String> {
+    let parsed = tinql::runtime::parse_tinql_to_query(query, pipeline).ok()?;
+    fn wrapper(query: &tinql::runtime::Query) -> Option<String> {
+        match query {
+            tinql::runtime::Query::Field { name, .. } => Some(name.clone()),
+            tinql::runtime::Query::Boost { inner, .. } => wrapper(inner),
+            _ => None,
+        }
+    }
+    wrapper(&parsed)
+}
+
+/// One field's text and its field-scoped marks, the scalar snippet a
+/// multi-column row renders: the wrapper's field; else the first field
+/// holding a mark (marks never leave their field); else the first non-NULL
+/// field's plain text. `None` when every field is NULL (RFC §5.11).
+fn snippet_of_fields(
+    pipeline: &CompiledTokenizerPipeline,
+    query: &str,
+    texts: &[Option<String>],
+    names: &[String],
+    wrapper_field: Option<&str>,
+) -> Option<(String, Vec<crate::match_positions::MatchPosition>)> {
+    if let Some(name) = wrapper_field {
+        let field = names.iter().position(|candidate| candidate == name)?;
+        let text = texts[field].as_ref()?;
+        return Some((
+            text.clone(),
+            positions_from_query_for_field(pipeline, query, text, Some(name), field as u16),
+        ));
+    }
+    for (field, text) in texts.iter().enumerate() {
+        let Some(text) = text else { continue };
+        let positions = positions_from_query_for_field(
+            pipeline,
+            query,
+            text,
+            Some(&names[field]),
+            field as u16,
+        );
+        if !positions.is_empty() {
+            return Some((text.clone(), positions));
+        }
+    }
+    texts
+        .iter()
+        .flatten()
+        .next()
+        .map(|text| (text.clone(), Vec::new()))
 }
 
 #[pg_extern(volatile, parallel_unsafe)]
@@ -258,7 +402,7 @@ fn search(
         pgrx::error!("stannum.search() limit must be non-negative");
     }
     let mode = validate_snippet(snippet);
-    let attnum = validate_shape(&index, mode != "none");
+    let keys = validate_shape(&index, mode != "none");
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
     let index_oid = index.oid();
     let mut scorer = build_standalone_scorer(heap_oid, index_oid, query, k1, b);
@@ -277,7 +421,7 @@ fn search(
     let rows = rows.into_iter().take(limit).collect();
     let pipeline = scorer.pipeline();
     let rows = fetch_snippet(
-        heap_oid, attnum, pipeline, query, mode, begin_tag, end_tag, rows,
+        heap_oid, &keys, pipeline, query, mode, begin_tag, end_tag, rows,
     );
     TableIterator::new(rows)
 }
@@ -368,29 +512,46 @@ mod tests {
         let metadata = unsafe { &*(*index.as_ptr()).rd_index };
         assert_eq!(metadata.indnatts, 2);
         assert_eq!(metadata.indnkeyatts, 1);
-        assert_eq!(validate_shape(&index, true), 2);
+        assert!(matches!(
+            validate_shape(&index, true),
+            SnippetKeys::Single(2)
+        ));
     }
 
-    /// A multi-column index is scanned and scored (its field-aware bounds make
-    /// the walk prunable); snippets on one are phase 3, so the SRF asks for
-    /// `snippet => 'none'` with the same degraded-mode shape as the
-    /// expression-key and text-compatibility checks.
+    /// A multi-column index is scanned and scored (its field-aware bounds
+    /// make the walk prunable); its snippets render one field per row
+    /// (§P0-2 phase 3), so the shape validator hands the refetch every key
+    /// column with the recorded field names.
     #[pg_test]
-    fn search_shape_accepts_multiple_keys_without_snippets() {
+    fn search_shape_accepts_multiple_keys_with_snippets() {
         fixture();
-        Spi::run("CREATE INDEX hardening_multikey ON hardening_docs(body, revision)").unwrap();
+        Spi::run(
+            "CREATE TABLE hardening_two(id int primary key, a text, b text);
+             CREATE INDEX hardening_two_idx ON hardening_two USING stannum(a, b);",
+        )
+        .unwrap();
         let index = unsafe {
-            PgRelation::with_lock(oid("hardening_multikey"), pg_sys::AccessShareLock as _)
+            PgRelation::with_lock(oid("hardening_two_idx"), pg_sys::AccessShareLock as _)
         };
         let metadata = unsafe { &*(*index.as_ptr()).rd_index };
         assert_eq!(metadata.indnkeyatts, 2);
-        assert_eq!(validate_shape(&index, false), 2);
+        for snippets in [true, false] {
+            match validate_shape(&index, snippets) {
+                SnippetKeys::Fields { attnums, names } => {
+                    assert_eq!(attnums.len(), 2);
+                    assert_eq!(names, ["a", "b"]);
+                }
+                other => panic!("expected field keys, got {other:?}"),
+            }
+        }
     }
 
+    /// Snippets still refuse a non-text key column on a multi-column index:
+    /// `revision` is an int, and rendering it would not be a snippet.
     #[pg_test(
-        error = "stannum.search() snippets on a multi-column index are not supported yet; use snippet => 'none' for degraded mode"
+        error = "stannum.search() snippets require text-compatible key columns; use snippet => 'none' for degraded mode"
     )]
-    fn search_shape_rejects_multiple_keys_with_snippets() {
+    fn search_shape_rejects_non_text_keys_with_snippets() {
         fixture();
         Spi::run("CREATE INDEX hardening_multikey_snippets ON hardening_docs(body, revision)")
             .unwrap();
@@ -447,17 +608,58 @@ mod tests {
         assert_eq!(ranked[0].0, 3, "{ranked:?}");
         assert!(ranked[0].1 > ranked[1].1, "{ranked:?}");
         assert_eq!(ranked[1].1, ranked[2].1, "{ranked:?}");
-        // The SQL search surface refuses snippets on a multi-column index.
-        Spi::run(
-            "DO $test$ DECLARE caught text; BEGIN
-               BEGIN PERFORM * FROM stannum.search('mc_docs_idx', 'needle', 1);
-               EXCEPTION WHEN OTHERS THEN caught := SQLERRM; END;
-               IF caught IS NULL OR position('use snippet => ''none''' in caught) = 0 THEN
-                 RAISE EXCEPTION 'missing actionable multi-column snippet error: %', caught;
-               END IF;
-             END $test$;",
-        )
-        .unwrap();
+        // The SQL search surface renders one field's snippet per row: the
+        // first field holding a match (marks confined to it), so id 2's
+        // snippet comes from its body while ids 1 and 3 come from title.
+        let snippets = |query: &str| -> Vec<(i32, String)> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT d.id, s.snippet FROM mc_docs d JOIN
+                             stannum.search('mc_docs_idx', '{query}', 3) s ON d.ctid = s.ctid
+                             ORDER BY d.id"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .map(|row| {
+                        (
+                            row.get::<i32>(1).unwrap().unwrap(),
+                            row.get::<String>(2).unwrap().unwrap(),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        assert_eq!(
+            snippets("needle"),
+            vec![
+                (1, "<mark>needle</mark>".into()),
+                (2, "<mark>needle</mark>".into()),
+                (3, "<mark>needle</mark> <mark>needle</mark>".into())
+            ]
+        );
+        // A single top-level field wrapper renders that field, marks
+        // confined to it.
+        assert_eq!(
+            snippets("title:(needle)"),
+            vec![
+                (1, "<mark>needle</mark>".into()),
+                (3, "<mark>needle</mark> <mark>needle</mark>".into())
+            ]
+        );
+        // A query with no highlightable part still returns a snippet: the
+        // first non-NULL field renders plain.
+        assert_eq!(
+            snippets("* AND NOT absenttoken"),
+            vec![
+                (1, "needle".into()),
+                (2, "pad".into()),
+                (3, "needle needle".into())
+            ]
+        );
         // A field-scoped query restricts the candidates to that field's hits.
         assert_eq!(
             Spi::get_one::<i64>("SELECT stannum.search_count('mc_docs_idx', 'title:(needle)')")
@@ -580,6 +782,57 @@ mod tests {
              END $test$;",
         )
         .unwrap();
+    }
+
+    /// A NULL first field never blocks the snippet: the refetch reads every
+    /// key column, and the first field holding a mark decides (a NULL field
+    /// holds none); when nothing marks, the first non-NULL field renders
+    /// plain (RFC §5.11).
+    #[pg_test]
+    fn search_snippets_skip_null_fields() {
+        Spi::run(
+            "CREATE TABLE snip_null(id int primary key, title text, body text);
+             INSERT INTO snip_null VALUES
+               (1, NULL, 'needle pad'),
+               (2, 'pad', 'needle pad');
+             CREATE INDEX snip_null_idx ON snip_null USING stannum(title, body);",
+        )
+        .unwrap();
+        let snippets = |query: &str| -> Vec<(i32, String)> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT d.id, s.snippet FROM snip_null d JOIN
+                             stannum.search('snip_null_idx', '{query}', 5) s ON d.ctid = s.ctid
+                             ORDER BY d.id"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .map(|row| {
+                        (
+                            row.get::<i32>(1).unwrap().unwrap(),
+                            row.get::<String>(2).unwrap().unwrap(),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        // Both rows match in body only; id 1's NULL title steps aside.
+        assert_eq!(
+            snippets("needle"),
+            vec![
+                (1, "<mark>needle</mark> pad".into()),
+                (2, "<mark>needle</mark> pad".into())
+            ]
+        );
+        // The title holds the only match here, marks confined to it.
+        assert_eq!(
+            snippets("title:(pad)"),
+            vec![(2, "<mark>pad</mark>".into())]
+        );
     }
 
     #[pg_test]
@@ -723,7 +976,7 @@ mod tests {
         let _snapshot = CurrentSnapshot::push();
         let output = fetch_snippet(
             oid("hardening_docs"),
-            2,
+            &SnippetKeys::Single(2),
             &pipeline,
             "needle",
             "html",

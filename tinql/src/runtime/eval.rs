@@ -312,6 +312,65 @@ fn resolve_slot_positions(slot: &SpanTermSlot, doc: &TokenizedDoc) -> Vec<u32> {
     }
 }
 
+/// Projects `query` onto one field for highlighting: with `field` set, a
+/// `Query::Field` wrapper naming that field contributes its inner marks, a
+/// wrapper naming another field contributes nothing, and every unscoped
+/// part marks as usual — so marks stay confined to the field whose text is
+/// being rendered (RFC §5.11). With `field` unset the query is returned
+/// unchanged: the single-column behavior.
+pub fn project_to_field(query: &Query, field: Option<&str>) -> Query {
+    let Some(field) = field else {
+        return query.clone();
+    };
+    match query {
+        Query::Field { name, inner } => {
+            if name == field {
+                (**inner).clone()
+            } else {
+                // `MatchAll` contributes no highlight marks.
+                Query::MatchAll
+            }
+        }
+        Query::And(left, right) => Query::And(
+            Box::new(project_to_field(left, Some(field))),
+            Box::new(project_to_field(right, Some(field))),
+        ),
+        Query::Or(left, right) => Query::Or(
+            Box::new(project_to_field(left, Some(field))),
+            Box::new(project_to_field(right, Some(field))),
+        ),
+        Query::Conjunction(children) => Query::Conjunction(
+            children
+                .iter()
+                .map(|child| project_to_field(child, Some(field)))
+                .collect(),
+        ),
+        Query::Disjunction { min, children } => Query::Disjunction {
+            min: *min,
+            children: children
+                .iter()
+                .map(|child| project_to_field(child, Some(field)))
+                .collect(),
+        },
+        Query::Not(inner) => Query::Not(Box::new(project_to_field(inner, Some(field)))),
+        Query::Boost { factor, inner } => Query::Boost {
+            factor: *factor,
+            inner: Box::new(project_to_field(inner, Some(field))),
+        },
+        Query::AtLeast { min, children } => Query::AtLeast {
+            min: *min,
+            children: children
+                .iter()
+                .map(|child| project_to_field(child, Some(field)))
+                .collect(),
+        },
+        // Leaves (terms, spans, expansions nodes, `MatchAll`) carry no field
+        // wrapper inside; span operands cannot hold one (the grammar
+        // rejects a field in span context).
+        leaf => leaf.clone(),
+    }
+}
+
 /// A single highlight match: a labeled interval produced by per-component
 /// query evaluation against a tokenized document.
 #[derive(PartialEq)]

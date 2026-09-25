@@ -24,7 +24,7 @@ pub mod subtokenize;
 pub use capability::{CapabilityClass, LoweringIssue, classify_expr, classify_query_text};
 pub use eval::{
     EvalError, FuzzyMatcher, HighlightMatch, MatchResult, TokenizedDoc, evaluate,
-    evaluate_for_highlight, range_matches, tokenize_doc,
+    evaluate_for_highlight, project_to_field, range_matches, tokenize_doc,
 };
 pub use position_filter::{PositionFilterBound, ResolvedPositionWindow, SpanPositionFilter};
 pub use regex::{CompiledRegex, RegexError};

@@ -14,7 +14,10 @@
 //! agree with matches. A NULL query is taken from the `==>` clauses on the
 //! same expression, as before.
 
-use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query, rewrap_text};
+use crate::highlight::{
+    highlight_text, highlight_text_ansi, positions_from_query, positions_from_query_for_field,
+    rewrap_text,
+};
 use crate::operator::indexed_query;
 use pgrx::{Internal, IntoDatum, PgList, default, pg_extern, pg_guard, pg_sys};
 use std::borrow::Cow;
@@ -31,10 +34,11 @@ fn render_highlight(
     begin_tag: &str,
     end_tag: &str,
     query: Option<&str>,
+    field: Option<&str>,
 ) -> Option<String> {
     let text = text?;
     let query = query.unwrap_or_else(|| missing_binding("stannum.highlight()"));
-    let positions = positions_from_query(pipeline, query, text);
+    let positions = positions_from_query_for_field(pipeline, query, text, field, 0);
     highlight_text(pipeline, text, begin_tag, end_tag, &positions)
         .map(Some)
         .unwrap_or_else(|error| pgrx::error!("{error}"))
@@ -75,6 +79,31 @@ fn highlight(
         begin_tag,
         end_tag,
         query,
+        None,
+    )
+}
+
+/// The field-aware overload (RFC §5.11 highlights): with `field` set the
+/// text is that field of a multi-column indexed document, and marks stay
+/// confined to the query parts whose scope includes it; `NULL` is the
+/// single-column behavior. No argument takes a default: a defaulted fifth
+/// argument would either break PostgreSQL's defaults-after-defaults rule or
+/// make shorter calls ambiguous against the four-argument overload.
+#[pg_extern(name = "highlight", immutable, parallel_safe)]
+fn highlight_field(
+    text: Option<&str>,
+    begin_tag: &str,
+    end_tag: &str,
+    query: Option<&str>,
+    field: Option<&str>,
+) -> Option<String> {
+    render_highlight(
+        tokenizer::presets::default_pipeline(),
+        text,
+        begin_tag,
+        end_tag,
+        query,
+        field,
     )
 }
 
@@ -90,7 +119,51 @@ fn highlight_bound(
     };
     crate::udfs::validate_stannum_index(&index, "highlight");
     let pipeline = unsafe { crate::storage::tokenizer_by_oid(pg_sys::Oid::from(query.index)) };
-    render_highlight(&pipeline, text, begin_tag, end_tag, Some(&query.query))
+    render_highlight(
+        &pipeline,
+        text,
+        begin_tag,
+        end_tag,
+        Some(&query.query),
+        None,
+    )
+}
+
+/// The bound field-aware overload: like [`highlight_field`] but analyzed
+/// with the bound index's settings, and `field` must name one of that
+/// index's fields when set (the multi-column plan recorded at CREATE
+/// INDEX; `NULL` keeps the single-column behavior). The trailing `field`
+/// takes no default so four-argument bound calls stay unambiguous.
+#[pg_extern(name = "highlight", stable, parallel_safe)]
+fn highlight_bound_field(
+    text: Option<&str>,
+    begin_tag: &str,
+    end_tag: &str,
+    query: indexed_query,
+    field: Option<&str>,
+) -> Option<String> {
+    let index = unsafe {
+        pgrx::PgRelation::with_lock(pg_sys::Oid::from(query.index), pg_sys::AccessShareLock as _)
+    };
+    crate::udfs::validate_stannum_index(&index, "highlight");
+    if let Some(field) = field {
+        let plan = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+        if !plan
+            .as_ref()
+            .is_some_and(|plan| plan.names.iter().any(|name| name == field))
+        {
+            pgrx::error!("stannum.highlight(): unknown field '{field}'");
+        }
+    }
+    let pipeline = unsafe { crate::storage::tokenizer_by_oid(pg_sys::Oid::from(query.index)) };
+    render_highlight(
+        &pipeline,
+        text,
+        begin_tag,
+        end_tag,
+        Some(&query.query),
+        field,
+    )
 }
 
 #[pg_extern(name = "highlight_ansi", immutable, parallel_safe)]
@@ -151,6 +224,37 @@ fn unhandled() -> Internal {
     Internal::from(Some(pg_sys::Datum::from(0_usize)))
 }
 
+/// The field name a plain column reference names on a multi-column index:
+/// the position of the Var's attribute in the index's key list selects the
+/// recorded field plan entry. Anything else — an expression, a foreign
+/// relation, a single-column index — contributes no field.
+unsafe fn column_field_name(
+    parse: *mut pg_sys::Query,
+    document: *mut pg_sys::Node,
+    index: pg_sys::Oid,
+) -> Option<String> {
+    unsafe {
+        if document.is_null() || (*document).type_ != pg_sys::NodeTag::T_Var {
+            return None;
+        }
+        let var = document.cast::<pg_sys::Var>();
+        if (*var).varno < 1 || (*var).varno > pg_sys::list_length((*parse).rtable) {
+            return None;
+        }
+        let relation = pgrx::PgRelation::with_lock(index, pg_sys::AccessShareLock as _);
+        let metadata = (*relation.as_ptr()).rd_index;
+        if metadata.is_null() || (*var).varattno <= 0 {
+            return None;
+        }
+        let keys = (*metadata).indnkeyatts as usize;
+        let position = (0..keys).find(|&position| {
+            (*metadata).indkey.values.as_slice(keys)[position] == (*var).varattno
+        })?;
+        let plan = crate::storage::fields_meta(relation.as_ptr());
+        plan.as_ref()?.names.get(position).cloned()
+    }
+}
+
 /// The queries as one text expression: constants are ORed into one
 /// constant; anything else keeps the first query.
 unsafe fn combined_query(queries: &[*mut pg_sys::Node]) -> *mut pg_sys::Node {
@@ -169,8 +273,9 @@ unsafe fn combined_query(queries: &[*mut pg_sys::Node]) -> *mut pg_sys::Node {
 }
 
 /// The overload of `name` taking an `indexed_query` in place of the text
-/// query at `query_position`.
-unsafe fn bound_overload(name: &CStr, query_position: usize) -> pg_sys::Oid {
+/// query at `query_position`, optionally with a trailing `field` text
+/// argument (the field-aware bound overload).
+unsafe fn bound_overload(name: &CStr, query_position: usize, field: bool) -> pg_sys::Oid {
     unsafe {
         let mut types = if query_position == 3 {
             vec![pg_sys::TEXTOID, pg_sys::TEXTOID, pg_sys::TEXTOID]
@@ -178,6 +283,9 @@ unsafe fn bound_overload(name: &CStr, query_position: usize) -> pg_sys::Oid {
             vec![pg_sys::TEXTOID, pg_sys::INT4OID]
         };
         types.push(crate::operator::indexed_query_type_oid());
+        if field {
+            types.push(pg_sys::TEXTOID);
+        }
         crate::operator::extension_function_oid(name, &types)
     }
 }
@@ -253,7 +361,14 @@ fn highlight_support(request: Internal) -> Internal {
         let Some(operand) = crate::operator::bound_operand(query, index) else {
             return unhandled();
         };
-        let overload = bound_overload(name, query_position);
+        // A multi-column index attributes a plain column reference to its
+        // field, so field-scoped query parts mark only that column's text.
+        let field = if name.to_bytes() == b"highlight" {
+            column_field_name(parse, document, index)
+        } else {
+            None
+        };
+        let overload = bound_overload(name, query_position, field.is_some());
         if overload == pg_sys::InvalidOid {
             return unhandled();
         }
@@ -267,6 +382,9 @@ fn highlight_support(request: Internal) -> Internal {
                     .cast()
             };
             args.push(argument);
+        }
+        if let Some(field) = field {
+            args.push(crate::operator::make_text_const(&field));
         }
         (*replacement).funcid = overload;
         (*replacement).args = args.into_pg();
@@ -301,11 +419,65 @@ mod tests {
     fn explicit_html_and_ansi_highlighting_render_matches() {
         let pipeline = tokenizer::presets::default_pipeline();
         assert_eq!(
-            render_highlight(pipeline, Some("Hi there"), "<b>", "</b>", Some("hi")),
+            render_highlight(pipeline, Some("Hi there"), "<b>", "</b>", Some("hi"), None),
             Some("<b>Hi</b> there".into())
         );
         let ansi = render_highlight_ansi(pipeline, Some("hi there"), None, Some("hi")).unwrap();
         assert!(ansi.contains("\x1b["));
         assert!(ansi.contains("hi"));
+    }
+
+    /// The field overload confines marks to the field the text is: a
+    /// `title:(…)` part marks only when the text is that field, and an
+    /// unscoped part marks as usual (RFC §5.11).
+    #[pg_test]
+    fn field_overload_confines_marks_to_the_named_field() {
+        let pipeline = tokenizer::presets::default_pipeline();
+        assert_eq!(
+            render_highlight(
+                pipeline,
+                Some("needle pad"),
+                "<b>",
+                "</b>",
+                Some("title:(needle)"),
+                Some("title"),
+            ),
+            Some("<b>needle</b> pad".into())
+        );
+        assert_eq!(
+            render_highlight(
+                pipeline,
+                Some("needle pad"),
+                "<b>",
+                "</b>",
+                Some("title:(needle)"),
+                Some("body"),
+            ),
+            Some("needle pad".into())
+        );
+        // Unscoped parts mark under any field name; NULL keeps the
+        // single-column behavior (a scope contributes nothing there).
+        assert_eq!(
+            render_highlight(
+                pipeline,
+                Some("needle pad"),
+                "<b>",
+                "</b>",
+                Some("needle"),
+                Some("body"),
+            ),
+            Some("<b>needle</b> pad".into())
+        );
+        assert_eq!(
+            render_highlight(
+                pipeline,
+                Some("needle pad"),
+                "<b>",
+                "</b>",
+                Some("title:(needle)"),
+                None,
+            ),
+            Some("needle pad".into())
+        );
     }
 }
