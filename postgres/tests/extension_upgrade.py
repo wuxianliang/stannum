@@ -116,10 +116,41 @@ def main():
                 database = f'upgrade_{number}'
                 sql(f'CREATE DATABASE {database}')
                 sql(f"CREATE EXTENSION stannum VERSION '{previous}'", database)
+                # A single-column index built by the previous version: its LSG3
+                # bytes are never rewritten, so it must read identically after
+                # the upgrade (LSG4 RFC §5.9).
+                lsg3 = previous == '0.3.0'
+                if lsg3:
+                    sql('CREATE TABLE lsg3_docs(id int primary key, body text); '
+                        "INSERT INTO lsg3_docs VALUES (1, 'needle pad'), (2, 'pad needle'); "
+                        'CREATE INDEX lsg3_docs_idx ON lsg3_docs USING stannum(body)', database)
                 if previous != version:
                     sql(f"ALTER EXTENSION stannum UPDATE TO '{version}'", database)
                 assert sql("SELECT extversion FROM pg_extension WHERE extname='stannum'", database) == version
                 assert fingerprint(database) == fresh, f'{previous} upgrade differs from fresh installation'
+                if lsg3:
+                    assert sql("SELECT count(*) FROM lsg3_docs WHERE body ==> 'needle'", database) == '2'
+                    assert sql("SELECT stannum.search_count('lsg3_docs_idx', '\"needle pad\"')", database) == '1'
+                    # The 0.4.0 objects in the upgraded database: a multi-column
+                    # field-weighted index, same-field phrases, snippets, and the
+                    # highlight field overload (RFC §5.11).
+                    sql('CREATE TABLE fields_docs(id int primary key, title text, body text); '
+                        "INSERT INTO fields_docs VALUES "
+                        "(1, '甲 乙', 'pad'), (2, '甲', '乙'), (3, 'needle 甲 乙', 'pad'); "
+                        "CREATE INDEX fields_docs_idx ON fields_docs USING stannum(title, body) "
+                        "WITH (field_weights = 'title:3.0,body:1.0')", database)
+                    # Same-field phrases: 甲 in title plus 乙 in body (row 2) never matches.
+                    assert sql("SELECT count(*) FROM fields_docs WHERE title ==> 'title:(\"甲 乙\")'", database) == '2'
+                    assert sql("SELECT count(*) FROM fields_docs WHERE title ==> '\"甲 乙\"'", database) == '2'
+                    assert sql("SELECT stannum.search_count('fields_docs_idx', '\"甲 乙\"')", database) == '2'
+                    assert sql("SELECT stannum.search_count('fields_docs_idx', 'title:(甲) AND body:(乙)')", database) == '1'
+                    # The snippet renders the wrapper's field with confined marks.
+                    assert sql("SELECT s.snippet FROM fields_docs d JOIN "
+                               "stannum.search('fields_docs_idx', 'title:(needle)', 1) s "
+                               'ON d.ctid = s.ctid', database) == '<mark>needle</mark> 甲 乙'
+                    # The new highlight overload answers in the upgraded database.
+                    assert sql("SELECT stannum.highlight(title, '<b>', '</b>', 'title:(needle)', 'title') "
+                               'FROM fields_docs WHERE id = 3', database) == '<b>needle</b> 甲 乙'
             print(f'Release schema {version}: drift, snapshot install, and {len(snapshots)-1} upgrade paths passed')
         finally:
             if started:

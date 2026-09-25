@@ -496,6 +496,16 @@ each term's extents as gaps from the previous term's (zero, since streams
 are laid out back to back) with `df` and `max_tf_bucket` packed into one
 varint. `LSG2` and `LSG1` segments are still read; ranked scans over `LSG2`
 prune exactly as over `LSG3`, and over `LSG1` score every candidate.
+`LSG4` (0.4.0) is the field-aware superset a **multi-column** index writes:
+the header gains a field count and per-field totals, the length table
+becomes doc-major field rows, payload entries group positions by field, and
+postings bounds carry per-field maxima and minima so WAND prunes
+field-scoped queries (see `docs/designs/lsg4-rfc.md`). Positions are
+independent per field — each field's positions start at zero — so
+positional queries are solved per field and never match across two. A
+single-column index keeps writing `LSG3` indefinitely, `LSG3` and `LSG4`
+segments never merge with each other, and an `LSG4` index does not open on
+a pre-0.4.0 binary (fail closed; `REINDEX` is the downgrade).
 Unsupported old formats require rebuilding the index.
 `script/dump-segments.py` writes an index's segment blobs to files and
 `cargo run -p segment --release --example breakdown -- --reencode <blobs>`

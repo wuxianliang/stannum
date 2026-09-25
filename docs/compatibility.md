@@ -196,3 +196,39 @@ alone is not a rollback for rebuilt indexes; restore an appropriate backup
 or rebuild under the old binary. Page-special version remains 2 and unknown
 meta trailer tags fail closed. `tokenize` and `ql_parse` are now STABLE and
 PARALLEL UNSAFE because jieba analysis can consult the mutable dictionary.
+
+## Multi-column field indexes (0.4.0)
+
+Stannum 0.4.0 accepts more than one key column and adds the
+Stannum-specific `field_weights` reloption — a sixteenth option with no TIN
+counterpart, so it appears in no row of the surface table above. TIN and
+every documented TIN option remain single-column; a multi-column index is a
+Stannum extension.
+
+`field_weights = 'title:3.0,body:1.0'` names a permutation of the index's
+key columns with finite positive weights (omitted columns default to `1.0`).
+Setting it on a single-column index is an error, `ALTER INDEX … SET
+(field_weights = …)` fails closed until a REINDEX, and a column rename
+requires a REINDEX because the recorded names no longer match the relation.
+Multi-column indexes reject expression keys and INCLUDE columns.
+
+Scoring is BM25F over the recorded weights; the query language gains
+[field groups](query-language/fields.md) (`title:(beer OR ale)`, quoted
+identifiers for other spellings) with Lucene's same-field rule for
+positional queries, and the `==>` operator scopes its clause to its left
+operand's column. `stannum.search()` works on multi-column indexes; its
+snippet renders one field per row. `stannum.highlight` gains a field-aware
+five-argument overload (no defaults on the trailing arguments, so existing
+one-to-four-argument calls are unaffected and unambiguous).
+
+### Format and rollback limits (0.4.0)
+
+A multi-column index writes `LSG4` segments (see
+[segmented storage](architecture/segmented-storage.md)); single-column
+indexes keep writing `LSG3` indefinitely, and `LSG3` indexes — including
+any built by 0.3.0 — read unchanged after the upgrade. An `LSG4` index does
+not open on a pre-0.4.0 binary: the segment magic and the meta fields
+trailer both fail closed. There is no on-disk downgrade; restore a backup or
+REINDEX under the old binary after dropping the extension version. Upgrade
+with `ALTER EXTENSION stannum UPDATE TO '0.4.0'`; the upgrade path adds the
+two `stannum.highlight` overloads and nothing else.

@@ -18,6 +18,7 @@ Start with the [introduction](introduction.md) for the basic syntax and examples
 - [Terms, wildcards, fuzzy matching, regex, and ranges](terms.md)
 - [Boolean operators](boolean-operators.md)
 - [Phrases](phrases.md)
+- [Fields (multi-column indexes)](fields.md)
 - [Alternatives and minimum-match expressions](alternatives.md)
 - [Proximity](proximity.md)
 - [Span relations](span-relations.md)
