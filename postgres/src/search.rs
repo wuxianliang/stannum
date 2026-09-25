@@ -16,13 +16,25 @@ use tokenizer::CompiledTokenizerPipeline;
 
 type SearchRow = (pg_sys::ItemPointerData, f32, Option<String>);
 
+/// Validates the index's shape for the SRF and returns the key attribute
+/// snippets read from.
+///
+/// A single-column index behaves exactly as before. A multi-column
+/// (field-aware, `LSG4`) index scores through the BM25F path; its snippets
+/// are phase 3, so asking for one fails with an actionable degraded-mode
+/// error rather than highlighting the wrong column.
 fn validate_shape(index: &PgRelation, snippets: bool) -> i16 {
     unsafe {
         let metadata = &*(*index.as_ptr()).rd_index;
-        if metadata.indnkeyatts != 1 {
-            pgrx::error!("stannum.search() supports a single text column until LSG4");
-        }
         let key = *metadata.indkey.values.as_ptr();
+        if metadata.indnkeyatts >= 2 {
+            if snippets {
+                pgrx::error!(
+                    "stannum.search() snippets on a multi-column index are not supported yet; use snippet => 'none' for degraded mode"
+                );
+            }
+            return key;
+        }
         if !snippets {
             return key;
         }
@@ -359,16 +371,117 @@ mod tests {
         assert_eq!(validate_shape(&index, true), 2);
     }
 
-    #[pg_test(error = "stannum.search() supports a single text column until LSG4")]
-    fn search_shape_rejects_multiple_keys_even_without_snippets() {
+    /// A multi-column index is scanned and scored (its field-aware bounds make
+    /// the walk prunable); snippets on one are phase 3, so the SRF asks for
+    /// `snippet => 'none'` with the same degraded-mode shape as the
+    /// expression-key and text-compatibility checks.
+    #[pg_test]
+    fn search_shape_accepts_multiple_keys_without_snippets() {
         fixture();
-        // Likewise exercise the defensive SRF check even though CREATE INDEX
-        // itself currently rejects multicolumn Stannum indexes.
         Spi::run("CREATE INDEX hardening_multikey ON hardening_docs(body, revision)").unwrap();
         let index = unsafe {
             PgRelation::with_lock(oid("hardening_multikey"), pg_sys::AccessShareLock as _)
         };
-        validate_shape(&index, false);
+        let metadata = unsafe { &*(*index.as_ptr()).rd_index };
+        assert_eq!(metadata.indnkeyatts, 2);
+        assert_eq!(validate_shape(&index, false), 2);
+    }
+
+    #[pg_test(
+        error = "stannum.search() snippets on a multi-column index are not supported yet; use snippet => 'none' for degraded mode"
+    )]
+    fn search_shape_rejects_multiple_keys_with_snippets() {
+        fixture();
+        Spi::run("CREATE INDEX hardening_multikey_snippets ON hardening_docs(body, revision)")
+            .unwrap();
+        let index = unsafe {
+            PgRelation::with_lock(
+                oid("hardening_multikey_snippets"),
+                pg_sys::AccessShareLock as _,
+            )
+        };
+        validate_shape(&index, true);
+    }
+
+    /// `search()` and `search_count()` answer on a multi-column index through
+    /// the field-aware scorer: the term matches in any field, the strongest
+    /// field hit ranks first, and snippets are refused with the actionable
+    /// degraded-mode error rather than highlighting one column.
+    #[pg_test]
+    fn search_scores_every_field_of_a_multi_column_index() {
+        Spi::run(
+            "CREATE TABLE mc_docs(id int primary key, title text, body text);
+             INSERT INTO mc_docs VALUES
+               (1, 'needle', 'pad'),
+               (2, 'pad', 'needle'),
+               (3, 'needle needle', 'pad');
+             CREATE INDEX mc_docs_idx ON mc_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('mc_docs_idx', 'needle')").unwrap(),
+            Some(3)
+        );
+        let rows = |sql: &str| -> Vec<(i32, u32)> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .map(|row| {
+                        (
+                            row.get::<i32>(1).unwrap().unwrap(),
+                            row.get::<f32>(2).unwrap().unwrap().to_bits(),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        // Only id 3 carries the term twice in its title, so it ranks first;
+        // ids 1 and 2 tie exactly, on equal weighted lengths.
+        let ranked = rows(
+            "SELECT d.id, s.score FROM mc_docs d JOIN
+             stannum.search('mc_docs_idx', 'needle', 3, 'none') s ON d.ctid = s.ctid
+             ORDER BY s.score DESC, d.id",
+        );
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].0, 3, "{ranked:?}");
+        assert!(ranked[0].1 > ranked[1].1, "{ranked:?}");
+        assert_eq!(ranked[1].1, ranked[2].1, "{ranked:?}");
+        // The SQL search surface refuses snippets on a multi-column index.
+        Spi::run(
+            "DO $test$ DECLARE caught text; BEGIN
+               BEGIN PERFORM * FROM stannum.search('mc_docs_idx', 'needle', 1);
+               EXCEPTION WHEN OTHERS THEN caught := SQLERRM; END;
+               IF caught IS NULL OR position('use snippet => ''none''' in caught) = 0 THEN
+                 RAISE EXCEPTION 'missing actionable multi-column snippet error: %', caught;
+               END IF;
+             END $test$;",
+        )
+        .unwrap();
+        // A field-scoped query restricts the candidates to that field's hits.
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('mc_docs_idx', 'title:(needle)')")
+                .unwrap(),
+            Some(2)
+        );
+        let scoped = rows(
+            "SELECT d.id, s.score FROM mc_docs d JOIN
+             stannum.search('mc_docs_idx', 'title:(needle)', 2, 'none') s ON d.ctid = s.ctid
+             ORDER BY s.score DESC, d.id",
+        );
+        assert_eq!(scoped.len(), 2, "{scoped:?}");
+        assert_eq!(scoped[0].0, 3, "{scoped:?}");
+        // A field-scoped query prunes through the same walk (`pruned_top_k`),
+        // so its rows must match the exhaustive path's bit for bit. A limit
+        // past the pruning bound asks for that path.
+        assert_eq!(
+            scoped,
+            rows(
+                "SELECT d.id, s.score FROM mc_docs d JOIN
+                 stannum.search('mc_docs_idx', 'title:(needle)', 5000, 'none') s ON d.ctid = s.ctid
+                 ORDER BY s.score DESC, d.id"
+            )
+        );
     }
 
     #[pg_test]

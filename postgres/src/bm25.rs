@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use rustc_hash::FxHashSet;
 use segment::payload::FieldHit;
-use segment::postings::BlockBound;
+use segment::postings::{BlockBound, FieldBlockBound, ScoreBound};
 use thiserror::Error;
 
 use crate::tf_bucket::{BUCKET_COUNT, TfBucket};
@@ -384,9 +384,17 @@ impl TermScorer {
 
     #[must_use]
     pub(crate) fn score_bucket(&self, bucket: TfBucket, document_length: u32) -> f32 {
+        self.score_bucket_at(bucket, document_length as f32)
+    }
+
+    /// The same saturation expression at a length the walk already holds as
+    /// `f32`: an `LSG3` document length lifted exactly, or an `LSG4` weighted
+    /// length `len*` (§5.10). The operations are the ones `score_bucket`
+    /// performed, in the same order.
+    #[must_use]
+    pub(crate) fn score_bucket_at(&self, bucket: TfBucket, length: f32) -> f32 {
         let index = usize::from(bucket.value());
-        let denominator =
-            self.denominator_constant[index] + self.document_length_factor * document_length as f32;
+        let denominator = self.denominator_constant[index] + self.document_length_factor * length;
         self.numerator[index] / denominator
     }
 
@@ -416,13 +424,13 @@ impl TermScorer {
 
     /// Conjunction members share one document length. Every matching document
     /// is at least `min_length` long and also respects its bucket's minimum.
-    pub(crate) fn bound_with_min_length(&self, block: &BlockBound, min_length: u32) -> f32 {
+    pub(crate) fn bound_with_min_length(&self, block: &BlockBound, min_length: f32) -> f32 {
         block
             .buckets()
             .map(|(bucket, length)| {
-                self.score_bucket(
+                self.score_bucket_at(
                     TfBucket::new(bucket).expect("valid block bucket"),
-                    length.max(min_length),
+                    (length as f32).max(min_length),
                 )
             })
             .fold(0.0_f32, f32::max)
@@ -431,11 +439,11 @@ impl TermScorer {
     /// An upper bound on the score of a document of `length` in `block`:
     /// its bucket is one of the block's, so its score is one of these.
     #[must_use]
-    pub(crate) fn bound_for_length(&self, block: &BlockBound, length: u32) -> f32 {
+    pub(crate) fn bound_for_length(&self, block: &BlockBound, length: f32) -> f32 {
         let mut bound = 0.0_f32;
         for (bucket, _) in block.buckets() {
             let bucket = TfBucket::new(bucket).expect("block bounds hold valid buckets");
-            bound = bound.max(self.score_bucket(bucket, length));
+            bound = bound.max(self.score_bucket_at(bucket, length));
         }
         bound
     }
@@ -452,13 +460,56 @@ pub(crate) enum TermScoreModel {
 }
 
 impl TermScoreModel {
-    /// The single-field scorer. Block-max pruning speaks only this model
-    /// until phase 2 adds field bounds, so the walk expects it.
+    /// An upper bound on this term's contribution over `block`. The walk
+    /// decodes every bound through the term's own model (its format owns the
+    /// byte layout), so the two variants always agree.
     #[must_use]
-    pub(crate) fn bm25(&self) -> Option<&TermScorer> {
-        match self {
-            Self::Bm25(scorer) => Some(scorer),
-            Self::Bm25f(_) => None,
+    pub(crate) fn bound(&self, block: &ScoreBound) -> f32 {
+        match (self, block) {
+            (Self::Bm25(scorer), ScoreBound::Single(block)) => scorer.bound(block),
+            (Self::Bm25f(scorer), ScoreBound::Fields(block)) => scorer.bound(block),
+            _ => unreachable!("a block bound is decoded for the model that reads it"),
+        }
+    }
+
+    /// An upper bound on the contribution to a document of (weighted) length
+    /// `length` in `block`.
+    #[must_use]
+    pub(crate) fn bound_for_length(&self, block: &ScoreBound, length: f32) -> f32 {
+        match (self, block) {
+            (Self::Bm25(scorer), ScoreBound::Single(block)) => {
+                scorer.bound_for_length(block, length)
+            }
+            (Self::Bm25f(scorer), ScoreBound::Fields(block)) => {
+                scorer.bound_for_length(block, length)
+            }
+            _ => unreachable!("a block bound is decoded for the model that reads it"),
+        }
+    }
+
+    /// An upper bound over `block` for documents at least `min_length` long.
+    #[must_use]
+    pub(crate) fn bound_with_min_length(&self, block: &ScoreBound, min_length: f32) -> f32 {
+        match (self, block) {
+            (Self::Bm25(scorer), ScoreBound::Single(block)) => {
+                scorer.bound_with_min_length(block, min_length)
+            }
+            (Self::Bm25f(scorer), ScoreBound::Fields(block)) => {
+                scorer.bound_with_min_length(block, min_length)
+            }
+            _ => unreachable!("a block bound is decoded for the model that reads it"),
+        }
+    }
+
+    /// The (weighted) length floor the block promises to a document carrying
+    /// this term; the score never grows with length, so a conjunction shares
+    /// the largest of its members' floors.
+    #[must_use]
+    pub(crate) fn length_floor(&self, block: &ScoreBound) -> f32 {
+        match (self, block) {
+            (Self::Bm25(_), ScoreBound::Single(block)) => block.shortest() as f32,
+            (Self::Bm25f(scorer), ScoreBound::Fields(block)) => scorer.length_floor(block),
+            _ => unreachable!("a block bound is decoded for the model that reads it"),
         }
     }
 }
@@ -551,10 +602,104 @@ impl Bm25fScorer {
     /// The term's contribution to a document of weighted length `len_star`.
     #[must_use]
     pub(crate) fn score(&self, hits: &[FieldHit], len_star: f32) -> f32 {
-        let tf = self.weighted_tf(hits);
-        let numerator = self.multiplier * tf * self.k1_plus_one;
-        let denominator = (tf + self.k1_one_minus_b) + self.document_length_factor * len_star;
+        self.saturate(self.weighted_tf(hits), len_star)
+    }
+
+    /// The §5.10 saturation at `tf*` and `len*`; `score` and every bound
+    /// below evaluate the same operations in the same order.
+    #[must_use]
+    pub(crate) fn saturate(&self, tf_star: f32, len_star: f32) -> f32 {
+        let numerator = self.multiplier * tf_star * self.k1_plus_one;
+        let denominator = (tf_star + self.k1_one_minus_b) + self.document_length_factor * len_star;
         numerator / denominator
+    }
+
+    /// `tf* = Σ_selected w_f · dequantize(max_tf_bucket[f])` over the block's
+    /// present, scoped fields, folded in ascending field order (RFC §5.4).
+    /// Every document in the block carries each of its hits at a bucket at or
+    /// below that field's maximum, so this can only exceed its `tf*`.
+    ///
+    /// A scoped field the block does not carry contributes nothing: its
+    /// `max_tf_bucket` is a placeholder zero and no posting in the block hits
+    /// it.
+    #[must_use]
+    pub(crate) fn tf_upper(&self, block: &FieldBlockBound) -> f32 {
+        let mut tf = 0.0_f32;
+        for (field, weight) in self.scoped_fields(block) {
+            let bucket = TfBucket::new(block.max_tf_bucket[usize::from(field)])
+                .expect("field block bounds hold valid buckets");
+            tf += weight * bucket.representative_count() as f32;
+        }
+        tf
+    }
+
+    /// The weighted-length floor the block promises for a document carrying
+    /// this term in a scoped field: the smallest `w_f · min_doc_length(f)`
+    /// over the block's present, scoped fields.
+    ///
+    /// RFC §5.4's frozen formula *sums* those per-field aggregates. That sum
+    /// is a floor only for a document that carries the term in **every**
+    /// present scoped field: the aggregates may come from different postings,
+    /// and a document carrying the term in one field of a block whose other
+    /// fields hold it in longer documents need not reach them at all. Because
+    /// the score falls with length, an inflated floor yields a bound below a
+    /// real score, and WAND would then prune a row that belongs in the top k.
+    /// The minimum instead pairs each posting with its own field's floor —
+    /// the same reading `BlockBound`'s per-bucket minima already use — and it
+    /// equals the sum whenever a single scoped field is present, which covers
+    /// every field-scoped term and every term of a single-column index.
+    #[must_use]
+    pub(crate) fn length_floor(&self, block: &FieldBlockBound) -> f32 {
+        let mut floor = f32::INFINITY;
+        for (field, weight) in self.scoped_fields(block) {
+            let min_length = block.field_min_doc_length(field);
+            if min_length == u32::MAX {
+                continue;
+            }
+            floor = floor.min(weight * min_length as f32);
+        }
+        if floor.is_finite() { floor } else { 0.0 }
+    }
+
+    /// The block's present fields this term is scoped to, with their weights.
+    fn scoped_fields<'b>(
+        &'b self,
+        block: &'b FieldBlockBound,
+    ) -> impl Iterator<Item = (u8, f32)> + 'b {
+        (0u16..16)
+            .filter(move |&field| block.present_fields & self.mask & (1 << field) != 0)
+            .filter_map(move |field| {
+                let field = field as u8;
+                self.weights
+                    .get(usize::from(field))
+                    .map(|weight| (field, *weight))
+            })
+    }
+
+    /// An upper bound on this term's contribution anywhere in the block
+    /// (RFC §5.4).
+    #[must_use]
+    pub(crate) fn bound(&self, block: &FieldBlockBound) -> f32 {
+        self.saturate(self.tf_upper(block), self.length_floor(block))
+    }
+
+    /// An upper bound on the contribution to a document of weighted length
+    /// `len_star` in the block: its `tf*` is at most the block's `tf_upper`.
+    #[must_use]
+    pub(crate) fn bound_for_length(&self, block: &FieldBlockBound, len_star: f32) -> f32 {
+        self.saturate(self.tf_upper(block), len_star)
+    }
+
+    /// An upper bound for documents that are at least `min_length` long. A
+    /// conjunction's shared floor is another cursor's promise about documents
+    /// carrying *its* term, so it may only tighten this block's own floor,
+    /// never replace it.
+    #[must_use]
+    pub(crate) fn bound_with_min_length(&self, block: &FieldBlockBound, min_length: f32) -> f32 {
+        self.saturate(
+            self.tf_upper(block),
+            self.length_floor(block).min(min_length),
+        )
     }
 }
 
@@ -960,14 +1105,14 @@ mod tests {
                 let score = scorer.score_bucket(TfBucket::new(*bucket).unwrap(), *len);
                 assert!(score <= bound, "{bucket} {len}: {score} above {bound}");
                 // The bound at the document's own length covers it too.
-                for min_length in [1, *len / 2, *len] {
+                for min_length in [1.0, *len as f32 / 2.0, *len as f32] {
                     let joint = scorer.bound_with_min_length(&block, min_length);
                     assert!(
                         score <= joint && joint <= bound,
                         "{bucket} {len} {min_length}"
                     );
                 }
-                let for_length = scorer.bound_for_length(&block, *len);
+                let for_length = scorer.bound_for_length(&block, *len as f32);
                 assert!(score <= for_length, "{bucket} {len}");
             }
             assert!(
@@ -976,6 +1121,122 @@ mod tests {
                     .any(|(b, l)| scorer.score_bucket(TfBucket::new(*b).unwrap(), *l) == bound)
             );
         }
+    }
+
+    /// The field-aware bound must cover every document the block holds, for
+    /// every scoping mask and parameter set, including documents that carry
+    /// the term in one scoped field only.
+    #[test]
+    fn field_bound_dominates_every_scoped_score_it_covers() {
+        let last = segment::Tid::new(1, 1).unwrap();
+        let weights = [0.25_f32, 1.0, 3.0];
+        // Fields whose shortest documents disagree: field 0 holds one-token
+        // documents, field 1 only 900-token ones, field 2 only 40,000-token
+        // ones, so no single posting is as short as the sum of aggregates.
+        let entries = [(0u8, 1u8, 1u32), (0, 5, 4), (1, 2, 900), (2, 9, 40_000)];
+        let block = FieldBlockBound::over(&entries, last, 3);
+        let params = [
+            Bm25Params::default(),
+            Bm25Params { k1: 0.0, b: 1.0 },
+            Bm25Params { k1: 1e4, b: 0.0 },
+        ];
+        for mask in [0b001u16, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111] {
+            for (idf, boost) in [(1.0_f32, 1.0_f32), (0.3, 2.5), (0.0, 1.0)] {
+                for params in params {
+                    let scorer =
+                        Bm25fScorer::new(idf, boost, params, 100.0, &weights, mask).unwrap();
+                    let bound = scorer.bound(&block);
+                    assert!(bound >= 0.0);
+                    // Each posting as a document of its own field alone, and
+                    // the two-field document both first postings describe.
+                    let mut documents: Vec<(Vec<FieldHit>, f32)> = entries
+                        .iter()
+                        .map(|&(field, tf_bucket, length)| {
+                            (
+                                vec![FieldHit {
+                                    field,
+                                    tf_bucket,
+                                    positions: Vec::new(),
+                                }],
+                                weights[usize::from(field)] * length as f32,
+                            )
+                        })
+                        .collect();
+                    documents.push((
+                        vec![
+                            FieldHit {
+                                field: 0,
+                                tf_bucket: 1,
+                                positions: Vec::new(),
+                            },
+                            FieldHit {
+                                field: 1,
+                                tf_bucket: 2,
+                                positions: Vec::new(),
+                            },
+                        ],
+                        weights[0] * 1.0 + weights[1] * 900.0,
+                    ));
+                    // A document whose every hit is out of scope carries no
+                    // scoped term frequency at all: its contribution is zero
+                    // (and the degenerate `k1 = 0, b = 1` expression divides
+                    // zero by zero there), so it is not a document the term's
+                    // own bound speaks about.
+                    documents
+                        .retain(|(hits, _)| hits.iter().any(|hit| mask & (1 << hit.field) != 0));
+                    for (hits, len_star) in documents {
+                        let score = scorer.score(&hits, len_star);
+                        assert!(
+                            score <= bound,
+                            "mask {mask:#05b} {hits:?} len* {len_star}: {score} above {bound}"
+                        );
+                        assert!(score <= scorer.bound_for_length(&block, len_star));
+                        for min_length in [0.0, len_star, len_star * 2.0] {
+                            assert!(
+                                score <= scorer.bound_with_min_length(&block, min_length),
+                                "mask {mask:#05b} {hits:?} len* {len_star} min {min_length}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The frozen §5.4 formula sums the per-field length aggregates. That sum
+    /// is not a floor for a document that carries the term in one scoped
+    /// field only, and a floor that is too large yields a bound below a real
+    /// score. This pins the shipped minimum form and the witness it exists
+    /// for: the summed form under-bounds the short document, the shipped
+    /// bound covers it.
+    #[test]
+    fn field_bound_length_floor_is_a_minimum_not_a_sum() {
+        let last = segment::Tid::new(1, 1).unwrap();
+        // `term` in field 0 of a one-token document and in field 1 of a
+        // 5,000-token one: the aggregates are 1 and 5,000, but the short
+        // document is only 0.25 weighted tokens long.
+        let block = FieldBlockBound::over(&[(0, 1, 1), (1, 1, 5_000)], last, 2);
+        let weights = [0.25_f32, 1.0];
+        let scorer =
+            Bm25fScorer::new(1.0, 1.0, Bm25Params::default(), 2_500.0, &weights, 0b11).unwrap();
+        let hits = [FieldHit {
+            field: 0,
+            tf_bucket: 1,
+            positions: Vec::new(),
+        }];
+        let len_star = weights[0] * 1.0;
+        let score = scorer.score(&hits, len_star);
+        assert!(
+            score <= scorer.bound(&block),
+            "the shipped bound must cover the document: {score} above {}",
+            scorer.bound(&block)
+        );
+        let summed_floor = weights[0] * 1.0 + weights[1] * 5_000.0;
+        let summed = scorer.saturate(scorer.tf_upper(&block), summed_floor);
+        assert!(
+            summed < score,
+            "the summed floor must under-bound the witness: {summed} >= {score}"
+        );
     }
 
     #[test]

@@ -5498,6 +5498,352 @@ mod tests {
         Spi::run("ALTER INDEX alter_fields_idx SET (k1 = 1.5)").unwrap();
     }
 
+    // ── Multi-column fields (RFC §5.4 phase 2: BM25F bounds + WAND) ───────
+
+    /// The clause's implicit field scope reaches every scan shape, not only
+    /// the ranked one: the count plan and the unordered scan enumerate the
+    /// same matches a heap evaluation would. Both used to read their field
+    /// from the ranked layout's slot, so a clause on the second column of a
+    /// multi-column index counted or returned nothing.
+    #[pg_test]
+    fn field_scope_reaches_count_and_unordered_scans() {
+        Spi::run(
+            "CREATE TABLE scope_shapes(id int primary key, title text, body text);
+             INSERT INTO scope_shapes VALUES
+               (1, 'pad', 'needle'), (2, 'needle', 'pad'), (3, 'needle', 'needle pad');
+             CREATE INDEX scope_shapes_idx ON scope_shapes USING stannum(title, body);
+             SET LOCAL enable_seqscan = off;
+             SET LOCAL stannum.enable_custom_scan = on;",
+        )
+        .unwrap();
+        let count = |query: &str| -> i64 {
+            Spi::get_one::<i64>(&format!("SELECT count(*) FROM scope_shapes WHERE {query}"))
+                .unwrap()
+                .unwrap()
+        };
+        let ids = |query: &str| -> Vec<i32> {
+            Spi::get_one::<Vec<i32>>(&format!(
+                "SELECT array_agg(id ORDER BY id) FROM scope_shapes WHERE {query}"
+            ))
+            .unwrap()
+            .unwrap_or_default()
+        };
+        let plan = Spi::get_one::<Json>(
+            "EXPLAIN (FORMAT JSON) SELECT count(*) FROM scope_shapes WHERE body ==> 'needle'",
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(
+            plan[0]["Plan"]["Custom Plan Provider"], "Stannum Count",
+            "{plan}"
+        );
+        assert_eq!(count("title ==> 'needle'"), 2);
+        assert_eq!(count("body ==> 'needle'"), 2);
+        // The unordered search path, with the bitmap alternative disabled so
+        // the custom scan answers.
+        Spi::run("SET LOCAL enable_bitmapscan = off").unwrap();
+        assert_eq!(ids("title ==> 'needle'"), vec![2, 3]);
+        assert_eq!(ids("body ==> 'needle'"), vec![1, 3]);
+        Spi::run("SET LOCAL enable_bitmapscan = on").unwrap();
+        assert_eq!(ids("body ==> 'needle'"), vec![1, 3]);
+    }
+
+    /// 1,200 rows in three segments where `needle` occurs in exactly one
+    /// field per row — four times in a third of the titles, once or twice in
+    /// the other bodies — so most blocks hold both fields and the field-aware
+    /// bound is looser than any single-field one would be.
+    fn field_wand_fixture() {
+        Spi::run(
+            "CREATE TABLE field_wand(id int primary key, title text, body text);
+             SET LOCAL stannum.build_segment_docs = 400;
+             INSERT INTO field_wand
+               SELECT n,
+                 CASE WHEN n % 3 = 0
+                      THEN CASE WHEN n % 4 = 0 THEN repeat('needle ', 4) ELSE 'needle' END
+                      ELSE 'pad' END,
+                 CASE WHEN n % 3 = 0 THEN repeat('pad ', n % 5) || 'tail'
+                      ELSE repeat('needle ', 1 + n % 2) || repeat('pad ', n % 6) || 'tail' END
+               FROM generate_series(1, 1200) n;
+             CREATE INDEX field_wand_idx ON field_wand USING stannum(title, body);",
+        )
+        .unwrap();
+    }
+
+    /// Rows of a ranked query on a fixture whose `body` column carries the
+    /// clause, as `(id, score bits)`, with the custom scan on (pruned) or off
+    /// (index scan plus sort, the exhaustive fallback).
+    fn field_ranked(
+        table: &str,
+        custom: bool,
+        query: &str,
+        order_by: &str,
+        limit: &str,
+    ) -> Vec<(i32, u32)> {
+        Spi::run(&format!(
+            "SET LOCAL stannum.enable_custom_scan = {custom}; SET LOCAL enable_seqscan = off;"
+        ))
+        .unwrap();
+        Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT id, {order_by} AS score FROM {table} WHERE body ==> '{query}'
+                         ORDER BY score DESC{} {limit}",
+                        if custom { "" } else { ", ctid" }
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| {
+                    (
+                        row.get::<i32>(1).unwrap().unwrap(),
+                        row.get::<f32>(2).unwrap().unwrap().to_bits(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The field-aware walk of a multi-column index prunes through its `LSG4`
+    /// field bounds (RFC §5.4) instead of the phase-1 bail-out: for the flat
+    /// shapes it accepts, `pruned_top_k` returns exactly the top of the
+    /// exhaustive ordering — bit for bit, including tie order — for every
+    /// limit, through the disjunction and the conjunction walk alike.
+    #[pg_test]
+    fn standalone_field_wand_matches_exhaustive_plan() {
+        field_wand_fixture();
+        let (heap, index) = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT 'field_wand'::regclass::oid, 'field_wand_idx'::regclass::oid",
+                    Some(1),
+                    &[],
+                )
+                .unwrap()
+                .first()
+                .get_two::<pg_sys::Oid, pg_sys::Oid>()
+                .unwrap()
+        });
+        let (heap, index) = (heap.unwrap(), index.unwrap());
+        for query in ["needle", "needle AND pad", "needle OR tail"] {
+            let mut exhaustive =
+                crate::score::build_standalone_scorer(heap, index, query, None, None);
+            let tids = exhaustive.matching_tids();
+            let mut expected: Vec<_> = exhaustive
+                .score_matching_tids(&tids)
+                .into_iter()
+                .map(|row| (row.score, row.indexed_tid))
+                .collect();
+            expected.sort_by(crate::score::rank);
+            for k in [1_usize, 8, 50, 1000] {
+                let scorer = crate::score::build_standalone_scorer(heap, index, query, None, None);
+                let pruned = scorer
+                    .pruned_top_k(k)
+                    .expect("a flat query is WAND-prunable on a field-aware index");
+                assert!(pruned.rows.len() <= k, "{query} k={k}");
+                assert_eq!(pruned.complete, pruned.rows.len() < k, "{query} k={k}");
+                let actual: Vec<_> = pruned
+                    .rows
+                    .into_iter()
+                    .map(|row| (row.score, row.indexed_tid))
+                    .collect();
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|(score, tid)| (score.to_bits(), *tid))
+                        .collect::<Vec<_>>(),
+                    expected[..actual.len()]
+                        .iter()
+                        .map(|(score, tid)| (score.to_bits(), *tid))
+                        .collect::<Vec<_>>(),
+                    "{query} k={k}"
+                );
+            }
+        }
+    }
+
+    /// The LSG4 prune rate, recorded through the same EXPLAIN identity the
+    /// benchmark harness checks (`benchmarks/explain_counters.py`: a complete
+    /// walk reports `Candidates`, `Scored Candidates` and `Pruned by Block-Max`
+    /// with `Pruned == Candidates - Scored`): the field-aware walk is prunable
+    /// and its looser bound prunes no more than the single-field walk over the
+    /// same body content.
+    ///
+    /// Recorded numbers on this fixture (three segments of 400 rows, 1,200
+    /// matches, ten rows asked for): the single-column twin scored 112 of the
+    /// 1,200 candidates, the two-column index 362 — it pruned 838 where the
+    /// single-field bound pruned 1,088, the looser shared bound the RFC
+    /// predicts. Phase 2 records them here rather than in a published
+    /// baseline, which the paired harness regenerates on LSG3 columns;
+    /// re-measure locally if the walk changes.
+    #[pg_test]
+    fn explain_field_wand_identity_and_prune_rate() {
+        Spi::run(
+            "CREATE TABLE wand_rate_fields(id int primary key, title text, body text);
+             CREATE TABLE wand_rate_single(id int primary key, body text);
+             SET LOCAL stannum.build_segment_docs = 400;
+             INSERT INTO wand_rate_fields
+               SELECT n,
+                 CASE WHEN n % 4 = 0 THEN 'pad pad' ELSE 'pad' END,
+                 CASE WHEN n % 3 = 0 THEN repeat('needle ', 4) || repeat('pad ', n % 5)
+                      ELSE 'needle ' || repeat('pad ', n % 6) END
+               FROM generate_series(1, 1200) n;
+             -- The single-column twin holds the same tokens in one field, so
+             -- both walks score identical documents identically and only their
+             -- block bounds differ.
+             INSERT INTO wand_rate_single SELECT id, title || ' ' || body FROM wand_rate_fields;
+             CREATE INDEX wand_rate_fields_idx ON wand_rate_fields USING stannum(title, body);
+             CREATE INDEX wand_rate_single_idx ON wand_rate_single USING stannum(body);
+             SET LOCAL stannum.enable_custom_scan = on;
+             SET LOCAL enable_seqscan = off;
+             SET LOCAL enable_bitmapscan = off;",
+        )
+        .unwrap();
+        fn search_scan(node: &serde_json::Value) -> Option<&serde_json::Value> {
+            if node["Custom Plan Provider"] == "Stannum Text Search Scan" {
+                return Some(node);
+            }
+            node["Plans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(search_scan)
+        }
+        // `(candidates, scored, pruned)`: a walk that has not completed does
+        // not know its candidate count, and the identity is asserted whenever
+        // it does, exactly as `benchmarks/explain_counters.py` checks it.
+        let counters = |table: &str, limit: i64| -> (Option<i64>, i64, Option<i64>) {
+            let plan = Spi::get_one::<Json>(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON)
+                 SELECT id FROM {table} WHERE body ==> 'needle'
+                 ORDER BY stannum.full_score(ctid) DESC LIMIT {limit}"
+            ))
+            .unwrap()
+            .unwrap()
+            .0;
+            let scan = search_scan(&plan[0]["Plan"]).unwrap_or_else(|| panic!("{table}: {plan}"));
+            assert_eq!(scan["Pruning"], "block-max", "{table}: {scan}");
+            let candidates = scan["Candidates"].as_i64();
+            let scored = scan["Scored Candidates"].as_i64().expect("a pruned walk");
+            let pruned = scan["Pruned by Block-Max"].as_i64();
+            if let Some(candidates) = candidates {
+                assert!(scored <= candidates, "{table}: {scan}");
+                assert_eq!(
+                    pruned,
+                    Some(candidates - scored),
+                    "{table}: the prune identity"
+                );
+            } else {
+                assert!(pruned.is_none(), "{table}: {scan}");
+            }
+            (candidates, scored, pruned)
+        };
+        let matches = |table: &str| -> i64 {
+            Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM {table} WHERE body ==> 'needle'"
+            ))
+            .unwrap()
+            .unwrap()
+        };
+        let single_matches = matches("wand_rate_single");
+        let field_matches = matches("wand_rate_fields");
+        assert_eq!(
+            single_matches, field_matches,
+            "the twins match the same documents"
+        );
+        // The pruned walks (ten rows of the same candidates): the field-aware
+        // bound is looser, so it scores at least as many, that is, prunes at
+        // most as many.
+        let (_, single_scored, _) = counters("wand_rate_single", 10);
+        let (_, field_scored, _) = counters("wand_rate_fields", 10);
+        assert!(single_scored <= single_matches, "{single_scored}");
+        assert!(field_scored <= field_matches, "{field_scored}");
+        assert!(
+            field_scored >= single_scored,
+            "field-aware pruning is looser: scored {field_scored} of {field_matches} \
+             against {single_scored} of {single_matches}"
+        );
+        // A walk whose k exceeds the matches completes and reports the
+        // identity: its candidates are exactly the query's matches, and with
+        // no threshold to hold, every one of them is scored.
+        let (candidates, scored, pruned) = counters("wand_rate_fields", field_matches + 1);
+        assert_eq!(
+            candidates,
+            Some(field_matches),
+            "the walk's candidates are the query's matches"
+        );
+        assert_eq!(scored, field_matches);
+        assert_eq!(pruned, Some(0));
+    }
+
+    /// End to end on a multi-column index: the pruned field-aware scan and
+    /// the exhaustive fallback agree bit for bit across queries, limits and
+    /// an offset, and again after the best rows are deleted, so the scan must
+    /// complete its ordering past the k it built.
+    #[pg_test]
+    fn field_pruned_top_k_matches_full_scoring_bit_for_bit() {
+        field_wand_fixture();
+        for query in [
+            "needle",
+            "needle AND pad",
+            "needle^2 OR tail",
+            "pad OR needle",
+        ] {
+            for limit in ["LIMIT 1", "LIMIT 10", "LIMIT 100", "LIMIT 5 OFFSET 8"] {
+                assert_eq!(
+                    field_ranked("field_wand", true, query, "stannum.full_score(ctid)", limit),
+                    field_ranked(
+                        "field_wand",
+                        false,
+                        query,
+                        "stannum.full_score(ctid)",
+                        limit
+                    ),
+                    "{query} {limit}"
+                );
+            }
+        }
+        let top: Vec<i32> = field_ranked(
+            "field_wand",
+            true,
+            "needle",
+            "stannum.full_score(ctid)",
+            "LIMIT 3",
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+        Spi::run(&format!(
+            "DELETE FROM field_wand WHERE id IN ({})",
+            top.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+        .unwrap();
+        for limit in ["LIMIT 3", "LIMIT 25"] {
+            assert_eq!(
+                field_ranked(
+                    "field_wand",
+                    true,
+                    "needle",
+                    "stannum.full_score(ctid)",
+                    limit
+                ),
+                field_ranked(
+                    "field_wand",
+                    false,
+                    "needle",
+                    "stannum.full_score(ctid)",
+                    limit
+                ),
+                "after delete {limit}"
+            );
+        }
+    }
+
     /// Opening an index whose columns were renamed is an error until REINDEX
     /// rewrites the trailer; after the rebuild the index works again
     /// (RFC §5.7).

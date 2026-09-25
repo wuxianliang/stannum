@@ -15,8 +15,8 @@ use pgrx::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use segment::Tid;
 use segment::index::{Expanded, Index, Window};
-use segment::payload::PayloadCursor;
-use segment::postings::{BlockBound, PostingsCursor};
+use segment::payload::{FieldHit, PayloadCursor};
+use segment::postings::{PostingsCursor, ScoreBound};
 use segment::segment::Lengths;
 use segment::set::Cursor as _;
 use segment::tf_bucket::TfBucket;
@@ -582,14 +582,15 @@ impl IndexScorer {
         if k > PRUNE_MAX_K {
             return None;
         }
-        self.top_k(k, &mut |_| {}).map(|top| PrunedCandidates {
-            rows: top
-                .rows
-                .into_iter()
-                .map(|(score, indexed_tid)| RankedCandidate { indexed_tid, score })
-                .collect(),
-            complete: top.complete,
-        })
+        self.top_k(k, None, &mut |_| {})
+            .map(|top| PrunedCandidates {
+                rows: top
+                    .rows
+                    .into_iter()
+                    .map(|(score, indexed_tid)| RankedCandidate { indexed_tid, score })
+                    .collect(),
+                complete: top.complete,
+            })
     }
 
     /// Enumerate every planned root matching this scorer's full query.
@@ -646,24 +647,26 @@ enum Combine {
 
 /// A query the scan can prune: a flat conjunction or disjunction of terms
 /// (a single term included), each optionally boosted, with the terms in
-/// lexical order and deduplicated.
+/// lexical order and deduplicated. A field group (RFC §5.11) does not change
+/// the shape: it is the same conjunction or disjunction of its leaves, and
+/// each leaf's scope lives in the scoring term it compiled to.
 fn prunable_shape(query: &Query) -> Option<(Combine, Vec<&str>)> {
-    fn unboost(query: &Query) -> &Query {
+    fn unwrap(query: &Query) -> &Query {
         match query {
-            Query::Boost { inner, .. } => unboost(inner),
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => unwrap(inner),
             other => other,
         }
     }
     fn leaves<'q>(children: impl IntoIterator<Item = &'q Query>) -> Option<Vec<&'q str>> {
         children
             .into_iter()
-            .map(|child| match unboost(child) {
+            .map(|child| match unwrap(child) {
                 Query::Term(term) => Some(term.as_str()),
                 _ => None,
             })
             .collect()
     }
-    let (combine, mut terms) = match unboost(query) {
+    let (combine, mut terms) = match unwrap(query) {
         Query::Term(term) => (Combine::Any, vec![term.as_str()]),
         Query::And(left, right) => (Combine::All, leaves([&**left, &**right])?),
         Query::Conjunction(children) => (Combine::All, leaves(children)?),
@@ -709,10 +712,67 @@ struct TermCursor<'a> {
     count: u32,
     /// Upper bound on the term's contribution anywhere in the source.
     term_max: f32,
+    /// The fields a document must hit in this term to match it: the term's
+    /// own scope (RFC §5.11) intersected with the scanning clause's implicit
+    /// field, when the clause has one.
+    mask: u16,
+    /// Whether `mask` restricts anything: terms whose scope covers every
+    /// field match by being posted at all.
+    checked: bool,
     /// The block last asked about and its bound.
-    cached: Option<(BlockBound, f32)>,
+    cached: Option<CachedBound>,
     /// The exact contribution to the document being scored, once decoded.
     exact: Option<f32>,
+}
+
+/// The block bound one term's cursor holds: the decoded bound, the ceiling it
+/// puts on the term's contribution there, and the length floor it promises.
+struct CachedBound {
+    bound: ScoreBound,
+    value: f32,
+    floor: f32,
+}
+
+/// The last posting a bound covers: the end of its range.
+fn bound_last(bound: &ScoreBound) -> Tid {
+    match bound {
+        ScoreBound::Single(block) => block.last,
+        ScoreBound::Fields(block) => block.last,
+    }
+}
+
+/// The block bound holding the first posting at or after `target`, decoded in
+/// the shape `model`'s format encodes: `LSG3` single-field bounds and `LSG4`
+/// field bounds share an envelope but not a byte layout.
+fn decode_bound(
+    model: &TermScoreModel,
+    postings: &mut PostingsCursor<'_>,
+    target: Tid,
+) -> segment::Result<Option<ScoreBound>> {
+    Ok(match model {
+        TermScoreModel::Bm25(_) => postings.bound_at(target)?.map(ScoreBound::Single),
+        TermScoreModel::Bm25f(_) => postings.field_bound_at(target)?.map(ScoreBound::Fields),
+    })
+}
+
+/// Every block's bound merged into one, in the same shape; `None` when the
+/// stream carries no bounds.
+fn whole_bound(
+    model: &TermScoreModel,
+    postings: &mut PostingsCursor<'_>,
+) -> segment::Result<Option<ScoreBound>> {
+    Ok(match model {
+        TermScoreModel::Bm25(_) => postings
+            .block_bounds()?
+            .into_iter()
+            .reduce(|merged, block| merged.merge(&block))
+            .map(ScoreBound::Single),
+        TermScoreModel::Bm25f(_) => postings
+            .field_block_bounds()?
+            .into_iter()
+            .reduce(|merged, block| merged.merge(&block))
+            .map(ScoreBound::Fields),
+    })
 }
 
 impl TermCursor<'_> {
@@ -720,25 +780,11 @@ impl TermCursor<'_> {
         self.postings.current()
     }
 
-    /// Bound and last posting of the block holding the first posting at or
-    /// after `target` (see [`PostingsCursor::bound_at`]).
-    fn bound_at(&mut self, target: Tid, scorer: &TermScorer) -> Option<(f32, Tid)> {
-        let block = segment_error(self.postings.bound_at(target))?;
-        if let Some((cached, bound)) = &self.cached
-            && cached.last == block.last
-        {
-            return Some((*bound, cached.last));
-        }
-        let bound = scorer.bound(&block);
-        self.cached = Some((block, bound));
-        Some((bound, block.last))
-    }
-
-    /// The bound on the current posting's contribution given its document's
-    /// length, from the block last asked about, which holds it.
-    fn bound_for_length(&self, length: u32, scorer: &TermScorer) -> f32 {
-        let (block, _) = self.cached.as_ref().expect("bound computed before scoring");
-        scorer.bound_for_length(block, length)
+    /// Field hits of the current posting (`LSG4` payloads), as the scorer's
+    /// field-aware expression consumes them.
+    fn fields(&mut self) -> Vec<FieldHit> {
+        segment_error(self.payload.seek(self.postings.ordinal()));
+        segment_error(self.payload.next_fields()).fields
     }
 
     /// Term-frequency bucket of the current posting.
@@ -772,7 +818,11 @@ struct Walk<'a, 's> {
     cursors: Vec<TermCursor<'a>>,
     documents: PostingsCursor<'a>,
     lengths: Lengths<'a>,
+    /// The source's label, for codec errors about its field lengths.
+    label: &'s str,
     dead: &'s BTreeSet<Tid>,
+    /// How the query's terms combine, for the field-scope match check.
+    combine: Combine,
     k: usize,
     heap: &'s mut BinaryHeap<Ranked>,
     scored: &'s mut usize,
@@ -806,12 +856,38 @@ impl Walk<'_, '_> {
         })
     }
 
+    /// Bound and last posting of the block holding the first posting of
+    /// cursor `i` at or after `target`, evaluated for the term's own model
+    /// (`LSG3` single-field or `LSG4` field-aware, RFC §5.4) and cached by
+    /// the block's last posting.
     fn bound_at(&mut self, i: usize, target: Tid) -> Option<(f32, Tid)> {
-        let scorer = self.scorer.terms[self.cursors[i].slot]
-            .1
-            .bm25()
-            .expect("block-max pruning is single-field");
-        self.cursors[i].bound_at(target, scorer)
+        let scorer = self.scorer;
+        let model = &scorer.terms[self.cursors[i].slot].1;
+        let block = segment_error(decode_bound(model, &mut self.cursors[i].postings, target))?;
+        let last = bound_last(&block);
+        if let Some(cached) = &self.cursors[i].cached
+            && bound_last(&cached.bound) == last
+        {
+            return Some((cached.value, last));
+        }
+        let floor = model.length_floor(&block);
+        let value = model.bound(&block);
+        self.cursors[i].cached = Some(CachedBound {
+            bound: block,
+            value,
+            floor,
+        });
+        Some((value, last))
+    }
+
+    /// The document's length as its model's score expression consumes it:
+    /// `LSG3`'s token count lifted to `f32`, or `LSG4`'s weighted length
+    /// `len* = Σ_f w_f · length_f`, folded in field order (§5.10).
+    fn document_length(&mut self, ordinal: u32) -> f32 {
+        match &self.scorer.fields {
+            Some(plan) => weighted_length(&self.lengths, ordinal, &plan.weights, self.label),
+            None => segment_error(self.lengths.get(ordinal)) as f32,
+        }
     }
 
     /// Scores the document at `pivot`, held by every cursor positioned on
@@ -832,11 +908,16 @@ impl Walk<'_, '_> {
                 pivot.block, pivot.offset
             ))
         };
-        let length = segment_error(self.lengths.get(ordinal));
+        let length = self.document_length(ordinal);
         let mut pending: Vec<usize> = (0..self.cursors.len())
             .filter(|&i| self.cursors[i].current() == Some(pivot))
             .collect();
         pending.sort_by_key(|&i| self.cursors[i].count);
+        if !self.matches(&pending) {
+            // Posted in the wrong fields only: the document is not one of the
+            // query's candidates, so it is neither scored nor emitted.
+            return;
+        }
         let present = |cursor: &TermCursor<'_>| cursor.current() == Some(pivot);
         let pruning = self.threshold().is_some();
         for cursor in &mut self.cursors {
@@ -845,16 +926,13 @@ impl Walk<'_, '_> {
         if pruning {
             let scorer = self.scorer;
             for &i in &pending {
+                let model = &scorer.terms[self.cursors[i].slot].1;
                 let cursor = &mut self.cursors[i];
-                cursor.exact = Some(
-                    cursor.bound_for_length(
-                        length,
-                        scorer.terms[cursor.slot]
-                            .1
-                            .bm25()
-                            .expect("block-max pruning is single-field"),
-                    ),
-                );
+                let cached = cursor
+                    .cached
+                    .as_ref()
+                    .expect("bound computed before scoring");
+                cursor.exact = Some(model.bound_for_length(&cached.bound, length));
             }
             let optimistic = fold(&self.cursors, |c| present(c).then_some(c.exact).flatten());
             if !self.can_beat(optimistic, pivot) {
@@ -862,12 +940,20 @@ impl Walk<'_, '_> {
             }
         }
         for (n, &i) in pending.iter().enumerate() {
-            let bucket = self.cursors[i].bucket();
-            let scorer = self.scorer.terms[self.cursors[i].slot]
-                .1
-                .bm25()
-                .expect("block-max pruning is single-field");
-            self.cursors[i].exact = Some(scorer.score_bucket(bucket, length));
+            let scorer = self.scorer;
+            let model = &scorer.terms[self.cursors[i].slot].1;
+            let cursor = &mut self.cursors[i];
+            let contribution = match model {
+                TermScoreModel::Bm25(scorer) => {
+                    let bucket = cursor.bucket();
+                    scorer.score_bucket_at(bucket, length)
+                }
+                TermScoreModel::Bm25f(scorer) => {
+                    let hits = cursor.fields();
+                    scorer.score(&hits, length)
+                }
+            };
+            cursor.exact = Some(contribution);
             if n + 1 < pending.len() && pruning {
                 let optimistic = fold(&self.cursors, |c| present(c).then_some(c.exact).flatten());
                 if !self.can_beat(optimistic, pivot) {
@@ -886,6 +972,34 @@ impl Walk<'_, '_> {
             self.heap.pop();
             self.heap.push(candidate);
         }
+    }
+
+    /// Whether the document the cursors are positioned on matches the query's
+    /// field scopes (RFC §5.11): every term posted at it must hit one of the
+    /// term's scoped fields (a conjunction), or at least one must (a
+    /// disjunction). A term whose scope covers every field matches by being
+    /// posted at all, so single-column and all-fields queries check nothing;
+    /// every cursor of a conjunction is positioned on the pivot by the time
+    /// it is scored.
+    fn matches(&mut self, pending: &[usize]) -> bool {
+        match self.combine {
+            Combine::All => pending.iter().all(|&i| self.in_scope(i)),
+            Combine::Any => pending.iter().any(|&i| self.in_scope(i)),
+        }
+    }
+
+    /// Whether cursor `i`'s posting at the current document hits the term in
+    /// one of the term's scoped fields.
+    fn in_scope(&mut self, i: usize) -> bool {
+        if !self.cursors[i].checked {
+            return true;
+        }
+        let mask = self.cursors[i].mask;
+        let cursor = &mut self.cursors[i];
+        cursor
+            .fields()
+            .iter()
+            .any(|hit| mask & (1 << hit.field) != 0)
     }
 
     /// A disjunction: block-max WAND. Cursors are kept in location order;
@@ -1030,31 +1144,22 @@ impl Walk<'_, '_> {
             }
             if range.is_none_or(|(end, _)| pivot > end) {
                 let mut boundary: Option<Tid> = None;
-                let mut min_length = 0;
+                let mut min_length = 0.0_f32;
                 for i in 0..self.cursors.len() {
                     let Some((_, last)) = self.bound_at(i, pivot) else {
                         return;
                     };
                     boundary = Some(boundary.map_or(last, |end| end.min(last)));
-                    min_length = min_length.max(
-                        self.cursors[i]
-                            .cached
-                            .as_ref()
-                            .expect("bound loaded")
-                            .0
-                            .shortest(),
-                    );
+                    min_length = min_length
+                        .max(self.cursors[i].cached.as_ref().expect("bound loaded").floor);
                 }
+                let scorer = self.scorer;
                 let bound = fold(&self.cursors, |cursor| {
+                    let cached = cursor.cached.as_ref().expect("bound loaded");
                     Some(
-                        self.scorer.terms[cursor.slot]
+                        scorer.terms[cursor.slot]
                             .1
-                            .bm25()
-                            .expect("block-max pruning is single-field")
-                            .bound_with_min_length(
-                                &cursor.cached.as_ref().expect("bound loaded").0,
-                                min_length,
-                            ),
+                            .bound_with_min_length(&cached.bound, min_length),
                     )
                 });
                 range = Some((boundary.expect("conjunction has terms"), bound));
@@ -1096,13 +1201,18 @@ impl IndexScorer {
     /// `None` when the query is not a flat conjunction or disjunction of
     /// exactly the scoring terms, or a source carries no block bounds; the
     /// caller then scores every candidate.
-    pub(crate) fn top_k(&self, k: usize, events: &mut dyn FnMut(WalkEvent)) -> Option<TopK> {
-        // A field-aware source carries field block bounds (RFC §5.4), which
-        // this single-field walk cannot evaluate; phase 2 adds them. Score
-        // every candidate instead.
-        if self.fields.is_some() {
-            return None;
-        }
+    ///
+    /// `scope` is the scanning `==>` clause's implicit field (RFC §5.11): the
+    /// walk's candidates are then restricted to documents hitting each term
+    /// in that field. It is redundant for a clause whose query text already
+    /// carries the scope, and absent for callers that score every field, such
+    /// as `stannum.search()`.
+    pub(crate) fn top_k(
+        &self,
+        k: usize,
+        scope: Option<u8>,
+        events: &mut dyn FnMut(WalkEvent),
+    ) -> Option<TopK> {
         let (combine, leaves) = prunable_shape(&self.query)?;
         // Every scoring term must be a leaf (no added terms), and a leaf that
         // is not a scoring term must be absent from the index altogether: it
@@ -1143,6 +1253,7 @@ impl IndexScorer {
                     &self.view.labels[i],
                     &self.dead[i],
                     combine,
+                    scope,
                     k,
                     &mut heap,
                     &mut scored,
@@ -1179,18 +1290,18 @@ impl IndexScorer {
         label: &str,
         dead: &BTreeSet<Tid>,
         combine: Combine,
+        scope: Option<u8>,
         k: usize,
         heap: &mut BinaryHeap<Ranked>,
         scored: &mut usize,
         events: &mut dyn FnMut(WalkEvent),
     ) -> Option<bool> {
         let mut cursors: Vec<TermCursor<'_>> = Vec::with_capacity(self.terms.len());
-        for (slot, ((name, _), model)) in self.terms.iter().enumerate() {
-            // Pruning needs single-field bounds; a field-aware source falls
-            // back to exhaustive scoring.
-            let Some(scorer) = model.bm25() else {
-                return Some(false);
-            };
+        let all_fields = all_fields_mask(self.fields.as_ref());
+        let scope = scope.map_or(u16::MAX, |field| {
+            1u16.checked_shl(u32::from(field)).unwrap_or(u16::MAX)
+        });
+        for (slot, ((name, mask), model)) in self.terms.iter().enumerate() {
             let Some(term) = segment_error_in(source.term(name), label) else {
                 match combine {
                     // A missing term empties the conjunction in this source.
@@ -1199,20 +1310,22 @@ impl IndexScorer {
                 }
             };
             let mut postings = segment_error_in(term.cursor(), label);
-            let bounds = segment_error_in(postings.block_bounds(), label);
-            let Some(whole) = bounds
-                .iter()
-                .copied()
-                .reduce(|merged, block| merged.merge(&block))
-            else {
+            // The bound's shape follows the source's format: an `LSG4` stream
+            // carries per-(field, bucket) minima, an `LSG3` one the
+            // single-field table, and each term's model reads the shape its
+            // own format wrote.
+            let Some(whole) = segment_error_in(whole_bound(model, &mut postings), label) else {
                 return Some(false);
             };
+            let mask = *mask & scope;
             cursors.push(TermCursor {
                 slot,
                 postings,
                 payload: segment_error_in(term.payload(), label).cursor(),
                 count: term.df(),
-                term_max: scorer.bound(&whole),
+                term_max: model.bound(&whole),
+                mask,
+                checked: mask != all_fields,
                 cached: None,
                 exact: None,
             });
@@ -1225,7 +1338,9 @@ impl IndexScorer {
             cursors,
             documents: segment_error_in(source.documents(), label),
             lengths: source.lengths(),
+            label,
             dead,
+            combine,
             k,
             heap,
             scored,
@@ -2206,6 +2321,48 @@ fn scope_scan_query(query: Query, fields: Option<&FieldMeta>, field: u8) -> Quer
     }
 }
 
+/// The scored query text of a `==>` clause on a field-aware index: the clause
+/// query wrapped in its scan key's implicit field scope (RFC §5.11), rendered
+/// so that it parses to exactly the query the clause itself parses to. `None`
+/// when the index is fieldless (nothing to scope), the scope names no field
+/// of it, or the query does not parse — callers then score from the raw text,
+/// as before.
+///
+/// The frozen `score_bound_indexed` signature carries no field, so this text
+/// is the only channel: the scan's scorer and the planner's projected score
+/// function must derive the same key for the ranked path to bind.
+pub(crate) unsafe fn scoped_scan_text(
+    text: &str,
+    index_oid: pg_sys::Oid,
+    field: u8,
+) -> Option<String> {
+    let index = unsafe { PgRelation::with_lock(index_oid, pg_sys::AccessShareLock as _) };
+    let fields = unsafe { crate::storage::fields_meta(index.as_ptr()) }?;
+    let name = fields.names.get(usize::from(field))?;
+    let tokenizer = unsafe { crate::storage::index_tokenizer(index.as_ptr()) };
+    parse_tinql_to_query(text, tokenizer.as_ref()).ok()?;
+    Some(scoped_query_text(text, name))
+}
+
+/// The clause query wrapped in a field group. The clause text is wrapped
+/// rather than the parsed query re-rendered: the parser accepted its surface
+/// syntax, while the runtime query's display spells its operators in a form
+/// only the parser's own grammar understands. The name is always quoted — the
+/// phrase escape rule — because a bare name is case-folded and would not name
+/// a mixed-case column.
+fn scoped_query_text(text: &str, name: &str) -> String {
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    for ch in name.chars() {
+        if ch == '"' || ch == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    format!("{quoted}:({text})")
+}
+
 /// Rejects a field group that names a field other than the scan key's: the
 /// whole clause answers one column, and `stannum.search()` is the all-fields
 /// form (RFC §5.11).
@@ -2247,6 +2404,47 @@ mod tests {
     use crate::bm25::Bm25Params;
     use segment::segment::{Segment, SegmentBuilder};
     use tokenizer::{Tokenizer, TokenizerPipelineSpec};
+
+    /// The scoped scoring text is the scan's scorer key and the argument the
+    /// planner's projected score function passes; both parse it, so it must
+    /// parse to exactly the scoped query the candidate path evaluates.
+    #[test]
+    fn scoped_query_text_wraps_the_clause_query() {
+        let pipeline = TokenizerPipelineSpec::stannum_default().compile().unwrap();
+        for text in [
+            "beer",
+            "beer hops",
+            "beer OR hops",
+            "beer AND hops",
+            "beer^2 OR hops",
+            "(beer AND hops)^0.5",
+            "beer OR beer",
+            "bee*",
+            "\"craft beer\"",
+            "beer~1",
+            "beer TO hops",
+            "AT LEAST 2 OF [beer hops]",
+            "*",
+        ] {
+            let wanted = Query::Field {
+                name: "body".to_owned(),
+                inner: Box::new(parse_tinql_to_query(text, &pipeline).unwrap()),
+            };
+            let scoped = scoped_query_text(text, "body");
+            let parsed = parse_tinql_to_query(&scoped, &pipeline)
+                .unwrap_or_else(|error| panic!("{text} -> {scoped}: {error}"));
+            assert_eq!(
+                format!("{parsed:?}"),
+                format!("{wanted:?}"),
+                "{text} -> {scoped}"
+            );
+        }
+        // A name that needs escaping still resolves to its own bytes.
+        assert_eq!(
+            scoped_query_text("beer", "Body \"x\""),
+            "\"Body \\\"x\\\"\":(beer)"
+        );
+    }
 
     /// RFC §5.10 R-BIT, end-to-end level: the same tokens stored as a
     /// single-field `LSG4` blob and as an `LSG3` blob must score bit for bit
@@ -2757,15 +2955,21 @@ fn score_support(request: Internal) -> Internal {
             return unhandled();
         }
         // Score with the index the ==> clause is bound to, so scoring
-        // statistics and matching use the same analyzer.
-        let Some((document, first_query, index_oid)) =
+        // statistics and matching use the same analyzer. A constant clause on
+        // a field-aware index additionally scores through its scan key's
+        // implicit field scope (RFC §5.11), which the frozen signature can
+        // only carry in the query text.
+        let Some((document, first_query, index_oid, scoped)) =
             binding
                 .matches
                 .iter()
                 .find_map(|&(document, query, bound)| {
                     let candidates = matching_stannum_indexes((*rte).relid, ctid.varno, document);
-                    pick_index(&candidates, bound)
-                        .map(|(index_oid, _)| (document, query, index_oid))
+                    pick_index(&candidates, bound).map(|(index_oid, field)| {
+                        let scoped = crate::customscan::const_text(query)
+                            .and_then(|text| scoped_scan_text(&text, index_oid, field));
+                        (document, query, index_oid, scoped)
+                    })
                 })
         else {
             return unhandled();
@@ -2818,7 +3022,16 @@ fn score_support(request: Internal) -> Internal {
         // prepared plan it can still contain a bound Param. Simplify the
         // copy so the score and search clause expose the same constant to
         // ranked-path recognition. Generic plans retain their parameters.
-        args.push(pg_sys::eval_const_expressions(request.root, combined_query));
+        // A single constant clause on a field-aware index instead carries the
+        // scoped text its scan's scorer key uses, so the ranked path binds the
+        // same scorer to both sides.
+        if same_expression.len() == 1
+            && let Some(text) = &scoped
+        {
+            args.push(make_text_const(text).cast());
+        } else {
+            args.push(pg_sys::eval_const_expressions(request.root, combined_query));
+        }
         args.push(make_int4_const((*rte).relid.to_u32() as i32).cast());
         args.push(make_int4_const(index_oid.to_u32() as i32).cast());
         args.push(make_int4_const(mode).cast());
@@ -2899,6 +3112,21 @@ unsafe fn combine_constant_queries(
         )
         .cast()
     })
+}
+
+unsafe fn make_text_const(text: &str) -> *mut pg_sys::Const {
+    let datum = text.into_datum().expect("a text constant fits a datum");
+    unsafe {
+        pg_sys::makeConst(
+            pg_sys::TEXTOID,
+            -1,
+            pg_sys::DEFAULT_COLLATION_OID,
+            -1,
+            datum,
+            false,
+            false,
+        )
+    }
 }
 
 unsafe fn make_int4_const(value: i32) -> *mut pg_sys::Const {

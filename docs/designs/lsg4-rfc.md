@@ -288,10 +288,10 @@ Semantics:
 **Bound evaluation (frozen):**
 
 ```text
-max_tf*  = Σ_{f ∈ selected} w_f · dequantize(max_tf_bucket[f])
-min_len* = Σ_{f ∈ selected} w_f · min_doc_length[f]
-bound    = saturate(max_tf*, min_len*)        // the §5.10 f32 expression
-```
+  max_tf*  = Σ_{f ∈ selected} w_f · dequantize(max_tf_bucket[f])
+  min_len* = min_{f ∈ selected} w_f · min_doc_length[f]    // see Erratum 2026-09-25
+  bound    = saturate(max_tf*, min_len*)        // the §5.10 f32 expression
+  ```
 
 - `selected` is the query term's field mask — all fields for an unscoped
   term, the scoped field(s) otherwise.
@@ -305,6 +305,22 @@ bound    = saturate(max_tf*, min_len*)        // the §5.10 f32 expression
   looser exactly on field-scoped queries — the case the feature exists for.
 - Expected consequence: **fewer prunes than LSG3** (weaker WAND recall).
   Measured through the explain prune identity; not a bug.
+
+> **Erratum (2026-09-25, phase-2 implementation).** The frozen `min_len* =
+> Σ_{f ∈ selected} w_f · min_doc_length[f]` is **unsound as a length floor**.
+> A posting that carries the term in only one scoped field has
+> `len* = w_f · length_f` for that field alone; the summed floor can exceed
+> it whenever another scoped field's `min_doc_length` is large, so the bound
+> would *underestimate* that posting's score and prune a rightful top-k row
+> — the opposite of the safe direction claimed above. Witness (unit test
+> `bm25::tests::field_bound_length_floor_is_a_minimum_not_a_sum`): a block
+> where the term hits a 1-token `title` and a 5,000-token `body`; the summed
+> form evaluates below the short document's real score. The corrected,
+> shipped floor is `min_len* = min_{f ∈ selected} w_f · min_doc_length[f]`
+> (identical to the sum whenever a single scoped field is present — every
+> field-scoped term and every single-column index). The flawed "safe in both
+> directions" bullet's second clause is superseded by this erratum; the
+> max_tf* clause and all other §5.4 rules stand unchanged.
 
 ### 5.5 Dictionary (unchanged)
 

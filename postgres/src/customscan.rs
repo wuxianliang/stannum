@@ -172,6 +172,12 @@ struct Match {
     /// list) the clause answers; it is the scan's implicit field scope.
     field: u8,
     query: Option<String>,
+    /// The text the clause's scoring uses: for a constant clause on a
+    /// field-aware index, the query wrapped in its implicit field scope
+    /// (RFC §5.11), which both the scan's scorer key and the planner's
+    /// projected `score_bound_indexed` call must carry. `None` keeps the raw
+    /// query text.
+    scored_query: Option<String>,
     query_expr: *mut pg_sys::Node,
 }
 
@@ -261,11 +267,15 @@ unsafe fn find_match(
             else {
                 continue;
             };
+            let scored_query = query
+                .clone()
+                .and_then(|text| crate::score::scoped_scan_text(&text, index_oid, field));
             return Some(Match {
                 clause: clause.cast(),
                 index_oid,
                 field,
                 query,
+                scored_query,
                 query_expr: search.query,
             });
         }
@@ -318,7 +328,7 @@ unsafe fn find_ordering(
                 continue;
             }
             let arg = |i: i32| pg_sys::list_nth((*func).args, i).cast::<pg_sys::Node>();
-            let same_query = match &found.query {
+            let same_query = match found.scored_query.as_ref().or(found.query.as_ref()) {
                 Some(query) => const_text(arg(1)).as_ref() == Some(query),
                 None => pg_sys::equal(arg(1).cast(), found.query_expr.cast()),
             };
@@ -405,6 +415,9 @@ struct Private {
     /// The index field this clause answers; the scan key's implicit field
     /// scope, carried through the plan's private state (RFC §5.11).
     field: u8,
+    /// The scoped query text the clause's scoring uses, when it has one; see
+    /// [`Match::scored_query`].
+    scored_query: Option<String>,
     ordering: Option<Ordering>,
 }
 
@@ -443,6 +456,7 @@ impl Private {
                 }
             }
             list.push(make_int(i64::from(self.field)));
+            list.push(make_string(self.scored_query.as_deref().unwrap_or("")));
             list.into_pg()
         }
     }
@@ -468,13 +482,24 @@ impl Private {
                 })
             };
             let clause = pg_sys::list_nth(list, 3).cast::<pg_sys::OpExpr>();
+            // The ordering block is one element when the scan is unordered
+            // (the count and unordered search paths) and seven when it ranks;
+            // the field and the scoped scoring text follow it either way, so
+            // their slots depend on which layout this plan carries.
+            let ranked = int(4) != -1;
+            let field_index = if ranked { 11 } else { 5 };
             // A plan from a binary without the field slot carries no such
             // element; a single-column index has one field either way.
-            let field = if pg_sys::list_length(list) > 11 {
-                u8::try_from(int(11)).unwrap_or(0)
+            let field = if pg_sys::list_length(list) > field_index {
+                u8::try_from(int(field_index)).unwrap_or(0)
             } else {
                 0
             };
+            // Likewise for the slot holding the scoped scoring text; an empty
+            // string means the raw query text scores, as before.
+            let scored_query = (pg_sys::list_length(list) > field_index + 1)
+                .then(|| string(field_index + 1))
+                .filter(|text| !text.is_empty());
             let ordering = match int(4) {
                 -1 => None,
                 full => Some(Ordering {
@@ -493,6 +518,7 @@ impl Private {
                     heap_oid: int(1) as u32,
                     query: string(2),
                     field,
+                    scored_query,
                     ordering,
                 },
                 clause,
@@ -566,6 +592,7 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
             heap_oid: (*rte).relid.to_u32(),
             query: found.query.clone().unwrap_or_else(|| "<parameter>".into()),
             field: found.field,
+            scored_query: found.scored_query.clone(),
             ordering,
         };
         let mut path = pgrx::PgBox::<pg_sys::CustomPath>::alloc_node(pg_sys::NodeTag::T_CustomPath);
@@ -821,6 +848,7 @@ unsafe extern "C-unwind" fn upper_paths_hook(
             heap_oid: (*rte).relid.to_u32(),
             query: found.query.clone().unwrap_or_else(|| "<parameter>".into()),
             field: found.field,
+            scored_query: found.scored_query.clone(),
             ordering: None,
         };
         let mut path = pgrx::PgBox::<pg_sys::CustomPath>::alloc_node(pg_sys::NodeTag::T_CustomPath);
@@ -1144,7 +1172,10 @@ unsafe fn gather(exec: &mut ScanExec) {
                 exec.scan_id,
                 exec.private.heap_oid,
                 exec.private.index_oid,
-                &exec.private.query,
+                exec.private
+                    .scored_query
+                    .as_deref()
+                    .unwrap_or(&exec.private.query),
                 ordering.full,
                 ordering.dense_ratio,
                 ordering.k1,
@@ -1154,6 +1185,7 @@ unsafe fn gather(exec: &mut ScanExec) {
             )
         });
         let top_k = exec.private.ordering.as_ref().and_then(|o| o.top_k);
+        let field = exec.private.field;
         let mut wand_events = |event: crate::score::WalkEvent| match event {
             crate::score::WalkEvent::SourceOpened { immutable: true } => {
                 exec.segments_visited_immutable += 1
@@ -1167,7 +1199,7 @@ unsafe fn gather(exec: &mut ScanExec) {
             && k <= crate::score::PRUNE_MAX_K
             && let Some(top) = scorer
                 .as_ref()
-                .and_then(|scorer| scorer.top_k(k, &mut wand_events))
+                .and_then(|scorer| scorer.top_k(k, Some(field), &mut wand_events))
         {
             exec.candidates = top.complete.then_some(top.rows.len());
             exec.scored = Some(top.scored);
@@ -1324,7 +1356,10 @@ unsafe fn complete(exec: &mut ScanExec) {
             exec.scan_id,
             exec.private.heap_oid,
             exec.private.index_oid,
-            &exec.private.query,
+            exec.private
+                .scored_query
+                .as_deref()
+                .unwrap_or(&exec.private.query),
             ordering.full,
             ordering.dense_ratio,
             ordering.k1,
