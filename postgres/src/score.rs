@@ -28,8 +28,8 @@ use std::ffi::{CStr, CString, c_void};
 use std::rc::Rc;
 use tinql::runtime::plan::{FieldScope, Limits, plan_scoped};
 use tinql::runtime::{
-    CompiledRegex, FuzzyMatcher, Query, RangeBound, SpanTermSlot, evaluate, parse_tinql_to_query,
-    range_matches, tokenize_doc,
+    CompiledRegex, FuzzyMatcher, Query, RangeBound, SpanTermSlot, TokenizedDoc, evaluate,
+    parse_tinql_to_query, range_matches, tokenize_doc,
 };
 use tokenizer::Tokenizer;
 
@@ -1841,12 +1841,11 @@ fn build_corpus(
     }
     let query = parse_tinql_to_query(&key.query, &tokenizer)
         .unwrap_or_else(|error| pgrx::error!("Stannum score query error: {error}"));
-    // This path scores the first key column's text, so a name resolves
-    // against the index's plan like any other path.
-    check_query_fields(
-        &query,
-        unsafe { crate::storage::fields_meta(index.as_ptr()) }.as_ref(),
-    );
+    // A field name resolves against the index's recorded plan exactly as
+    // the indexed paths resolve it, so heap scoring agrees with the scan on
+    // which rows a scope matches.
+    let fields = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    check_query_fields(&query, fields.as_ref());
     let edit = TermSetEdit::from_bound_arrays(term_add, term_replace)
         .unwrap_or_else(|error| pgrx::error!("stannum.score(): {error}"))
         .analyzed_with(|text| {
@@ -1873,19 +1872,43 @@ fn build_corpus(
             )
         })
     };
-    let documents = load_documents(heap_oid, index.oid());
-    let positioned = tokenize_documents(&documents, |document| tokenize_doc(document, &tokenizer));
-    let tokenized: Vec<Vec<String>> = positioned.iter().map(|doc| doc.tokens().to_vec()).collect();
-    let universe = corpus_universe(&tokenized);
+    // One text per field per row: the scored expression's column alone for a
+    // fieldless index, every key column for a field-aware one (NULL columns
+    // read as empty; an all-NULL row is skipped, as the index skips it).
+    let rows: Vec<Vec<String>> = match fields.as_ref() {
+        Some(plan) => load_field_documents(heap_oid, index.oid(), &plan.names),
+        None => load_documents(heap_oid, index.oid())
+            .into_iter()
+            .map(|document| vec![document])
+            .collect(),
+    };
+    let per_row: Vec<Vec<TokenizedDoc>> = rows
+        .iter()
+        .enumerate()
+        .map(|(position, row)| {
+            if position.is_multiple_of(10) {
+                pgrx::check_for_interrupts!();
+            }
+            row.iter()
+                .map(|text| tokenize_doc(text, &tokenizer))
+                .collect()
+        })
+        .collect();
+    let tokenized: Vec<Vec<Vec<String>>> = per_row
+        .iter()
+        .map(|row| row.iter().map(|doc| doc.tokens().to_vec()).collect())
+        .collect();
+    let universe = corpus_universe(tokenized.iter().flatten());
     let mut collected = Collected::default();
-    // This path scores one column's text, so every term is unscoped and
-    // there is no field plan to resolve a name against.
+    // Terms carry the field masks the query scopes them to, resolved
+    // against the same plan the scan path uses.
+    let all_fields = all_fields_mask(fields.as_ref());
     collect_score_terms(
         &query,
-        1,
+        all_fields,
         1.0,
         false,
-        crate::storage::field_scope(None),
+        crate::storage::field_scope(fields.as_ref()),
         &mut collected,
     );
     let owned = collected.resolve(|expansion| {
@@ -1896,48 +1919,134 @@ fn build_corpus(
             .map(|term| (*term).to_owned())
             .collect()
     });
-    let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref(), 1);
-    // Token-less documents are not documents for scoring, as in TIN.
-    let total_docs = tokenized.iter().filter(|tokens| !tokens.is_empty()).count() as u64;
+    let terms = compile_scoring_terms(inputs_of(&owned), &edit, stop.as_ref(), all_fields);
+    // A row with no token in any field is not a document for scoring, as in
+    // TIN; a field-aware row counts once however its tokens distribute.
+    let non_empty = |tokens: &Vec<Vec<String>>| tokens.iter().any(|field| !field.is_empty());
+    let total_docs = tokenized.iter().filter(|tokens| non_empty(tokens)).count() as u64;
     let average_length = if total_docs == 0 {
         1.0
     } else {
-        tokenized.iter().map(Vec::len).sum::<usize>() as f32 / total_docs as f32
+        match fields.as_ref() {
+            // The weighted average of §5.10: per-field token totals folded
+            // once per field, then one left-to-right weighted fold.
+            Some(plan) => {
+                let mut weighted = 0.0_f32;
+                for field in 0..plan.names.len() {
+                    let total: usize = tokenized.iter().map(|row| row[field].len()).sum();
+                    weighted += plan.weights[field] * total as f32;
+                }
+                weighted / total_docs as f32
+            }
+            None => {
+                tokenized
+                    .iter()
+                    .map(|row| row.iter().map(Vec::len).sum::<usize>())
+                    .sum::<usize>() as f32
+                    / total_docs as f32
+            }
+        }
     };
     let mut scorers = Vec::new();
     for term in terms {
+        // `df` stays aggregate over every field (RFC §5.5).
         let df = tokenized
             .iter()
-            .filter(|tokens| tokens.iter().any(|token| token == term.text()))
+            .filter(|row| {
+                row.iter()
+                    .any(|field| field.iter().any(|token| token == term.text()))
+            })
             .count() as u64;
         let ratio = (!key.full).then_some(dense);
         if !term.is_retained(df, df, total_docs, ratio) {
             continue;
         }
-        let scorer =
-            TermScorer::from_statistics(total_docs, df, term.boost(), params, average_length)
-                .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}"));
-        scorers.push((term.text().to_owned(), scorer));
+        let model = match fields.as_ref() {
+            Some(plan) => TermScoreModel::Bm25f(
+                Bm25fScorer::from_statistics(
+                    total_docs,
+                    df,
+                    term.boost(),
+                    params,
+                    average_length,
+                    &plan.weights,
+                    term.mask(),
+                )
+                .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}")),
+            ),
+            None => TermScoreModel::Bm25(
+                TermScorer::from_statistics(total_docs, df, term.boost(), params, average_length)
+                    .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}")),
+            ),
+        };
+        scorers.push(((term.text().to_owned(), term.mask()), model));
     }
     let mut by_document = FxHashMap::default();
     let mut max = 0.0_f32;
-    for ((document, tokens), doc) in documents.into_iter().zip(tokenized).zip(&positioned) {
-        let score = sum_scores_in_order(scorers.iter().map(|(term, scorer)| {
-            let tf = tokens.iter().filter(|token| *token == term).count() as u32;
-            if tf == 0 {
-                0.0
-            } else {
-                scorer.score_count(tf, tokens.len() as u32)
+    let plan_weights: Option<&[f32]> = fields.as_ref().map(|plan| plan.weights.as_slice());
+    for (row, fields_of_row) in rows.into_iter().zip(&per_row) {
+        let score = sum_scores_in_order(scorers.iter().map(|((term, mask), model)| {
+            match model {
+                TermScoreModel::Bm25(scorer) => {
+                    let doc = &fields_of_row[0];
+                    let tf = doc.tokens().iter().filter(|token| *token == term).count() as u32;
+                    if tf == 0 {
+                        0.0
+                    } else {
+                        scorer.score_count(tf, doc.len() as u32)
+                    }
+                }
+                TermScoreModel::Bm25f(scorer) => {
+                    // `tf* = Σ_{f ∈ mask} w_f · count_f`, exact counts in
+                    // the same field order the payload fold uses; `len*`
+                    // sums every field (§5.10).
+                    let weights = plan_weights.unwrap_or(&[]);
+                    let mut tf = 0.0_f32;
+                    for (field, doc) in fields_of_row.iter().enumerate() {
+                        if mask & (1u16 << field) == 0 {
+                            continue;
+                        }
+                        let count = doc.tokens().iter().filter(|token| *token == term).count();
+                        tf += weights[field] * count as f32;
+                    }
+                    if tf == 0.0 {
+                        return 0.0;
+                    }
+                    let mut len = 0.0_f32;
+                    for (field, doc) in fields_of_row.iter().enumerate() {
+                        len += weights[field] * doc.len() as f32;
+                    }
+                    scorer.saturate(tf, len)
+                }
             }
         }));
-        // The maximum is over matching documents only, as in TIN.
-        let matched = evaluate(&query, doc)
-            .unwrap_or_else(|error| pgrx::error!("stannum score query evaluation failed: {error}"))
-            .matched;
+        // The maximum is over matching documents only, as in TIN; a scope
+        // matches the same rows the scan path would match.
+        let matched = match fields.as_ref() {
+            Some(plan) => {
+                let names: Vec<String> = plan.names.clone();
+                matches_field_scoped(
+                    &query,
+                    &names
+                        .into_iter()
+                        .zip(fields_of_row.iter())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            None => {
+                evaluate(&query, &fields_of_row[0])
+                    .unwrap_or_else(|error| {
+                        pgrx::error!("stannum score query evaluation failed: {error}")
+                    })
+                    .matched
+            }
+        };
         if matched {
             max = max.max(score);
         }
-        by_document.insert(document, score);
+        // The corpus key stays the first column's text: the planner passes
+        // that column's value back on each row.
+        by_document.insert(row[0].clone(), score);
     }
     ScoreCorpus {
         key,
@@ -2018,6 +2127,145 @@ fn load_documents(heap_oid: pg_sys::Oid, index_oid: pg_sys::Oid) -> Vec<String> 
     }
 }
 
+/// Every key column's text of a multi-column index, in the field order the
+/// meta trailer records: `names` are that plan's column names. NULL columns
+/// read as empty strings; a row with every column NULL is skipped — the
+/// index holds nothing for it either. Multi-column stannum indexes carry
+/// plain attribute keys only, so each name is a column reference.
+fn load_field_documents(
+    heap_oid: pg_sys::Oid,
+    index_oid: pg_sys::Oid,
+    names: &[String],
+) -> Vec<Vec<String>> {
+    unsafe {
+        let relname = pg_sys::get_rel_name(heap_oid);
+        let namespace = pg_sys::get_namespace_name(pg_sys::get_rel_namespace(heap_oid));
+        if relname.is_null() || namespace.is_null() {
+            pgrx::error!("stannum score relation no longer exists");
+        }
+        let qualified = pg_sys::quote_qualified_identifier(namespace, relname);
+        let predicate_sql = format!(
+            "SELECT pg_catalog.pg_get_expr(i.indpred, i.indrelid) \
+             FROM pg_catalog.pg_index i \
+             WHERE i.indexrelid={}::oid AND i.indrelid={}::oid AND i.indpred IS NOT NULL",
+            index_oid.to_u32(),
+            heap_oid.to_u32(),
+        );
+        // pgrx's Spi helpers assign an XID; this catalog lookup must remain
+        // read-only for standby heap scoring, as `load_documents`.
+        let predicate = Spi::connect(|client| {
+            let table = client.select(&predicate_sql, Some(1), &[])?;
+            if table.is_empty() {
+                return Ok(None);
+            }
+            table.first().get::<String>(1)
+        })
+        .unwrap_or_else(|error| pgrx::error!("stannum score index lookup failed: {error}"));
+        // Field names come from the meta trailer; quoting follows
+        // PostgreSQL's own rule (a bare lowercase identifier quotes to
+        // itself, anything else doubles its double quotes), so any recorded
+        // column name is a safe column reference.
+        let columns = names
+            .iter()
+            .map(|name| {
+                let bare = !name.is_empty()
+                    && name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                if bare {
+                    name.clone()
+                } else {
+                    format!("\"{}\"", name.replace('"', "\"\""))
+                }
+            })
+            .collect::<Vec<_>>();
+        let not_null = columns
+            .iter()
+            .map(|column| format!("({column}) IS NOT NULL"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {not_null}{}",
+            columns.join(", "),
+            CStr::from_ptr(qualified).to_string_lossy(),
+            predicate
+                .as_deref()
+                .map(|predicate| format!(" AND ({predicate})"))
+                .unwrap_or_default(),
+        );
+        Spi::connect(|client| {
+            client
+                .select(&sql, None, &[])
+                .unwrap_or_else(|error| pgrx::error!("stannum score corpus scan failed: {error}"))
+                .map(|row| {
+                    (1..=columns.len())
+                        .map(|position| {
+                            row.get::<String>(position)
+                                .unwrap_or_else(|error| {
+                                    pgrx::error!("stannum score corpus row failed: {error}")
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        })
+    }
+}
+
+/// Field-scoped matching over one row's per-field texts, the heap path's
+/// answer to the scan's per-field planner: an unscoped leaf matches when any
+/// ONE field's text matches it (each field evaluates as its own document, so
+/// positional queries never cross fields), and a `Query::Field` wrapper
+/// restricts its subtree to the named field (RFC §5.11).
+fn matches_field_scoped(query: &Query, docs: &[(String, &TokenizedDoc)]) -> bool {
+    let leaf_matches = |leaf: &Query| {
+        docs.iter().any(|(_, doc)| {
+            evaluate(leaf, doc)
+                .unwrap_or_else(|error| {
+                    pgrx::error!("stannum score query evaluation failed: {error}")
+                })
+                .matched
+        })
+    };
+    match query {
+        Query::Field { name, inner } => {
+            docs.iter()
+                .find(|(field, _)| field == name)
+                .is_some_and(|(_, doc)| {
+                    evaluate(inner, doc)
+                        .unwrap_or_else(|error| {
+                            pgrx::error!("stannum score query evaluation failed: {error}")
+                        })
+                        .matched
+                })
+        }
+        Query::Not(inner) => !matches_field_scoped(inner, docs),
+        Query::And(left, right) => {
+            matches_field_scoped(left, docs) && matches_field_scoped(right, docs)
+        }
+        Query::Or(left, right) => {
+            matches_field_scoped(left, docs) || matches_field_scoped(right, docs)
+        }
+        Query::Conjunction(children) => children
+            .iter()
+            .all(|child| matches_field_scoped(child, docs)),
+        Query::Disjunction { min, children } | Query::AtLeast { min, children } => {
+            children
+                .iter()
+                .filter(|child| matches_field_scoped(child, docs))
+                .count()
+                >= *min as usize
+        }
+        Query::Boost { inner, .. } => matches_field_scoped(inner, docs),
+        leaf => leaf_matches(leaf),
+    }
+}
+
 /// A query node that scores every dictionary term it expands to, as TIN does.
 enum Expansion<'a> {
     Regex(&'a CompiledRegex),
@@ -2028,7 +2276,6 @@ enum Expansion<'a> {
         distance: u32,
     },
 }
-
 impl Expansion<'_> {
     fn matcher(&self) -> Box<dyn Fn(&str) -> bool + '_> {
         match self {
@@ -2559,9 +2806,8 @@ mod tests {
 }
 
 /// Distinct tokens of a corpus, the expansion universe without a dictionary.
-fn corpus_universe(tokenized: &[Vec<String>]) -> BTreeSet<&str> {
+fn corpus_universe<'a>(tokenized: impl Iterator<Item = &'a Vec<String>>) -> BTreeSet<&'a str> {
     tokenized
-        .iter()
         .flat_map(|tokens| tokens.iter().map(String::as_str))
         .collect()
 }
@@ -2684,7 +2930,7 @@ fn score_inspect(
                 .map(|t| t.text.into_owned())
                 .collect::<Vec<_>>()
         });
-        let universe = corpus_universe(&tokenized);
+        let universe = corpus_universe(tokenized.iter());
         let owned = collected.resolve(|expansion| {
             let matcher = expansion.matcher();
             universe

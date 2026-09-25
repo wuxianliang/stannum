@@ -19,7 +19,7 @@
 //! Empty documents match nothing in the reference evaluator, including `*`, so
 //! the universe used here excludes them.
 
-use boldi_vigna::{SpanQuery, SpanSolver};
+use boldi_vigna::{SpanQuery, SpanSolver, TermPositions};
 use segment::Tid;
 use segment::index::{Expanded, Index, Window};
 use segment::payload::PayloadCursor;
@@ -56,10 +56,6 @@ pub enum PlanError {
     UnknownField(String),
     #[error("field scopes are not supported for this query shape")]
     FieldScopeShape,
-    #[error("field-scoped phrases and spans are not supported yet")]
-    FieldScopePositional,
-    #[error("positional queries over a multi-field index need a field scope")]
-    MultiFieldPositional,
 }
 
 /// Resolves the field names a query scopes against (`title:(…)`).
@@ -569,17 +565,14 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
         }
     }
 
-    /// The two positional shapes. Field-scoped phrases and spans land in
-    /// phase 3, and an unscoped one must not compare positions across a
-    /// multi-field payload (each field's positions start at zero), so both
-    /// fail closed (RFC §5.11).
+    /// The two positional shapes. Positions are partitioned by field and the
+    /// solver runs once per field in `scope` (every field when unscoped —
+    /// RFC §5.11: an unscoped phrase matches when any ONE field contains it,
+    /// never across fields; each field's positions start at zero, so
+    /// intervals from different fields are never compared).
     fn positional(&self, query: &Query, scope: Option<u16>) -> Result<Plan<'a>> {
-        if scope.is_some() {
-            return Err(PlanError::FieldScopePositional);
-        }
-        if self.segment.field_count() > 1 {
-            return Err(PlanError::MultiFieldPositional);
-        }
+        let field_count = self.segment.field_count();
+        let try_fields = scope.unwrap_or_else(|| all_fields_mask(u32::from(field_count)));
         match query {
             Query::Span {
                 term_slots,
@@ -598,6 +591,8 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                         solver,
                         filter: position_filter.clone(),
                     },
+                    try_fields,
+                    field_count,
                 )
             }
             Query::SpanExpr {
@@ -614,6 +609,8 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                     SpanKind::Dynamic {
                         expr: span_expr.clone(),
                     },
+                    try_fields,
+                    field_count,
                 )
             }
             _ => unreachable!("positional plans come from span nodes"),
@@ -751,14 +748,19 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
         skeleton: Plan<'a>,
         slots: Vec<Vec<Term<'a>>>,
         kind: SpanKind,
+        try_fields: u16,
+        field_count: u8,
     ) -> Result<Plan<'a>> {
         let mut slot_readers = Vec::with_capacity(slots.len());
         for terms in slots {
             let mut readers = Vec::with_capacity(terms.len());
             for term in terms {
+                let payload = term.payload()?;
+                let field_aware = payload.is_field_aware();
                 readers.push(SlotTerm {
                     postings: term.cursor()?,
-                    payload: term.payload()?.cursor(),
+                    payload: payload.cursor(),
+                    field_aware,
                 });
             }
             slot_readers.push(readers);
@@ -769,6 +771,8 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
             kind,
             self.segment.documents()?,
             self.segment.lengths(),
+            try_fields,
+            field_count,
         )?;
         Ok(Plan {
             cursor: Box::new(filter),
@@ -792,8 +796,7 @@ impl<'a> NonEmptyDocuments<'a> {
     }
 
     fn align(&mut self) -> segment::Result<()> {
-        while self.documents.current().is_some() && self.lengths.get(self.documents.ordinal())? == 0
-        {
+        while self.documents.current().is_some() && !self.lengths.any(self.documents.ordinal())? {
             self.documents.advance()?;
         }
         Ok(())
@@ -814,11 +817,6 @@ impl Cursor for NonEmptyDocuments<'_> {
     }
 }
 
-struct SlotTerm<'a> {
-    postings: PostingsCursor<'a>,
-    payload: PayloadCursor<'a>,
-}
-
 enum SpanKind {
     Fixed {
         solver: SpanSolver,
@@ -829,8 +827,39 @@ enum SpanKind {
     },
 }
 
+struct SlotTerm<'a> {
+    postings: PostingsCursor<'a>,
+    payload: PayloadCursor<'a>,
+    /// The payload carries `LSG4` field groups, so positions decode through
+    /// `next_fields` and land in per-field buckets.
+    field_aware: bool,
+}
+
+/// The fields a document may match in: bit `i` is field `i`. Every field of
+/// the segment when the query is unscoped (RFC §5.11).
+fn all_fields_mask(field_count: u32) -> u16 {
+    debug_assert!((1..=16).contains(&field_count));
+    ((1u32 << field_count.min(16)) - 1) as u16
+}
+
+/// One field's view of a document's slot positions: slot `i` reads the
+/// positions term `i` holds in exactly this field.
+struct FieldSlots<'a> {
+    positions: &'a [Vec<Vec<u32>>],
+    field: u8,
+}
+
+impl TermPositions for FieldSlots<'_> {
+    fn positions(&self, term_index: usize) -> &[u32] {
+        self.positions[term_index][usize::from(self.field)].as_slice()
+    }
+}
+
 /// Keeps only skeleton candidates whose stored positions satisfy the span
-/// query. Candidates arrive in TID order, so every per-term lookup is a
+/// query. Positions are partitioned by field and the solver runs once per
+/// field in `try_fields`, so intervals are never compared across fields
+/// (RFC §5.11); a fieldless segment has exactly one field bucket and behaves
+/// as before. Candidates arrive in TID order, so every per-term lookup is a
 /// forward seek.
 struct SpanFilter<'a> {
     skeleton: DynCursor<'a>,
@@ -838,7 +867,11 @@ struct SpanFilter<'a> {
     kind: SpanKind,
     documents: PostingsCursor<'a>,
     lengths: Lengths<'a>,
-    positions: Vec<Vec<u32>>,
+    /// slot → field → positions (empty when the term does not occur there).
+    positions: Vec<Vec<Vec<u32>>>,
+    /// The fields the query may match in; bit `i` is field `i`.
+    try_fields: u16,
+    field_count: u8,
     current: Option<Tid>,
 }
 
@@ -849,8 +882,10 @@ impl<'a> SpanFilter<'a> {
         kind: SpanKind,
         documents: PostingsCursor<'a>,
         lengths: Lengths<'a>,
+        try_fields: u16,
+        field_count: u8,
     ) -> Result<Self> {
-        let positions = vec![Vec::new(); slots.len()];
+        let positions = vec![vec![Vec::new(); usize::from(field_count)]; slots.len()];
         let mut this = Self {
             skeleton,
             slots,
@@ -858,6 +893,8 @@ impl<'a> SpanFilter<'a> {
             documents,
             lengths,
             positions,
+            try_fields,
+            field_count,
             current: None,
         };
         this.align()?;
@@ -880,27 +917,44 @@ impl<'a> SpanFilter<'a> {
 
     fn load_positions(&mut self, tid: Tid) -> Result<()> {
         for (slot, terms) in self.slots.iter_mut().enumerate() {
-            let positions = &mut self.positions[slot];
-            positions.clear();
+            for by_field in &mut self.positions[slot] {
+                by_field.clear();
+            }
             let mut sources = 0;
             for term in terms.iter_mut() {
                 if let Some(ordinal) = term.postings.rank(tid)? {
                     term.payload.seek(ordinal)?;
-                    term.payload.next_into(positions)?;
+                    if term.field_aware {
+                        let entry = term.payload.next_fields()?;
+                        for hit in &entry.fields {
+                            let bucket = self.positions[slot]
+                                .get_mut(usize::from(hit.field))
+                                .ok_or(segment::Error::Corrupt("payload field id out of range"))?;
+                            bucket.extend_from_slice(&hit.positions);
+                        }
+                    } else {
+                        term.payload.next_into(&mut self.positions[slot][0])?;
+                    }
                     sources += 1;
                 }
             }
             if sources > 1 {
-                positions.sort_unstable();
-                positions.dedup();
+                // Expansion slots merge several terms; each field's merged
+                // list must return to strictly increasing order.
+                for by_field in &mut self.positions[slot] {
+                    by_field.sort_unstable();
+                    by_field.dedup();
+                }
             }
         }
         Ok(())
     }
 
-    fn document_length(&mut self, tid: Tid) -> Result<u32> {
+    /// The length of `tid`'s field `field` — the denominator a positional
+    /// filter (`IN LAST n%`) resolves against inside that field.
+    fn field_length(&mut self, tid: Tid, field: u8) -> Result<u32> {
         match self.documents.rank(tid)? {
-            Some(ordinal) => Ok(self.lengths.get(ordinal)?),
+            Some(ordinal) => Ok(self.lengths.field_get(ordinal, field)?),
             None => Err(segment::Error::Corrupt("candidate missing from document table").into()),
         }
     }
@@ -916,27 +970,43 @@ impl<'a> SpanFilter<'a> {
 
     fn matches(&mut self, tid: Tid) -> Result<bool> {
         self.load_positions(tid)?;
-        let doc_len = if self.needs_doc_length() {
-            self.document_length(tid)?
-        } else {
-            0
-        };
-        match &mut self.kind {
-            SpanKind::Fixed { solver, filter } => {
-                let mut intervals = solver.intervals(&self.positions);
-                Ok(match filter {
-                    None => intervals.next().is_some(),
-                    Some(filter) => {
-                        intervals.any(|interval| filter.matches_interval(doc_len, interval))
-                    }
-                })
+        let needs_len = self.needs_doc_length();
+        for field in 0..self.field_count {
+            if self.try_fields & (1u16 << field) == 0 {
+                continue;
             }
-            SpanKind::Dynamic { expr } => {
-                let resolved = expr.resolve(doc_len);
-                let mut solver = SpanSolver::new(&resolved)?;
-                Ok(solver.intervals(&self.positions).next().is_some())
+            let doc_len = if needs_len || matches!(self.kind, SpanKind::Dynamic { .. }) {
+                self.field_length(tid, field)?
+            } else {
+                0
+            };
+            let view = FieldSlots {
+                positions: &self.positions,
+                field,
+            };
+            match &mut self.kind {
+                SpanKind::Fixed { solver, filter } => {
+                    let mut intervals = solver.intervals(&view);
+                    let hit = match filter {
+                        None => intervals.next().is_some(),
+                        Some(filter) => {
+                            intervals.any(|interval| filter.matches_interval(doc_len, interval))
+                        }
+                    };
+                    if hit {
+                        return Ok(true);
+                    }
+                }
+                SpanKind::Dynamic { expr } => {
+                    let resolved = expr.resolve(doc_len);
+                    let mut solver = SpanSolver::new(&resolved)?;
+                    if solver.intervals(&view).next().is_some() {
+                        return Ok(true);
+                    }
+                }
             }
         }
+        Ok(false)
     }
 }
 
@@ -966,10 +1036,7 @@ fn span_to_segment_error(error: PlanError) -> segment::Error {
     match error {
         PlanError::Segment(error) => error,
         PlanError::Span(_) => segment::Error::Corrupt("span solver failed after planning"),
-        PlanError::UnknownField(_)
-        | PlanError::FieldScopeShape
-        | PlanError::FieldScopePositional
-        | PlanError::MultiFieldPositional => {
+        PlanError::UnknownField(_) | PlanError::FieldScopeShape => {
             segment::Error::Corrupt("field scope failed after planning")
         }
     }
@@ -1282,6 +1349,167 @@ mod tests {
                     prop_assert_eq!(rest, found[found.len() / 2..].to_vec());
                 }
             }
+        }
+    }
+
+    /// Field-scoped and unscoped positional queries over a two-field
+    /// (`LSG4`) segment: positions are partitioned by field, the solver runs
+    /// per field, and intervals never cross fields (RFC §5.11).
+    mod fields {
+        use super::*;
+
+        const NAMES: &[&str] = &["title", "body"];
+
+        struct Names;
+
+        impl FieldScope for Names {
+            fn field_id(&self, name: &str) -> Option<u8> {
+                NAMES
+                    .iter()
+                    .position(|field| *field == name)
+                    .and_then(|field| u8::try_from(field).ok())
+            }
+        }
+
+        /// Builds a two-field segment from explicit per-field tokens, so the
+        /// tests never depend on how a tokenizer segments a string.
+        fn build_fields(docs: &[&[(u8, &str, u32)]]) -> Vec<u8> {
+            let mut builder = SegmentBuilder::with_field_count(2);
+            for (i, tokens) in docs.iter().enumerate() {
+                builder
+                    .add_document_fields(
+                        tid(i as u32),
+                        2,
+                        tokens.iter().map(|(f, t, p)| (*f, *t, *p)),
+                    )
+                    .unwrap();
+            }
+            builder.finish_fields()
+        }
+
+        fn check(docs: &[&[(u8, &str, u32)]], query: &str, expected: &[u32]) {
+            let bytes = build_fields(docs);
+            let segment = Segment::parse(&bytes).unwrap();
+            assert_eq!(segment.field_count(), 2);
+            let parsed = parse_tinql_to_query_default(query)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+            let planned = plan_scoped(&parsed, &segment, &Limits::default(), &Names)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+            assert!(planned.exact, "{query}");
+            let found = segment::set::collect(planned.cursor).unwrap();
+            let expected: Vec<Tid> = expected.iter().map(|i| tid(*i)).collect();
+            assert_eq!(found, expected, "{query}");
+            // The page plan agrees (it falls back to the scalar plan here).
+            let mut pages = page_plan_scoped(&parsed, &segment, &Limits::default(), &Names)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+            let mut page_found = Vec::new();
+            while let Some(page) = pages.cursor.current() {
+                page_found.extend(page.offsets.iter().map(|offset| Tid {
+                    block: page.block,
+                    offset,
+                }));
+                pages.cursor.advance().unwrap();
+            }
+            assert_eq!(page_found, expected, "{query} (page plan)");
+        }
+
+        /// 甲 adjacent in one field; 甲 in title with 乙 in body; both fields'
+        /// positions starting at zero (cross-field both-0 parses cleanly).
+        const PHRASE_DOCS: &[&[(u8, &str, u32)]] = &[
+            &[(0, "甲", 0), (0, "乙", 1)],
+            &[(0, "甲", 0), (1, "乙", 0)],
+            &[(1, "甲", 0), (1, "乙", 1)],
+            &[(1, "乙", 0), (1, "甲", 1)],
+        ];
+
+        #[test]
+        fn field_scoped_phrase_matches_only_within_the_field() {
+            // Doc 0 holds the phrase in title; doc 2 in body. Doc 1 holds 甲
+            // in title and 乙 in body — never a match.
+            check(PHRASE_DOCS, "title:(\"甲 乙\")", &[0]);
+            check(PHRASE_DOCS, "body:(\"甲 乙\")", &[2]);
+            check(
+                PHRASE_DOCS,
+                "title:(\"甲 乙\") OR body:(\"甲 乙\")",
+                &[0, 2],
+            );
+        }
+
+        #[test]
+        fn unscoped_phrase_matches_any_one_field_never_across() {
+            // The Lucene rule: any ONE field containing the phrase matches;
+            // 甲 in one field plus 乙 in another never does.
+            check(PHRASE_DOCS, "\"甲 乙\"", &[0, 2]);
+            check(PHRASE_DOCS, "\"乙 甲\"", &[3]);
+        }
+
+        #[test]
+        fn cross_field_positions_both_zero_decode_cleanly() {
+            // Docs 1 and 3 carry the same position in different fields; term
+            // and Boolean queries over them decode without interference.
+            check(PHRASE_DOCS, "甲", &[0, 1, 2, 3]);
+            check(PHRASE_DOCS, "甲 AND 乙", &[0, 1, 2, 3]);
+            check(PHRASE_DOCS, "title:(甲) AND body:(乙)", &[1]);
+        }
+
+        #[test]
+        fn field_scoped_spans_stay_within_the_field() {
+            let docs: &[&[(u8, &str, u32)]] = &[
+                &[(0, "a", 0), (0, "b", 2), (1, "a", 0), (1, "b", 1)],
+                &[(0, "a", 0), (0, "b", 1)],
+            ];
+            // Doc 0 has the ordered pair only in body; doc 1 in title.
+            check(docs, "title:(a THEN/0 b)", &[1]);
+            check(docs, "body:(a THEN/0 b)", &[0]);
+            // Unscoped near matches wherever one field holds it — doc 0 in
+            // body, doc 1 in title; 甲-style cross-field adjacency is absent.
+            check(docs, "a NEAR/1 b", &[0, 1]);
+            check(docs, "\"a b\"", &[0, 1]);
+        }
+
+        #[test]
+        fn positional_filters_use_the_owning_fields_length() {
+            let docs: &[&[(u8, &str, u32)]] = &[
+                &[(0, "a", 0), (0, "x", 1)], // title: x is last
+                &[(0, "x", 0), (0, "a", 1), (1, "pad", 0), (1, "pad", 1)], // no
+                &[(0, "x", 0), (1, "pad", 0), (1, "a", 1)], // title len 1
+            ];
+            check(docs, "title:(x IN LAST 1 WORDS)", &[0, 2]);
+            check(docs, "body:(x IN LAST 1 WORDS)", &[]);
+            // Unscoped: any field whose own last word is x.
+            check(docs, "x IN LAST 1 WORDS", &[0, 2]);
+            check(docs, "x IN FIRST 1 WORDS", &[1, 2]);
+        }
+
+        #[test]
+        fn boosted_field_scoped_phrase_keeps_its_scope() {
+            check(PHRASE_DOCS, "title:(\"甲 乙\"^2)", &[0]);
+        }
+
+        #[test]
+        fn unknown_and_fieldless_scopes_fail_closed() {
+            let bytes = build_fields(PHRASE_DOCS);
+            let segment = Segment::parse(&bytes).unwrap();
+            let query = parse_tinql_to_query_default("nope:(甲)").unwrap();
+            assert!(matches!(
+                plan_scoped(&query, &segment, &Limits::default(), &Names),
+                Err(PlanError::UnknownField(name)) if name == "nope"
+            ));
+            // A fieldless plan resolves no names at all.
+            let query = parse_tinql_to_query_default("title:(甲)").unwrap();
+            assert!(matches!(
+                plan(&query, &segment, &Limits::default()),
+                Err(PlanError::UnknownField(_))
+            ));
+        }
+
+        #[test]
+        fn universe_counts_documents_with_only_later_field_tokens() {
+            // Doc 1's title is empty; `*` and `NOT` must still see it.
+            let docs: &[&[(u8, &str, u32)]] = &[&[(0, "a", 0)], &[(1, "b", 0)]];
+            check(docs, "*", &[0, 1]);
+            check(docs, "* AND NOT a", &[1]);
+            check(docs, "* AND NOT b", &[0]);
         }
     }
 

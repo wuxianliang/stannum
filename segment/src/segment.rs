@@ -1210,6 +1210,24 @@ impl Lengths<'_> {
             .ok_or(Error::Corrupt("document ordinal out of range"))?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
+
+    /// Whether the document at `ordinal` holds at least one token in any
+    /// field. On a field-aware (`LSG4`) length table `get` reads field 0
+    /// only, so a document whose first field is empty but a later one is not
+    /// still counts as non-empty here.
+    pub fn any(&self, ordinal: u32) -> Result<bool> {
+        let field_count = match self {
+            Self::Bytes(_) => return self.get(ordinal).map(|length| length > 0),
+            Self::Fields { field_count, .. } => *field_count,
+            Self::Lazy { field_count, .. } => *field_count,
+        };
+        for field in 0..field_count {
+            if self.field_get(ordinal, field)? > 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]

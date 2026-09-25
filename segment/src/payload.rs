@@ -273,6 +273,14 @@ impl<'a> Payload<'a> {
         Self::parse_inner(bytes, Format::Lsg4, field_count)
     }
 
+    /// Whether entries carry `LSG4` field groups (decode them with
+    /// [`PayloadCursor::next_fields`]) instead of one flat position list
+    /// ([`PayloadCursor::next_into`]). A one-field `LSG4` blob still reports
+    /// true: the format, not the field count, picks the decoder.
+    pub fn is_field_aware(&self) -> bool {
+        self.format == Format::Lsg4
+    }
+
     fn parse_inner(bytes: &'a [u8], format: Format, field_count: u8) -> Result<Self> {
         let interval = match format {
             Format::Lsg1 => LEGACY_SKIP_INTERVAL,

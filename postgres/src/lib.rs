@@ -5549,6 +5549,139 @@ mod tests {
         assert_eq!(ids("body ==> 'needle'"), vec![1, 3]);
     }
 
+    /// Same-field phrases (RFC §5.11): `title:("甲 乙")` matches only a
+    /// document whose TITLE holds the two terms adjacently — 甲 in title plus
+    /// 乙 in body is never a match — and an unscoped phrase matches when any
+    /// ONE field holds it (the Lucene rule), never across two.
+    #[pg_test]
+    fn field_scoped_phrases_match_within_one_field() {
+        Spi::run(
+            "CREATE TABLE field_phrases(id int primary key, title text, body text);
+             INSERT INTO field_phrases VALUES
+               (1, '甲 乙', 'pad pad pad'),
+               (2, '甲', '乙'),
+               (3, 'pad pad pad', '甲 乙'),
+               (4, '乙 甲', '甲 乙');
+             CREATE INDEX field_phrases_idx ON field_phrases USING stannum(title, body);",
+        )
+        .unwrap();
+        let ids = |query: &str| -> Vec<i32> {
+            Spi::get_one::<Vec<i32>>(&format!(
+                "SELECT array_agg(id ORDER BY id) FROM field_phrases WHERE {query}"
+            ))
+            .unwrap()
+            .unwrap_or_default()
+        };
+        // Unscoped through search(): any one field, never across.
+        let search_ids = |query: &str| -> Vec<i32> {
+            Spi::get_one::<Vec<i32>>(&format!(
+                "SELECT array_agg(d.id ORDER BY d.id) FROM field_phrases d JOIN \
+                 stannum.search('field_phrases_idx', '{query}', 10, 'none') s ON d.ctid = s.ctid"
+            ))
+            .unwrap()
+            .unwrap_or_default()
+        };
+        let search_count = |query: &str| -> i64 {
+            Spi::get_one::<i64>(&format!(
+                "SELECT stannum.search_count('field_phrases_idx', '{query}')"
+            ))
+            .unwrap()
+            .unwrap()
+        };
+        // Scoped: only the field's own adjacency matches.
+        assert_eq!(ids("title ==> 'title:(\"甲 乙\")'"), vec![1]);
+        assert_eq!(ids("body ==> 'body:(\"甲 乙\")'"), vec![3, 4]);
+        // The clause's implicit scope confines an unscoped phrase too.
+        assert_eq!(ids("title ==> '\"甲 乙\"'"), vec![1]);
+        assert_eq!(ids("body ==> '\"甲 乙\"'"), vec![3, 4]);
+        assert_eq!(ids("title ==> 'title:(\"乙 甲\")'"), vec![4]);
+        // A group naming another field is still rejected in operator context.
+        let foreign = error_of(|| {
+            Spi::run("SELECT count(*) FROM field_phrases WHERE title ==> 'body:(\"甲 乙\")'")
+                .unwrap();
+        });
+        assert!(foreign.contains("stannum.search()"), "{foreign}");
+        // Unscoped through search(): any one field, never across.
+        assert_eq!(search_ids("\"甲 乙\""), vec![1, 3, 4]);
+        assert_eq!(search_ids("title:(\"甲 乙\")"), vec![1]);
+        assert_eq!(search_count("title:(甲) AND body:(乙)"), 2);
+    }
+
+    /// The heap-scoring corpus (`stannum.score_bound`) resolves field scopes
+    /// against the index's plan exactly as the scan does: a `title:(…)`
+    /// query scores the title hit, ignores a body-only hit, and no longer
+    /// errors on the scope (WI-13 heap alignment).
+    #[pg_test]
+    fn heap_corpus_scores_field_scoped_queries() {
+        Spi::run(
+            "CREATE TABLE heap_fields(id int primary key, title text, body text);
+             INSERT INTO heap_fields VALUES
+               (1, 'needle', 'pad'), (2, 'pad', 'needle'), (3, 'needle needle', 'pad');
+             CREATE INDEX heap_fields_idx ON heap_fields USING stannum(title, body);",
+        )
+        .unwrap();
+        let score = |query: &str, id: i32| -> f32 {
+            Spi::get_one::<f32>(&format!(
+                "SELECT stannum.score_bound(title, '{query}', \
+                   'heap_fields'::regclass::oid::int, 'heap_fields_idx'::regclass::oid::int, \
+                   1, NULL, NULL, NULL, NULL, NULL) \
+                 FROM heap_fields WHERE id = {id}"
+            ))
+            .unwrap_or_else(|error| panic!("{query}/{id}: {error}"))
+            .unwrap_or(0.0)
+        };
+        // The scope reaches the scoring terms: title hits score, body-only
+        // rows score zero, and the repeated title hit outranks the single.
+        let one = score("title:(needle)", 1);
+        let three = score("title:(needle)", 3);
+        assert!(one > 0.0, "title hit scores {one}");
+        assert_eq!(score("title:(needle)", 2), 0.0, "body-only row");
+        assert!(
+            three > one,
+            "tf* weights the second title hit: {three} vs {one}"
+        );
+        // Unscoped terms see every field.
+        assert!(score("needle", 2) > 0.0, "body hit scores unscoped");
+        assert_eq!(score("body:(needle)", 1), 0.0);
+        assert!(score("body:(needle)", 2) > 0.0);
+        // Matching (and so max) follows the same semantics: the scope's max
+        // comes from a matching row, and the maximum is positive only when a
+        // row matches.
+        let max = |query: &str| -> f32 {
+            Spi::get_one::<f32>(&format!(
+                "SELECT stannum.score_bound(title, '{query}', \
+                   'heap_fields'::regclass::oid::int, 'heap_fields_idx'::regclass::oid::int, \
+                   3, NULL, NULL, NULL, NULL, NULL) FROM heap_fields LIMIT 1"
+            ))
+            .unwrap_or_else(|error| panic!("{query}: {error}"))
+            .unwrap_or(0.0)
+        };
+        assert!(max("title:(needle)") > 0.0);
+        assert_eq!(max("title:(absenttoken)"), 0.0);
+        // The heap and indexed paths agree on positivity row by row.
+        for (query, id, positive) in [
+            ("title:(needle)", 1, true),
+            ("title:(needle)", 2, false),
+            ("needle", 2, true),
+            ("body:(needle)", 1, false),
+        ] {
+            let indexed = Spi::get_one::<f32>(&format!(
+                "SELECT stannum.score_bound_indexed(ctid, '{query}', \
+                   'heap_fields'::regclass::oid::int, 'heap_fields_idx'::regclass::oid::int, \
+                   1, NULL, NULL, NULL, NULL, NULL) \
+                 FROM heap_fields WHERE id = {id}"
+            ))
+            .unwrap_or_else(|error| panic!("{query}/{id}: {error}"))
+            .unwrap_or(0.0);
+            assert_eq!(
+                indexed > 0.0,
+                positive,
+                "{query} row {id}: indexed {indexed}"
+            );
+            assert_eq!(score(query, id) > 0.0, positive, "{query} row {id}");
+        }
+    }
+
     /// 1,200 rows in three segments where `needle` occurs in exactly one
     /// field per row — four times in a third of the titles, once or twice in
     /// the other bodies — so most blocks hold both fields and the field-aware
