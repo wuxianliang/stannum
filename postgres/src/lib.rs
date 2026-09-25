@@ -5607,6 +5607,61 @@ mod tests {
         assert_eq!(search_count("title:(甲) AND body:(乙)"), 2);
     }
 
+    /// A multi-column index's write buffer holds field-aware forward records
+    /// (a field id per term group, RFC §5.6); the fold, the vacuum's buffer
+    /// rewrite, and the info/verify walks must decode them with that codec,
+    /// not the legacy one. Small buffers force repeated folds; the corpus
+    /// repeats one term across both fields so a term's groups interleave.
+    #[pg_test]
+    fn multi_column_write_buffer_folds_field_aware_records() {
+        Spi::run(
+            "CREATE TABLE fold_fields(id int primary key, title text, body text);
+             CREATE INDEX fold_fields_idx ON fold_fields USING stannum(title, body);",
+        )
+        .unwrap();
+        Spi::run(
+            "SET LOCAL stannum.write_buffer_docs = 2;
+             SET LOCAL stannum.write_buffer_bytes = 1024;
+             INSERT INTO fold_fields
+               SELECT n, 'shared alpha ' || (n % 3), 'shared beta ' || (n % 5)
+               FROM generate_series(1, 40) n;",
+        )
+        .unwrap();
+        // Folds happened: the directory holds immutable segments alongside
+        // whatever remains buffered, and both answer queries.
+        let info = Spi::get_one::<i64>(
+            "SELECT count(*) FILTER (WHERE kind = 'immutable') \
+             FROM stannum.segment_info('fold_fields_idx')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(info >= 1, "small buffers must fold, saw {info} immutable");
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT stannum.search_count('fold_fields_idx', 'title:(shared) AND body:(beta)')"
+            )
+            .unwrap(),
+            Some(40)
+        );
+        // The vacuum's buffer rewrite re-encodes surviving records; deletes
+        // leave dead ones behind first (VACUUM cannot run inside a test
+        // transaction, so its cleanup entry point runs directly).
+        Spi::run("DELETE FROM fold_fields WHERE id % 4 = 0").unwrap();
+        Spi::run("SELECT tests.direct_vacuum_cleanup('fold_fields_idx'::regclass::oid)").unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('fold_fields_idx', 'title:(shared)')")
+                .unwrap(),
+            Some(30)
+        );
+        // Both walks decode the field-aware buffer without findings.
+        Spi::run("SELECT * FROM stannum.segment_info('fold_fields_idx')").unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM stannum.verify_index('fold_fields_idx')")
+                .unwrap(),
+            Some(0)
+        );
+    }
+
     /// The heap-scoring corpus (`stannum.score_bound`) resolves field scopes
     /// against the index's plan exactly as the scan does: a `title:(…)`
     /// query scores the title hit, ignores a body-only hit, and no longer

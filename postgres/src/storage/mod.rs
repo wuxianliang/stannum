@@ -58,7 +58,7 @@ use segment::segment::{Segment, SegmentBuilder};
 use segment::set::{Cursor, Difference, Intersection};
 use segment::{Area, Tid};
 use tinql::runtime::Query;
-use tinql::runtime::plan::{Limits, plan};
+use tinql::runtime::plan::{Limits, plan_scoped};
 use tokenizer::{CompiledTokenizerPipeline, Tokenizer};
 
 /// Encoded forward-record bytes buffered before folding.
@@ -1293,9 +1293,17 @@ unsafe fn buffer_index(
             BUFFER_INDEX.with_borrow_mut(|slot| *slot = Some(entry));
             return None;
         };
+        // The buffer's codec follows the meta plan (RFC §5.6): a field-aware
+        // index's records carry a field id per term group.
+        let field_count =
+            unsafe { fields_meta(index) }.map(|plan| u8::try_from(plan.names.len()).unwrap_or(16));
         let mut at = 0;
         while at < tail.len() {
-            at += codec_in(entry.index.add_encoded(&tail[at..]), "write buffer");
+            let added = match field_count {
+                Some(count) => entry.index.add_encoded_fields(&tail[at..], count),
+                None => entry.index.add_encoded(&tail[at..]),
+            };
+            at += codec_in(added, "write buffer");
         }
         entry.covered = state.bytes as usize;
     }
@@ -1482,6 +1490,21 @@ unsafe fn replace_buffer(index: pg_sys::Relation, state: &mut BufferState, data:
 }
 
 // --- Segments -----------------------------------------------------------------
+
+/// Decodes the write buffer's forward records with the codec its index's
+/// meta plan selects: field-aware (`LSG4`) records carry a field id per
+/// term group, legacy ones do not (RFC §5.6 - the trailer, not the bytes,
+/// picks the decoder).
+fn buffer_records(meta: &Meta, stream: &[u8]) -> Vec<segment::Result<ForwardRecord>> {
+    match meta
+        .fields
+        .as_ref()
+        .map(|plan| u8::try_from(plan.names.len()).unwrap_or(16))
+    {
+        Some(count) => segment::forward::records_fields(stream, count).collect(),
+        None => segment::forward::records(stream).collect(),
+    }
+}
 
 fn finish_builder(builder: SegmentBuilder) -> (Vec<u8>, u32, u64) {
     let docs = builder.document_count() as u32;
@@ -1791,7 +1814,7 @@ unsafe fn fold(index: pg_sys::Relation, meta: &mut Meta) {
         }
         let stream = read_buffer_stream(index, &meta.buffer);
         let mut builder = SegmentBuilder::default();
-        for record in segment::forward::records(&stream) {
+        for record in buffer_records(meta, &stream) {
             codec_in(
                 builder.add_record(&codec_in(record, "write buffer")),
                 "write buffer",
@@ -2427,12 +2450,16 @@ pub unsafe fn scan(
             }
         };
 
+        // Field names resolve against the view's plan; a fieldless index has
+        // none. The operator's bitmap path carries field-scoped queries, so
+        // this planner must be the scoped one like every other.
+        let fields = field_scope(view.fields.as_ref());
         for ((segment, dead_bytes), label) in view.sources.iter().zip(&view.labels) {
             pgrx::check_for_interrupts!();
             let mut exact = true;
             let mut cursors: Vec<Box<dyn Cursor>> = Vec::with_capacity(queries.len());
             for query in queries {
-                let plan = plan(query, segment, &limits)
+                let plan = plan_scoped(query, segment, &limits, fields)
                     .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
                 exact &= plan.exact;
                 cursors.push(plan.cursor);
@@ -2697,7 +2724,7 @@ pub unsafe fn bulk_delete(
                 let mut kept = Vec::with_capacity(stream.len());
                 let mut kept_docs = 0u32;
                 let mut dropped = false;
-                for record in segment::forward::records(&stream) {
+                for record in buffer_records(&meta, &stream) {
                     let record = codec_in(record, "write buffer");
                     if is_dead(record.tid) {
                         removed += 1;
@@ -3241,7 +3268,8 @@ pub unsafe fn segment_rows(index: pg_sys::Relation) -> Vec<SegmentRow> {
         }
         if meta.buffer.docs > 0 {
             let stream = read_buffer_stream(index, &meta.buffer);
-            let lengths: u64 = segment::forward::records(&stream)
+            let lengths: u64 = buffer_records(&meta, &stream)
+                .into_iter()
                 .map(|record| u64::from(codec_in(record, "write buffer").doc_len))
                 .sum();
             rows.push(SegmentRow {

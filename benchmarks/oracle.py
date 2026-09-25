@@ -635,6 +635,167 @@ def run_boundaries(args):
     return run_contracts(args, lifecycle=False)
 
 
+# Deliberately Stannum-only: the reference engine has no field-aware index,
+# so the field dimension is a documented contract (RFC 5.11), not a
+# cross-engine diff. Witnesses pin the Lucene same-field phrase rule, the
+# operator's implicit field scope, weight-ordered ranking, snippet field
+# selection, the highlight field overload, and heap/indexed score agreement.
+FIELDS_FIXTURE = """
+CREATE TABLE oracle_fields_docs(id int PRIMARY KEY, title text, body text);
+INSERT INTO oracle_fields_docs VALUES
+ (1, '甲 乙', 'pad pad pad'),
+ (2, '甲', '乙'),
+ (3, 'pad pad pad', '甲 乙'),
+ (4, 'needle craft', 'needle pad'),
+ (5, NULL, 'needle pad'),
+ (6, 'needle', 'needle needle pad');
+CREATE INDEX oracle_fields_idx ON oracle_fields_docs USING stannum(title, body)
+  WITH (field_weights = 'title:3.0,body:1.0');
+"""
+
+
+def fields_cases():
+    cases = []
+
+    def add(name, sql, expected):
+        cases.append(dict(name=name, kind='fields', error=False, expected=expected, sql=sql))
+
+    def ids(name, where, expected):
+        add(name,
+            "SELECT json_build_array(id) FROM oracle_fields_docs WHERE " + where + " ORDER BY id",
+            [[i] for i in expected])
+
+    # The Lucene same-field phrase rule: 甲 adjacent in one field matches; 甲
+    # in title plus 乙 in body (row 2) never does.
+    ids('scoped_phrase', "title ==> 'title:(\"甲 乙\")'", [1])
+    ids('implicit_scope_phrase', "title ==> '\"甲 乙\"'", [1])
+    ids('body_phrase', "body ==> '\"甲 乙\"'", [3])
+    # The negative witness: row 2 holds 甲 in title and 乙 in body.
+    ids('cross_field_never', "id = 2 AND title ==> '\"甲 乙\"'", [])
+    ids('scoped_term', "title ==> 'needle'", [4, 6])
+    ids('other_scoped_term', "body ==> 'needle'", [4, 5, 6])
+    # Scoped AND across fields through search(): row 2 only.
+    add('scoped_conjunction_count',
+        "SELECT json_build_array(stannum.search_count('oracle_fields_idx', 'title:(甲) AND body:(乙)'))",
+        [[1]])
+    # Weighted ranking: row 6 (title plus double body hit) outranks row 4
+    # (one of each), which outranks the body-only row 5.
+    add('weighted_rank',
+        "SELECT json_build_array(array_agg(id ORDER BY s.score DESC, d.id)) FROM oracle_fields_docs d JOIN "
+        "stannum.search('oracle_fields_idx', 'needle', 10, 'none') s ON d.ctid = s.ctid",
+        [[[6, 4, 5]]])
+    # Snippet field selection: a single top-level wrapper renders its field.
+    add('snippet_wrapper_field',
+        "SELECT json_build_array(id, s.snippet) FROM oracle_fields_docs d JOIN "
+        "stannum.search('oracle_fields_idx', 'title:(needle)', 10) s ON d.ctid = s.ctid ORDER BY id",
+        [[4, '<mark>needle</mark> craft'], [6, '<mark>needle</mark>']])
+    # Else the first field holding a mark: row 4 from title, row 5's NULL
+    # title steps aside for its body.
+    add('snippet_first_matching',
+        "SELECT json_build_array(id, s.snippet) FROM oracle_fields_docs d JOIN "
+        "stannum.search('oracle_fields_idx', 'needle', 10) s ON d.ctid = s.ctid ORDER BY id",
+        [[4, '<mark>needle</mark> craft'], [5, '<mark>needle</mark> pad'],
+         [6, '<mark>needle</mark>']])
+    # A query with no highlightable part renders the first non-NULL field
+    # plain; row 5's NULL title steps aside again.
+    add('snippet_plain_fallback',
+        "SELECT json_build_array(id, s.snippet) FROM oracle_fields_docs d JOIN "
+        "stannum.search('oracle_fields_idx', '* AND NOT absenttoken', 10) s ON d.ctid = s.ctid ORDER BY id",
+        [[1, '甲 乙'], [2, '甲'], [3, 'pad pad pad'], [4, 'needle craft'],
+         [5, 'needle pad'], [6, 'needle']])
+    # The highlight field overload confines marks to the named field.
+    add('highlight_field_overload',
+        "SELECT json_build_array(id, stannum.highlight(title, '<b>', '</b>', 'title:(needle)', 'title')) "
+        "FROM oracle_fields_docs WHERE title ==> 'needle' ORDER BY id",
+        [[4, '<b>needle</b> craft'], [6, '<b>needle</b>']])
+    add('highlight_field_overload_foreign',
+        "SELECT json_build_array(stannum.highlight(title, '<b>', '</b>', 'body:(needle)', 'title')) "
+        "FROM oracle_fields_docs WHERE id = 4",
+        [['needle craft']])
+    # Heap and indexed scoring agree on positivity, field scope included.
+    add('heap_indexed_agree',
+        "SELECT json_build_array(id, "
+        "(stannum.score_bound(title, 'title:(needle)', 'oracle_fields_docs'::regclass::oid::int, "
+        "'oracle_fields_idx'::regclass::oid::int, 1, NULL, NULL, NULL, NULL, NULL) > 0) "
+        "= (stannum.score_bound_indexed(ctid, 'title:(needle)', 'oracle_fields_docs'::regclass::oid::int, "
+        "'oracle_fields_idx'::regclass::oid::int, 1, NULL, NULL, NULL, NULL, NULL) > 0)) "
+        "FROM oracle_fields_docs WHERE title IS NOT NULL ORDER BY id",
+        [[i, True] for i in (1, 2, 3, 4, 6)])
+    # Both access paths answer the scoped clause identically.
+    for path, settings in [
+        ('scan', 'SET enable_seqscan=off; SET enable_bitmapscan=off; SET stannum.enable_custom_scan=on;'),
+        ('bitmap', 'SET enable_seqscan=off; SET enable_bitmapscan=on; SET stannum.enable_custom_scan=off;')]:
+        add('scoped_paths_' + path,
+            settings + "SELECT json_build_array(id) FROM oracle_fields_docs "
+            "WHERE body ==> '\"甲 乙\"' ORDER BY id",
+            [[3]])
+    return cases
+
+
+def run_fields(args):
+    import dataset
+    import run as bench
+    if args.budget_seconds <= 0 or args.statement_seconds <= 0:
+        raise ValueError('field time budgets must be positive')
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    report = dict(status='running', rows=6, cases=[],
+                  checks=['documented_membership', 'weighted_rank', 'snippet_field_selection',
+                          'highlight_field_overload', 'heap_indexed_score_agreement', 'both_access_paths'],
+                  scope='Stannum-only field contracts (RFC 5.11); no reference engine or performance claims',
+                  servers={})
+    report['stannum_source'] = bench.provenance(out)
+    libdir = Path(subprocess.check_output(['pg_config', '--pkglibdir'], text=True).strip())
+    suffix = '.dylib' if platform.system() == 'Darwin' else '.so'
+    guarded = [Path(__file__).resolve(), libdir / ('stannum' + suffix)]
+    report['files'] = {str(path): dataset.sha256(path) for path in guarded}
+    shutil.copy2(__file__, out / 'protocol.py')
+    env = load_env(args.left)
+    env['PGOPTIONS'] += f' -c statement_timeout={args.statement_seconds * 1000}'
+    owned = False
+
+    def save():
+        report['elapsed_seconds'] = time.monotonic() - started
+        (out / 'oracle.json').write_text(json.dumps(report, indent=2) + '\n')
+
+    try:
+        run('CREATE EXTENSION IF NOT EXISTS stannum', env)
+        report['servers']['left'] = dict(version=run('SELECT version()', env).strip(),
+            functions=run("SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n "
+                          "ON n.oid=p.pronamespace WHERE n.nspname='stannum' ORDER BY 1", env).splitlines())
+        run('BEGIN;' + FIELDS_FIXTURE + 'COMMIT;', env)
+        owned = True
+        for case in fields_cases():
+            if time.monotonic() - started > args.budget_seconds:
+                raise TimeoutError('field verification budget exhausted')
+            observed = boundary_observe(case, env)
+            values, problems = lifecycle_check(case, observed)
+            item = dict(name=case['name'], documented=case['expected'], observations=dict(
+                sql=case['sql'], **observed), compared=values, problems=problems,
+                same=not problems)
+            report['cases'].append(item)
+            save()
+        for path, digest in report['files'].items():
+            if dataset.sha256(path) != digest:
+                raise ValueError('protocol or installed binary changed during verification: ' + path)
+        report['differences'] = sum(not item['same'] for item in report['cases'])
+        report['status'] = 'mismatch' if report['differences'] else 'passed'
+    except Exception as error:
+        report.update(status='incomplete', error=str(error))
+    finally:
+        if owned and not args.keep:
+            try:
+                run('DROP TABLE oracle_fields_docs', env)
+            except Exception as error:
+                report.setdefault('cleanup_errors', []).append(str(error))
+        if report.get('cleanup_errors'):
+            report['status'] = 'incomplete'
+        save()
+    print(f"{report['status']}: {len(report['cases'])} field cases in {report['elapsed_seconds']:.1f}s; {out / 'oracle.json'}")
+    return 0 if report['status'] == 'passed' else 1
+
+
 def run_contracts(args, lifecycle=False, raw_text=False):
     import dataset
     import run as bench
@@ -763,11 +924,16 @@ def main():
     parser.add_argument('--published-corpus', choices=['wikipedia', 'stackexchange'])
     parser.add_argument('--published-source', type=Path, help='benchmarker Git checkout containing the pinned dataset revision')
     parser.add_argument('--raw-text', action='store_true', help='positive raw-text phrase/analyzer witnesses')
+    parser.add_argument('--fields', action='store_true', help='Stannum-only multi-column field contracts (RFC 5.11): same-field phrases, weighted rank, snippets, highlight overload')
     args = parser.parse_args()
     if args.raw_text:
-        if args.dataset or args.trace or args.boundaries or args.lifecycle or args.published_corpus or args.published_source:
+        if args.dataset or args.trace or args.boundaries or args.lifecycle or args.published_corpus or args.published_source or args.fields:
             parser.error('--raw-text cannot be combined with another suite')
         return run_contracts(args, raw_text=True)
+    if args.fields:
+        if args.dataset or args.trace or args.boundaries or args.lifecycle or args.published_corpus or args.published_source:
+            parser.error('--fields cannot be combined with another suite')
+        return run_fields(args)
     if bool(args.published_corpus) != bool(args.published_source):
         parser.error('--published-corpus and --published-source must be supplied together')
     if args.published_corpus and (not args.dataset or not args.trace or args.boundaries or args.lifecycle):

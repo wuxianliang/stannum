@@ -278,3 +278,40 @@ class RawTextWitnessTests(unittest.TestCase):
             if case['expected']:
                 self.assertTrue(oracle.lifecycle_check(case, {'rows':[]})[1])
         self.assertIn('E\'alpha\\nbeta\'', oracle.RAW_TEXT_FIXTURE)
+
+
+class FieldsContractTests(unittest.TestCase):
+    def test_cases_are_distinct_and_check_both_positive_and_negative_membership(self):
+        cases = oracle.fields_cases()
+        names = [case['name'] for case in cases]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertGreater(len(cases), 12)
+        for case in cases:
+            self.assertEqual(oracle.lifecycle_check(case, {'rows': case['expected']})[1], [])
+            if len(case['expected']) > 1:
+                self.assertTrue(oracle.lifecycle_check(case, {'rows': case['expected'][:-1]})[1])
+        # The cross-field witness: 甲 in title plus 乙 in body never matches.
+        negative = next(case for case in cases if case['name'] == 'cross_field_never')
+        self.assertEqual(negative['expected'], [])
+        self.assertEqual(oracle.lifecycle_check(negative, {'rows': []})[1], [])
+        self.assertTrue(oracle.lifecycle_check(negative, {'rows': [[2]]})[1])
+
+    def test_fixture_pins_same_field_phrase_and_weight_witnesses(self):
+        self.assertIn("'甲 乙'", oracle.FIELDS_FIXTURE)
+        self.assertIn("(2, '甲', '乙')", oracle.FIELDS_FIXTURE)
+        self.assertIn('field_weights', oracle.FIELDS_FIXTURE)
+        self.assertIn('(title, body)', oracle.FIELDS_FIXTURE)
+
+    def test_snippet_and_highlight_cases_exercise_every_selection_rule(self):
+        cases = {case['name']: case for case in oracle.fields_cases()}
+        for name in ['snippet_wrapper_field', 'snippet_first_matching']:
+            self.assertIn('<mark>', cases[name]['expected'][0][1])
+        # The plain fallback renders no marks at all.
+        for row in cases['snippet_plain_fallback']['expected']:
+            self.assertNotIn('<mark>', row[1])
+        self.assertIn("', 'title')", cases['highlight_field_overload']['sql'])
+        # Heap/indexed agreement is compared per row, not just once.
+        self.assertIn('score_bound_indexed', cases['heap_indexed_agree']['sql'])
+        # Both access paths are pinned by plan settings, not trust.
+        self.assertIn('enable_custom_scan=on', cases['scoped_paths_scan']['sql'])
+        self.assertIn('enable_custom_scan=off', cases['scoped_paths_bitmap']['sql'])

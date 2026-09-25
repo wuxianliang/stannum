@@ -37,7 +37,10 @@ use std::ffi::c_void;
 
 use pgrx::{FromDatum, pg_guard, pg_sys};
 use segment::Tid;
-use segment::verify::{Finding, Findings, verify_dead_list, verify_forward_stream, verify_segment};
+use segment::verify::{
+    Finding, Findings, verify_dead_list, verify_forward_stream, verify_forward_stream_fields,
+    verify_segment,
+};
 
 use super::layout::{
     self, BufferState, CHAIN_CAPACITY, KIND_BUFFER, KIND_FREE, KIND_META, KIND_RUN, Meta, NONE, Run,
@@ -459,7 +462,14 @@ impl Checker {
         if stream.len() != state.bytes as usize {
             return;
         }
-        let report = verify_forward_stream(&stream);
+        // The buffer's codec follows the meta plan: an `LSG4` buffer's records
+        // carry a field id per term group (RFC §5.6).
+        let report = match unsafe { super::fields_meta(self.index) }
+            .map(|plan| u8::try_from(plan.names.len()).unwrap_or(16))
+        {
+            Some(count) => verify_forward_stream_fields(&stream, count),
+            None => verify_forward_stream(&stream),
+        };
         for finding in report.findings {
             self.findings.push(finding.within(owner));
         }

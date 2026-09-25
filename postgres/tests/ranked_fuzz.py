@@ -65,6 +65,9 @@ REGRESSIONS = [
     dict(seed=103, seconds=8, writers=3, readers=2, corpus=400, fold_bias=True),
     # Wide OR cursor state across the grouped-pivot boundary.
     dict(seed=104, seconds=20, writers=2, readers=2, corpus=400, wide=True),
+    # Field-scoped clauses on the two-column weighted index: phrases within
+    # one column, explicit scopes under the matching clause, titles churning.
+    dict(seed=105, seconds=10, writers=2, readers=2, corpus=400, fields=True),
 ]
 
 
@@ -196,6 +199,18 @@ class Corpus:
             words += WIDE_WORDS if rng.random() < 0.25 else rng.sample(WIDE_WORDS, 32)
         return ' '.join(words + [FILLER] * pad)
 
+    def title(self):
+        """A short title for the --fields mode: one or two vocabulary words,
+        occasionally a rare one, occasionally NULL — so field-scoped queries,
+        same-field phrases, and NULL-stepping snippets all see witnesses."""
+        rng = self.rng
+        if rng.random() < 0.12:
+            return None
+        words = [rng.choice(VOCABULARY) for _ in range(rng.choice([1, 1, 2]))]
+        if rng.random() < 0.15:
+            words.append(rng.choice(RARE))
+        return ' '.join(words)
+
     def new_ids(self, n):
         ids = list(range(self.next_id, self.next_id + n))
         self.next_id += n
@@ -210,6 +225,62 @@ class Corpus:
 
 def sql_literal(text):
     return "'" + text.replace("'", "''") + "'"
+
+
+class FieldQuery:
+    """A field-scoped TINQL query with an equivalent regex predicate over one
+    named column, for the --fields mode: the ==> clause's column carries the
+    query's implicit field scope, and the regex checks that column alone."""
+
+    def __init__(self, tinql, predicate, shape, column):
+        self.tinql = tinql
+        self.predicate = predicate
+        self.shape = shape
+        self.column = column
+
+    @staticmethod
+    def generate(rng):
+        column = rng.choice(['title', 'body'])
+
+        def word():
+            pool = VOCABULARY + RARE + ['missing']
+            return rng.choice(pool) if rng.random() < 0.15 else rng.choice(VOCABULARY)
+
+        def term_regex(w):
+            return f"{column} ~ {sql_literal(chr(92) + 'm' + w + chr(92) + 'M')}"
+
+        shape = rng.choices(
+            ['term', 'or2', 'and2', 'phrase', 'explicit', 'andnot', 'atleast'],
+            weights=[28, 14, 14, 8, 8, 5, 4])[0]
+        if shape == 'term':
+            w = word()
+            return FieldQuery(w, term_regex(w), shape, column)
+        if shape == 'or2':
+            ws = [word(), word()]
+            return FieldQuery(' OR '.join(ws), '(' + ' OR '.join(term_regex(w) for w in ws) + ')', shape, column)
+        if shape == 'and2':
+            ws = [word(), word()]
+            return FieldQuery(' AND '.join(ws), '(' + ' AND '.join(term_regex(w) for w in ws) + ')', shape, column)
+        if shape == 'phrase':
+            a, b = word(), word()
+            return FieldQuery(f'"{a} {b}"',
+                              f"{column} ~ {sql_literal(chr(92) + 'm' + a + ' ' + b + chr(92) + 'M')}",
+                              shape, column)
+        if shape == 'explicit':
+            # An explicit scope naming the clause's own column stays legal and
+            # must answer exactly the implicitly scoped form.
+            if column != 'title':
+                column = 'title'
+            w = word()
+            return FieldQuery(f'title:({w})',
+                              f"title ~ {sql_literal(chr(92) + 'm' + w + chr(92) + 'M')}", shape, column)
+        if shape == 'andnot':
+            a, b = word(), word()
+            return FieldQuery(f'{a} AND NOT {b}', f'({term_regex(a)} AND NOT {term_regex(b)})', shape, column)
+        ws = rng.sample(VOCABULARY, 3)
+        n = rng.choice([1, 2, 2, 3])
+        count = ' + '.join(f"({term_regex(w)})::int" for w in ws)
+        return FieldQuery(f'AT LEAST {n} OF [{" ".join(ws)}]', f'(({count}) >= {n})', shape, column)
 
 
 class Query:
@@ -367,15 +438,22 @@ class Fuzzer:
         statements = [
             'CREATE EXTENSION stannum',
             'CREATE EXTENSION pageinspect',
-            f'CREATE TABLE docs(id int PRIMARY KEY, body text, revision int DEFAULT 0, grp int) '
-            f'WITH (fillfactor={fillfactor}, autovacuum_enabled=off)',
+            (('CREATE TABLE docs(id int PRIMARY KEY, title text, body text, revision int DEFAULT 0, grp int) ')
+             if self.args.fields else
+             ('CREATE TABLE docs(id int PRIMARY KEY, body text, revision int DEFAULT 0, grp int) '))
+            + f'WITH (fillfactor={fillfactor}, autovacuum_enabled=off)',
             'CREATE TABLE keep(id int PRIMARY KEY) WITH (autovacuum_enabled=off)',
             f'SET stannum.build_segment_docs = {build_segment_docs}',
         ]
         ids = self.corpus.new_ids(self.args.corpus)
-        rows = ', '.join(f"({i}, {sql_literal(self.corpus.body())}, 0, {i % 4})" for i in ids)
+        rows = self.row_values(ids)
         statements.append(f'INSERT INTO docs VALUES {rows}')
-        statements.append('CREATE INDEX docs_idx ON docs USING stannum(body)')
+        if self.args.fields:
+            statements.append(
+                "CREATE INDEX docs_idx ON docs USING stannum(title, body) "
+                "WITH (field_weights = 'title:2.0,body:1.0')")
+        else:
+            statements.append('CREATE INDEX docs_idx ON docs USING stannum(body)')
         keep = [i for i in ids if rng.random() < rng.choice([0.2, 0.5, 0.8])]
         if keep:
             statements.append('INSERT INTO keep VALUES ' + ', '.join(f'({i})' for i in keep))
@@ -383,8 +461,7 @@ class Fuzzer:
         for _ in range(rng.randint(0, 3)):
             statements.append(self.writer_gucs())
             new = self.corpus.new_ids(rng.randint(1, 30))
-            statements.append('INSERT INTO docs VALUES ' + ', '.join(
-                f"({i}, {sql_literal(self.corpus.body())}, 0, {i % 4})" for i in new))
+            statements.append('INSERT INTO docs VALUES ' + self.row_values(new))
         self.schema = statements
         self.sql(';\n'.join(statements) + ';')
         for statement in statements:
@@ -402,10 +479,21 @@ class Fuzzer:
                 f'SET stannum.max_merge_docs = {rng.choice([0, 0, 10, 100, 1000, 100000])}; '
                 f'SET stannum.build_segment_docs = {rng.choice([10, 50, 200, 1000, 32768])}')
 
+    def row_values(self, ids):
+        """INSERT row values for `ids`, carrying a title in --fields mode."""
+        if self.args.fields:
+            def one(i):
+                title = self.corpus.title()
+                title_sql = 'NULL' if title is None else sql_literal(title)
+                return f"({i}, {title_sql}, {sql_literal(self.corpus.body())}, 0, {i % 4})"
+        else:
+            def one(i):
+                return f"({i}, {sql_literal(self.corpus.body())}, 0, {i % 4})"
+        return ', '.join(one(i) for i in ids)
+
     def insert_statement(self, n):
         new = self.corpus.new_ids(n)
-        return 'INSERT INTO docs VALUES ' + ', '.join(
-            f"({i}, {sql_literal(self.corpus.body())}, 0, {i % 4})" for i in new)
+        return 'INSERT INTO docs VALUES ' + self.row_values(new)
 
     def writer_op(self, quiescent):
         """One writer step as a list of statements; updates the corpus model."""
@@ -414,6 +502,9 @@ class Fuzzer:
         kinds = ['insert', 'delete', 'update_body', 'update_hot', 'vacuum', 'gucs', 'txn',
                  'rollback', 'reuse', 'keep']
         weights = [26, 14, 12, 12, 8, 5, 8, 4, 8, 3]
+        if self.args.fields:
+            kinds.append('update_title')
+            weights.append(6)
         if quiescent:
             kinds.append('reindex')
             weights.append(2)
@@ -428,6 +519,20 @@ class Fuzzer:
             values = ', '.join(f'({i}, {sql_literal(corpus.body())})' for i in chosen)
             return f'UPDATE docs d SET body = v.body FROM (VALUES {values}) AS v(id, body) WHERE d.id = v.id'
 
+        def update_title(chosen):
+            values = ', '.join(
+                f"({i}, {'NULL' if (title := corpus.title()) is None else sql_literal(title)})"
+                for i in chosen)
+            return (f'UPDATE docs d SET title = v.title FROM (VALUES {values}) AS v(id, title) '
+                    f'WHERE d.id = v.id')
+
+        def update_row(chosen):
+            values = ', '.join(
+                f"({i}, {'NULL' if (title := corpus.title()) is None else sql_literal(title)}, "
+                f'{sql_literal(corpus.body())})' for i in chosen)
+            return (f'UPDATE docs d SET title = v.title, body = v.body '
+                    f'FROM (VALUES {values}) AS v(id, title, body) WHERE d.id = v.id')
+
         def update_hot(chosen):
             return f'UPDATE docs SET revision = revision + 1 WHERE id = ANY(ARRAY[{",".join(map(str, chosen))}]::int[])'
 
@@ -441,7 +546,14 @@ class Fuzzer:
             return [delete(chosen)] if chosen else []
         if kind == 'update_body':
             chosen = ids(rng.choice([1, 2, 5, 20]))
-            return [update_body(chosen)] if chosen else []
+            if not chosen:
+                return []
+            if self.args.fields and self.rng.random() < 0.4:
+                return [update_row(chosen)]
+            return [update_body(chosen)]
+        if kind == 'update_title':
+            chosen = ids(rng.choice([1, 3, 10]))
+            return [update_title(chosen)] if chosen else []
         if kind == 'update_hot':
             chosen = ids(rng.choice([1, 3, 10, 40]))
             return [update_hot(chosen)] if chosen else []
@@ -469,7 +581,7 @@ class Fuzzer:
             return steps
         if kind == 'rollback':
             new = corpus.new_ids(rng.choice([1, 5, 30]))
-            rows = ', '.join(f"({i}, {sql_literal(corpus.body())}, 0, {i % 4})" for i in new)
+            rows = self.row_values(new)
             corpus.live.difference_update(new)
             steps = ['BEGIN', f'INSERT INTO docs VALUES {rows}']
             chosen = ids(rng.choice([0, 2, 5]))
@@ -491,9 +603,11 @@ class Fuzzer:
             return ['INSERT INTO keep VALUES ' + ', '.join(f'({i})' for i in chosen) + ' ON CONFLICT DO NOTHING']
         if kind == 'reindex':
             self.stats['reindexes'] += 1
+            keys = ("(title, body) WITH (field_weights = 'title:2.0,body:1.0')"
+                    if self.args.fields else '(body)')
             return [f'SET stannum.build_segment_docs = {rng.choice([10, 50, 200, 1000])}',
                     rng.choice(['REINDEX INDEX docs_idx',
-                                'CREATE INDEX CONCURRENTLY docs_idx_new ON docs USING stannum(body); '
+                                f'CREATE INDEX CONCURRENTLY docs_idx_new ON docs USING stannum{keys}; '
                                 'DROP INDEX docs_idx; ALTER INDEX docs_idx_new RENAME TO docs_idx'])]
         return []
 
@@ -532,7 +646,12 @@ class Fuzzer:
         if self.args.wide:
             width = (31, 32, 33, 128)[self.wide_queries % 4]
             self.wide_queries += 1
-        query = Query.generate(rng, width=width)
+        if self.args.fields:
+            query = FieldQuery.generate(rng)
+            column = query.column
+        else:
+            query = Query.generate(rng, width=width)
+            column = 'body'
         scorer = rng.choice(['stannum.full_score(d.ctid)', 'stannum.full_score(d.ctid)', 'stannum.score(d.ctid)'])
         limit = rng.choice(LIMITS)
         offset = rng.choice(OFFSETS)
@@ -549,8 +668,8 @@ class Fuzzer:
             limit = rng.choice([10, 31, 127, 128, 129])
         isolation = rng.choice(['REPEATABLE READ', 'REPEATABLE READ', 'REPEATABLE READ', 'READ COMMITTED'])
         from_clause = 'docs d JOIN keep k USING (id)' if join else 'docs d'
-        where = f"d.body ==> {sql_literal(query.tinql)}"
-        regex_where = query.predicate.replace('body ~', 'd.body ~')
+        where = f"d.{column} ==> {sql_literal(query.tinql)}"
+        regex_where = query.predicate.replace(f'{column} ~', f'd.{column} ~')
         if extra:
             where += f' AND {extra}'
             regex_where += f' AND {extra}'
@@ -938,6 +1057,8 @@ def build_parser():
     parser.add_argument('--port', default=PORT)
     parser.add_argument('--stop-at', type=int, default=0, help='stop after this many episodes')
     parser.add_argument('--wide', action='store_true', help='Cursor/twin episodes with 31/32/33/128 distinct OR terms')
+    parser.add_argument('--fields', action='store_true',
+                        help='Two-column (title, body) weighted index; field-scoped ==> clauses with per-column regex oracles')
     parser.add_argument('--keep', action='store_true', help='keep the cluster directory on success')
     parser.add_argument('--smoke', action='store_true', help='fixed seeds and the regression list, under two minutes')
     return parser
