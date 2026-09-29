@@ -39,7 +39,7 @@ design disagree, **the design wins** and this plan gets a fix.
 
 ## Phase 0 — Vehicle (WS1): the `stn3` branch
 
-- [ ] **0.1 Create the branch and prove CI on untouched upstream**
+- [x] **0.1 Create the branch and prove CI on untouched upstream** (d57ef58)
   - Goal: `stn3` exists at `d57ef58`, pushed to origin, CI green.
   - Scope: branch + `.github/workflows/ci.yml` if the fork's CI needs porting.
   - Done when: `git rev-parse stn3` = `d57ef58…`; CI run on the pushed branch
