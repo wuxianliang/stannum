@@ -524,6 +524,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
     },
+    "contract/run.py": {
+      "owner": "ben",
+      "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7); engine-agnostic runner structure preserved, case list emptied until the pinned 0.4.0 producer records answers."
+    },
     "docs/query-language/README.md": {
       "owner": "mixed",
       "upstream_path": "tinql/docs/src/SUMMARY.md",
