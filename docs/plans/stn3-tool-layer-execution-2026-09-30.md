@@ -54,7 +54,15 @@ design disagree, **the design wins** and this plan gets a fix.
     0 cases, 0 failures.
   - Review focus: the runner imports nothing from the repo (design §7).
 
-- [ ] **0.3 pgembed early smoke [checkpoint]**
+- [x] **0.3 pgembed early smoke [checkpoint]** (pgembed 3385c3b)
+  - PASS-with-caveat: wheel built+installed (extversion 0.1.0), single-column
+    index + upstream queries answer. Caveats: GitHub outage → local-repo
+    fetch override + hand-synced bundle stamp; from-scratch wipe+rebuild
+    re-proven at 2.8. Measured ledger (supersedes §3 prose for upstream
+    d57ef58): 15/16 reloptions present upstream (all but `field_weights`;
+    `score_stop_words` + five TIN options ARE registered upstream), no
+    `stannum.*` GUCs at all, `tokenize`/`ql_parse` IMMUTABLE PARALLEL SAFE
+    upstream vs 0.4.0's STABLE/UNSAFE.
   - Goal: prove the L3 install path on day one, scoped to what stock upstream
     provides.
   - Scope: pgembed `pgbuild/Makefile` pin → `stn3` HEAD; build wheel; install.
