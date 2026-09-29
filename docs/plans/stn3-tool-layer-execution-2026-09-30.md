@@ -46,7 +46,7 @@ design disagree, **the design wins** and this plan gets a fix.
     is green (build + upstream's own tests, PG 17 and 18).
   - Review focus: no source changes ride along with the branch creation.
 
-- [ ] **0.2 `contract/` skeleton**
+- [x] **0.2 `contract/` skeleton** (1a0a7b0)
   - Goal: the adapted engine-agnostic runner compiles and runs empty.
   - Scope: port `conformance/{run.py,cases,expected,divergences}` structure
     from upstream into `contract/`; empty case list; `--help` works.
