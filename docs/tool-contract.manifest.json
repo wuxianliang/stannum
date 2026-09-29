@@ -1,0 +1,3448 @@
+{
+  "access_method": {
+    "handler": "amhandler",
+    "line": 28,
+    "name": "stannum",
+    "source": "postgres/sql/stannum--0.4.0.sql",
+    "type": "index"
+  },
+  "extension": {
+    "control": "postgres/stannum.control",
+    "default_version": "0.4.0",
+    "name": "stannum",
+    "relocatable": false,
+    "schema": "stannum",
+    "superuser": true
+  },
+  "functions": [
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": null,
+          "quoted": false,
+          "type": "internal",
+          "type_canonical": "internal",
+          "type_sql": "internal"
+        }
+      ],
+      "identity": "amhandler(internal)",
+      "language": "c",
+      "leakproof": false,
+      "line": 24,
+      "name": "amhandler",
+      "or_replace": true,
+      "parallel": "SAFE",
+      "quoted": false,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "index_am_handler",
+        "type_canonical": "index_am_handler",
+        "type_sql": "index_am_handler"
+      },
+      "schema": "stannum",
+      "signature": "amhandler(internal) → index_am_handler",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": "@extschema@",
+      "strict": true,
+      "support": null,
+      "symbol": "amhandler_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "preset",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "builtin_stop_words(text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 34,
+      "name": "builtin_stop_words",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "setof",
+        "setof": true,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "builtin_stop_words(\"preset\" text) → SETOF text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "builtin_stop_words_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "ctid",
+          "quoted": true,
+          "type": "tid",
+          "type_canonical": "tid",
+          "type_sql": "tid"
+        }
+      ],
+      "identity": "full_score(tid)",
+      "language": "c",
+      "leakproof": false,
+      "line": 45,
+      "name": "full_score",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "real",
+        "type_canonical": "float4",
+        "type_sql": "real"
+      },
+      "schema": "stannum",
+      "signature": "full_score(\"ctid\" tid) → real",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": "score_support",
+      "support_line": 462,
+      "symbol": "full_score_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "ctid",
+          "quoted": true,
+          "type": "tid",
+          "type_canonical": "tid",
+          "type_sql": "tid"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "k1",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "b",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        }
+      ],
+      "identity": "full_score(tid,float4,float4)",
+      "language": "c",
+      "leakproof": false,
+      "line": 56,
+      "name": "full_score",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "real",
+        "type_canonical": "float4",
+        "type_sql": "real"
+      },
+      "schema": "stannum",
+      "signature": "full_score(\"ctid\" tid, \"k1\" real, \"b\" real) → real",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": "score_support",
+      "support_line": 463,
+      "symbol": "full_score_with_bm25_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'<b>'",
+          "has_default": true,
+          "mode": null,
+          "name": "begin_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'</b>'",
+          "has_default": true,
+          "mode": null,
+          "name": "end_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "highlight(text,text,text,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 69,
+      "name": "highlight",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "highlight(\"text\" text, \"begin_tag\" text = '<b>', \"end_tag\" text = '</b>', \"query\" text = NULL) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": "highlight_support",
+      "support_line": 265,
+      "symbol": "highlight_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "begin_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "end_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "field",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "highlight(text,text,text,text,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 83,
+      "name": "highlight",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "highlight(\"text\" text, \"begin_tag\" text, \"end_tag\" text, \"query\" text, \"field\" text) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "highlight_field_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "wrap_to",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "highlight_ansi(text,int4,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 98,
+      "name": "highlight_ansi",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "highlight_ansi(\"text\" text, \"wrap_to\" int = NULL, \"query\" text = NULL) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": "highlight_support",
+      "support_line": 267,
+      "symbol": "highlight_ansi_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "request",
+          "quoted": true,
+          "type": "internal",
+          "type_canonical": "internal",
+          "type_sql": "internal"
+        }
+      ],
+      "identity": "highlight_support(internal)",
+      "language": "c",
+      "leakproof": false,
+      "line": 111,
+      "name": "highlight_support",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "internal",
+        "type_canonical": "internal",
+        "type_sql": "internal"
+      },
+      "schema": "stannum",
+      "signature": "highlight_support(\"request\" internal) → internal",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "highlight_support_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        }
+      ],
+      "identity": "index_analysis(regclass)",
+      "language": "c",
+      "leakproof": false,
+      "line": 122,
+      "name": "index_analysis",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": [
+          {
+            "name": "index_name",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          },
+          {
+            "name": "recorded_jieba_version",
+            "quoted": true,
+            "type": "int",
+            "type_canonical": "int4",
+            "type_sql": "INT"
+          },
+          {
+            "name": "recorded_dict_fingerprint",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "runtime_jieba_version",
+            "quoted": true,
+            "type": "int",
+            "type_canonical": "int4",
+            "type_sql": "INT"
+          },
+          {
+            "name": "runtime_dict_fingerprint",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "matches",
+            "quoted": true,
+            "type": "bool",
+            "type_canonical": "bool",
+            "type_sql": "bool"
+          },
+          {
+            "name": "status",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          }
+        ],
+        "kind": "table",
+        "setof": false,
+        "type": null
+      },
+      "schema": "stannum",
+      "signature": "index_analysis(\"index\" regclass) → TABLE(index_name text, recorded_jieba_version int, recorded_dict_fingerprint bigint, runtime_jieba_version int, runtime_dict_fingerprint bigint, matches bool, status text)",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "index_analysis_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        }
+      ],
+      "identity": "index_reads_allowed(regclass)",
+      "language": "c",
+      "leakproof": false,
+      "line": 141,
+      "name": "index_reads_allowed",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "bool",
+        "type_canonical": "bool",
+        "type_sql": "bool"
+      },
+      "schema": "stannum",
+      "signature": "index_reads_allowed(\"index\" regclass) → bool",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "index_reads_allowed_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        }
+      ],
+      "identity": "index_stats(regclass)",
+      "language": "c",
+      "leakproof": false,
+      "line": 153,
+      "name": "index_stats",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": false,
+      "returns": {
+        "columns": [
+          {
+            "name": "documents",
+            "quoted": false,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "dead_documents",
+            "quoted": false,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "dead_ratio",
+            "quoted": false,
+            "type": "float8",
+            "type_canonical": "float8",
+            "type_sql": "float8"
+          },
+          {
+            "name": "segments",
+            "quoted": false,
+            "type": "int",
+            "type_canonical": "int4",
+            "type_sql": "int"
+          },
+          {
+            "name": "immutable_segments",
+            "quoted": false,
+            "type": "int",
+            "type_canonical": "int4",
+            "type_sql": "int"
+          },
+          {
+            "name": "mutable_segments",
+            "quoted": false,
+            "type": "int",
+            "type_canonical": "int4",
+            "type_sql": "int"
+          },
+          {
+            "name": "next_generation",
+            "quoted": false,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "total_pages",
+            "quoted": false,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "dictionary_pages",
+            "quoted": false,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "total_length",
+            "quoted": false,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "average_length",
+            "quoted": false,
+            "type": "float8",
+            "type_canonical": "float8",
+            "type_sql": "float8"
+          },
+          {
+            "name": "analysis_matches",
+            "quoted": false,
+            "type": "bool",
+            "type_canonical": "bool",
+            "type_sql": "bool"
+          },
+          {
+            "name": "analysis_detail",
+            "quoted": false,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "text"
+          }
+        ],
+        "kind": "table",
+        "setof": false,
+        "type": null
+      },
+      "schema": "stannum",
+      "signature": "index_stats(\"index\" regclass) → TABLE(documents bigint, dead_documents bigint, dead_ratio float8, segments int, immutable_segments int, mutable_segments int, next_generation bigint, total_pages bigint, dictionary_pages bigint, total_length bigint, average_length float8, analysis_matches bool, analysis_detail text)",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": "@extschema@",
+      "strict": true,
+      "support": null,
+      "symbol": "index_stats_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "input",
+          "quoted": true,
+          "type": "cstring",
+          "type_canonical": "cstring",
+          "type_sql": "cstring"
+        }
+      ],
+      "identity": "indexed_query_in(cstring)",
+      "language": "c",
+      "leakproof": false,
+      "line": 175,
+      "name": "indexed_query_in",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "indexed_query",
+        "type_canonical": "indexed_query",
+        "type_sql": "indexed_query"
+      },
+      "schema": "stannum",
+      "signature": "indexed_query_in(\"input\" cstring) → indexed_query",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "indexed_query_in_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "input",
+          "quoted": true,
+          "type": "indexed_query",
+          "type_canonical": "indexed_query",
+          "type_sql": "indexed_query"
+        }
+      ],
+      "identity": "indexed_query_out(indexed_query)",
+      "language": "c",
+      "leakproof": false,
+      "line": 184,
+      "name": "indexed_query_out",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "cstring",
+        "type_canonical": "cstring",
+        "type_sql": "cstring"
+      },
+      "schema": "stannum",
+      "signature": "indexed_query_out(\"input\" indexed_query) → cstring",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "indexed_query_out_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "oid",
+          "type_canonical": "oid",
+          "type_sql": "oid"
+        }
+      ],
+      "identity": "bind_query(text,oid)",
+      "language": "c",
+      "leakproof": false,
+      "line": 204,
+      "name": "bind_query",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "indexed_query",
+        "type_canonical": "indexed_query",
+        "type_sql": "indexed_query"
+      },
+      "schema": "stannum",
+      "signature": "bind_query(\"query\" text, \"index\" oid) → indexed_query",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "bind_query_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "begin_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "end_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "indexed_query",
+          "type_canonical": "indexed_query",
+          "type_sql": "indexed_query"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "field",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "highlight(text,text,text,indexed_query,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 216,
+      "name": "highlight",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "highlight(\"text\" text, \"begin_tag\" text, \"end_tag\" text, \"query\" indexed_query, \"field\" text) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "highlight_bound_field_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "wrap_to",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "indexed_query",
+          "type_canonical": "indexed_query",
+          "type_sql": "indexed_query"
+        }
+      ],
+      "identity": "highlight_ansi(text,int4,indexed_query)",
+      "language": "c",
+      "leakproof": false,
+      "line": 231,
+      "name": "highlight_ansi",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "highlight_ansi(\"text\" text, \"wrap_to\" int, \"query\" indexed_query) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "highlight_ansi_bound_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "begin_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "end_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "indexed_query",
+          "type_canonical": "indexed_query",
+          "type_sql": "indexed_query"
+        }
+      ],
+      "identity": "highlight(text,text,text,indexed_query)",
+      "language": "c",
+      "leakproof": false,
+      "line": 244,
+      "name": "highlight",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "highlight(\"text\" text, \"begin_tag\" text, \"end_tag\" text, \"query\" indexed_query) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "highlight_bound_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "word",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "0",
+          "has_default": true,
+          "mode": null,
+          "name": "freq",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "jieba_add_word(text,int4,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 274,
+      "name": "jieba_add_word",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "void",
+        "type_canonical": "void",
+        "type_sql": "void"
+      },
+      "schema": "stannum",
+      "signature": "jieba_add_word(\"word\" text, \"freq\" int = 0, \"tag\" text = NULL) → void",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "jieba_add_word_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "word",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "jieba_delete_word(text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 287,
+      "name": "jieba_delete_word",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "void",
+        "type_canonical": "void",
+        "type_sql": "void"
+      },
+      "schema": "stannum",
+      "signature": "jieba_delete_word(\"word\" text) → void",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "jieba_delete_word_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [],
+      "identity": "jieba_dict_version()",
+      "language": "c",
+      "leakproof": false,
+      "line": 298,
+      "name": "jieba_dict_version",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "bigint",
+        "type_canonical": "int8",
+        "type_sql": "bigint"
+      },
+      "schema": "stannum",
+      "signature": "jieba_dict_version() → bigint",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "jieba_dict_version_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [],
+      "identity": "jieba_reload_dict()",
+      "language": "c",
+      "leakproof": false,
+      "line": 307,
+      "name": "jieba_reload_dict",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "void",
+        "type_canonical": "void",
+        "type_sql": "void"
+      },
+      "schema": "stannum",
+      "signature": "jieba_reload_dict() → void",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "jieba_reload_dict_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        }
+      ],
+      "identity": "logs_removal_horizons(regclass)",
+      "language": "c",
+      "leakproof": false,
+      "line": 316,
+      "name": "logs_removal_horizons",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "bool",
+        "type_canonical": "bool",
+        "type_sql": "bool"
+      },
+      "schema": "stannum",
+      "signature": "logs_removal_horizons(\"index\" regclass) → bool",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "logs_removal_horizons_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "ctid",
+          "quoted": true,
+          "type": "tid",
+          "type_canonical": "tid",
+          "type_sql": "tid"
+        }
+      ],
+      "identity": "max_score(tid)",
+      "language": "c",
+      "leakproof": false,
+      "line": 327,
+      "name": "max_score",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "real",
+        "type_canonical": "float4",
+        "type_sql": "real"
+      },
+      "schema": "stannum",
+      "signature": "max_score(\"ctid\" tid) → real",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": "score_support",
+      "support_line": 465,
+      "symbol": "max_score_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "maybe_quote(text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 338,
+      "name": "maybe_quote",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "maybe_quote(\"text\" text) → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "maybe_quote_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "true",
+          "has_default": true,
+          "mode": null,
+          "name": "surface",
+          "quoted": true,
+          "type": "bool",
+          "type_canonical": "bool",
+          "type_sql": "bool"
+        },
+        {
+          "default": "'unicode'",
+          "has_default": true,
+          "mode": null,
+          "name": "tokenizer",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'fold'",
+          "has_default": true,
+          "mode": null,
+          "name": "case_folding",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'fold'",
+          "has_default": true,
+          "mode": null,
+          "name": "accent_folding",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'split'",
+          "has_default": true,
+          "mode": null,
+          "name": "long_tokens",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "256",
+          "has_default": true,
+          "mode": null,
+          "name": "max_token_bytes",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": "'emoji'",
+          "has_default": true,
+          "mode": null,
+          "name": "graphemes",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'preserve'",
+          "has_default": true,
+          "mode": null,
+          "name": "position_gaps",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "ql_parse(text,bool,text,text,text,text,int4,text,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 349,
+      "name": "ql_parse",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "ql_parse(\"query\" text, \"surface\" bool = true, \"tokenizer\" text = 'unicode', \"case_folding\" text = 'fold', \"accent_folding\" text = 'fold', \"long_tokens\" text = 'split', \"max_token_bytes\" int = 256, \"graphemes\" text = 'emoji', \"position_gaps\" text = 'preserve') → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "ql_parse_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "ctid",
+          "quoted": true,
+          "type": "tid",
+          "type_canonical": "tid",
+          "type_sql": "tid"
+        },
+        {
+          "default": "0.10",
+          "has_default": true,
+          "mode": null,
+          "name": "dense_ratio",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "k1",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "b",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "term_add",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "term_replace",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        }
+      ],
+      "identity": "score(tid,float4,float4,float4,text[],text[])",
+      "language": "c",
+      "leakproof": false,
+      "line": 368,
+      "name": "score",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "real",
+        "type_canonical": "float4",
+        "type_sql": "real"
+      },
+      "schema": "stannum",
+      "signature": "score(\"ctid\" tid, \"dense_ratio\" real = 0.10, \"k1\" real = NULL, \"b\" real = NULL, \"term_add\" text[] = NULL, \"term_replace\" text[] = NULL) → real",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": "score_support",
+      "support_line": 464,
+      "symbol": "score_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [
+        {
+          "action": "revoke",
+          "grantee": "PUBLIC",
+          "line": 466,
+          "privilege": "ALL"
+        }
+      ],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "document",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "heap_oid",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index_oid",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "mode",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "dense_ratio",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "k1",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "b",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "term_add",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "term_replace",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        }
+      ],
+      "identity": "score_bound(text,text,int4,int4,int4,float4,float4,float4,text[],text[])",
+      "language": "c",
+      "leakproof": false,
+      "line": 384,
+      "name": "score_bound",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "real",
+        "type_canonical": "float4",
+        "type_sql": "real"
+      },
+      "schema": "stannum",
+      "signature": "score_bound(\"document\" text, \"query\" text, \"heap_oid\" int, \"index_oid\" int, \"mode\" int, \"dense_ratio\" real, \"k1\" real, \"b\" real, \"term_add\" text[], \"term_replace\" text[]) → real",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "score_bound_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [
+        {
+          "action": "revoke",
+          "grantee": "PUBLIC",
+          "line": 467,
+          "privilege": "ALL"
+        }
+      ],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "ctid",
+          "quoted": true,
+          "type": "tid",
+          "type_canonical": "tid",
+          "type_sql": "tid"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "heap_oid",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index_oid",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "mode",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "dense_ratio",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "k1",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "b",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "term_add",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "term_replace",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        }
+      ],
+      "identity": "score_bound_indexed(tid,text,int4,int4,int4,float4,float4,float4,text[],text[])",
+      "language": "c",
+      "leakproof": false,
+      "line": 404,
+      "name": "score_bound_indexed",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "real",
+        "type_canonical": "float4",
+        "type_sql": "real"
+      },
+      "schema": "stannum",
+      "signature": "score_bound_indexed(\"ctid\" tid, \"query\" text, \"heap_oid\" int, \"index_oid\" int, \"mode\" int, \"dense_ratio\" real, \"k1\" real, \"b\" real, \"term_add\" text[], \"term_replace\" text[]) → real",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "score_bound_indexed_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "0.10",
+          "has_default": true,
+          "mode": null,
+          "name": "dense_ratio",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "term_add",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "term_replace",
+          "quoted": true,
+          "type": "text[]",
+          "type_canonical": "text[]",
+          "type_sql": "TEXT[]"
+        }
+      ],
+      "identity": "score_inspect(regclass,text,float4,text[],text[])",
+      "language": "c",
+      "leakproof": false,
+      "line": 424,
+      "name": "score_inspect",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": [
+          {
+            "name": "term",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          },
+          {
+            "name": "weight",
+            "quoted": true,
+            "type": "real",
+            "type_canonical": "float4",
+            "type_sql": "real"
+          }
+        ],
+        "kind": "table",
+        "setof": false,
+        "type": null
+      },
+      "schema": "stannum",
+      "signature": "score_inspect(\"index\" regclass, \"query\" text, \"dense_ratio\" real = 0.10, \"term_add\" text[] = NULL, \"term_replace\" text[] = NULL) → TABLE(term text, weight real)",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "score_inspect_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "request",
+          "quoted": true,
+          "type": "internal",
+          "type_canonical": "internal",
+          "type_sql": "internal"
+        }
+      ],
+      "identity": "score_support(internal)",
+      "language": "c",
+      "leakproof": false,
+      "line": 442,
+      "name": "score_support",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "internal",
+        "type_canonical": "internal",
+        "type_sql": "internal"
+      },
+      "schema": "stannum",
+      "signature": "score_support(\"request\" internal) → internal",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "score_support_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "10",
+          "has_default": true,
+          "mode": null,
+          "name": "limit",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": "'html'",
+          "has_default": true,
+          "mode": null,
+          "name": "snippet",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'<mark>'",
+          "has_default": true,
+          "mode": null,
+          "name": "begin_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'</mark>'",
+          "has_default": true,
+          "mode": null,
+          "name": "end_tag",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "k1",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        },
+        {
+          "default": "NULL",
+          "has_default": true,
+          "mode": null,
+          "name": "b",
+          "quoted": true,
+          "type": "real",
+          "type_canonical": "float4",
+          "type_sql": "real"
+        }
+      ],
+      "identity": "search(regclass,text,int4,text,text,text,float4,float4)",
+      "language": "c",
+      "leakproof": false,
+      "line": 473,
+      "name": "search",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": [
+          {
+            "name": "ctid",
+            "quoted": true,
+            "type": "tid",
+            "type_canonical": "tid",
+            "type_sql": "tid"
+          },
+          {
+            "name": "score",
+            "quoted": true,
+            "type": "real",
+            "type_canonical": "float4",
+            "type_sql": "real"
+          },
+          {
+            "name": "snippet",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          }
+        ],
+        "kind": "table",
+        "setof": false,
+        "type": null
+      },
+      "schema": "stannum",
+      "signature": "search(\"index\" regclass, \"query\" text, \"limit\" int = 10, \"snippet\" text = 'html', \"begin_tag\" text = '<mark>', \"end_tag\" text = '</mark>', \"k1\" real = NULL, \"b\" real = NULL) → TABLE(ctid tid, score real, snippet text)",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "search_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "search_count(regclass,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 495,
+      "name": "search_count",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "bigint",
+        "type_canonical": "int8",
+        "type_sql": "bigint"
+      },
+      "schema": "stannum",
+      "signature": "search_count(\"index\" regclass, \"query\" text) → bigint",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "search_count_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        }
+      ],
+      "identity": "segment_info(regclass)",
+      "language": "c",
+      "leakproof": false,
+      "line": 507,
+      "name": "segment_info",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": [
+          {
+            "name": "ordinal",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "kind",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          },
+          {
+            "name": "root_block",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "docs",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "dead_docs",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "sum_doc_lengths",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "total_pages",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          },
+          {
+            "name": "generation",
+            "quoted": true,
+            "type": "bigint",
+            "type_canonical": "int8",
+            "type_sql": "bigint"
+          }
+        ],
+        "kind": "table",
+        "setof": false,
+        "type": null
+      },
+      "schema": "stannum",
+      "signature": "segment_info(\"index\" regclass) → TABLE(ordinal bigint, kind text, root_block bigint, docs bigint, dead_docs bigint, sum_doc_lengths bigint, total_pages bigint, generation bigint)",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "segment_info_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "document",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "stannum_text_cmpfunc(text,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 527,
+      "name": "stannum_text_cmpfunc",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "bool",
+        "type_canonical": "bool",
+        "type_sql": "bool"
+      },
+      "schema": "stannum",
+      "signature": "stannum_text_cmpfunc(\"document\" text, \"query\" text) → bool",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": "stannum_text_cmpfunc_support",
+      "support_line": 600,
+      "symbol": "stannum_text_cmpfunc_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "document",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "query",
+          "quoted": true,
+          "type": "indexed_query",
+          "type_canonical": "indexed_query",
+          "type_sql": "indexed_query"
+        }
+      ],
+      "identity": "stannum_text_cmpfunc_indexed(text,indexed_query)",
+      "language": "c",
+      "leakproof": false,
+      "line": 539,
+      "name": "stannum_text_cmpfunc_indexed",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "bool",
+        "type_canonical": "bool",
+        "type_sql": "bool"
+      },
+      "schema": "stannum",
+      "signature": "stannum_text_cmpfunc_indexed(\"document\" text, \"query\" indexed_query) → bool",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "stannum_text_cmpfunc_indexed_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "request",
+          "quoted": true,
+          "type": "internal",
+          "type_canonical": "internal",
+          "type_sql": "internal"
+        }
+      ],
+      "identity": "stannum_text_cmpfunc_support(internal)",
+      "language": "c",
+      "leakproof": false,
+      "line": 551,
+      "name": "stannum_text_cmpfunc_support",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "internal",
+        "type_canonical": "internal",
+        "type_sql": "internal"
+      },
+      "schema": "stannum",
+      "signature": "stannum_text_cmpfunc_support(\"request\" internal) → internal",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "stannum_text_cmpfunc_support_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": null,
+          "quoted": false,
+          "type": "internal",
+          "type_canonical": "internal",
+          "type_sql": "internal"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": null,
+          "quoted": false,
+          "type": "oid",
+          "type_canonical": "oid",
+          "type_sql": "oid"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": null,
+          "quoted": false,
+          "type": "internal",
+          "type_canonical": "internal",
+          "type_sql": "internal"
+        },
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": null,
+          "quoted": false,
+          "type": "integer",
+          "type_canonical": "int4",
+          "type_sql": "integer"
+        }
+      ],
+      "identity": "stannum_text_restrict(internal,oid,internal,int4)",
+      "language": "c",
+      "leakproof": false,
+      "line": 563,
+      "name": "stannum_text_restrict",
+      "or_replace": true,
+      "parallel": "SAFE",
+      "quoted": false,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "float8",
+        "type_canonical": "float8",
+        "type_sql": "float8"
+      },
+      "schema": "stannum",
+      "signature": "stannum_text_restrict(internal, oid, internal, integer) → float8",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": "@extschema@",
+      "strict": true,
+      "support": null,
+      "symbol": "stannum_text_restrict_wrapper",
+      "volatility": null
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "text",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'unicode'",
+          "has_default": true,
+          "mode": null,
+          "name": "tokenizer",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'fold'",
+          "has_default": true,
+          "mode": null,
+          "name": "case_folding",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'fold'",
+          "has_default": true,
+          "mode": null,
+          "name": "accent_folding",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'split'",
+          "has_default": true,
+          "mode": null,
+          "name": "long_tokens",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "256",
+          "has_default": true,
+          "mode": null,
+          "name": "max_token_bytes",
+          "quoted": true,
+          "type": "int",
+          "type_canonical": "int4",
+          "type_sql": "INT"
+        },
+        {
+          "default": "'emoji'",
+          "has_default": true,
+          "mode": null,
+          "name": "graphemes",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        },
+        {
+          "default": "'preserve'",
+          "has_default": true,
+          "mode": null,
+          "name": "position_gaps",
+          "quoted": true,
+          "type": "text",
+          "type_canonical": "text",
+          "type_sql": "TEXT"
+        }
+      ],
+      "identity": "tokenize(text,text,text,text,text,int4,text,text)",
+      "language": "c",
+      "leakproof": false,
+      "line": 607,
+      "name": "tokenize",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "setof",
+        "setof": true,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "tokenize(\"text\" text, \"tokenizer\" text = 'unicode', \"case_folding\" text = 'fold', \"accent_folding\" text = 'fold', \"long_tokens\" text = 'split', \"max_token_bytes\" int = 256, \"graphemes\" text = 'emoji', \"position_gaps\" text = 'preserve') → SETOF text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": false,
+      "support": null,
+      "symbol": "tokenize_wrapper",
+      "volatility": "STABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [
+        {
+          "default": null,
+          "has_default": false,
+          "mode": null,
+          "name": "index",
+          "quoted": true,
+          "type": "regclass",
+          "type_canonical": "regclass",
+          "type_sql": "regclass"
+        },
+        {
+          "default": "false",
+          "has_default": true,
+          "mode": null,
+          "name": "heap_check",
+          "quoted": true,
+          "type": "bool",
+          "type_canonical": "bool",
+          "type_sql": "bool"
+        }
+      ],
+      "identity": "verify_index(regclass,bool)",
+      "language": "c",
+      "leakproof": false,
+      "line": 625,
+      "name": "verify_index",
+      "or_replace": false,
+      "parallel": "UNSAFE",
+      "quoted": true,
+      "returns": {
+        "columns": [
+          {
+            "name": "severity",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          },
+          {
+            "name": "location",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          },
+          {
+            "name": "message",
+            "quoted": true,
+            "type": "text",
+            "type_canonical": "text",
+            "type_sql": "TEXT"
+          }
+        ],
+        "kind": "table",
+        "setof": false,
+        "type": null
+      },
+      "schema": "stannum",
+      "signature": "verify_index(\"index\" regclass, \"heap_check\" bool = false) → TABLE(severity text, location text, message text)",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "verify_index_wrapper",
+      "volatility": "VOLATILE"
+    },
+    {
+      "acl": [],
+      "arguments": [],
+      "identity": "version()",
+      "language": "c",
+      "leakproof": false,
+      "line": 641,
+      "name": "version",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "text",
+        "type_canonical": "text",
+        "type_sql": "TEXT"
+      },
+      "schema": "stannum",
+      "signature": "version() → text",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "version_wrapper",
+      "volatility": "IMMUTABLE"
+    },
+    {
+      "acl": [],
+      "arguments": [],
+      "identity": "wal_rmgr_id()",
+      "language": "c",
+      "leakproof": false,
+      "line": 650,
+      "name": "wal_rmgr_id",
+      "or_replace": false,
+      "parallel": "SAFE",
+      "quoted": true,
+      "returns": {
+        "columns": null,
+        "kind": "scalar",
+        "setof": false,
+        "type": "int",
+        "type_canonical": "int4",
+        "type_sql": "INT"
+      },
+      "schema": "stannum",
+      "signature": "wal_rmgr_id() → int",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "sql_schema": null,
+      "strict": true,
+      "support": null,
+      "symbol": "wal_rmgr_id_wrapper",
+      "volatility": "STABLE"
+    }
+  ],
+  "gucs": [
+    {
+      "context": "Userset",
+      "default": false,
+      "default_expression": "false",
+      "flags": "GucFlags::default()",
+      "long_description": "Legacy unstamped jieba indexes still warn; REINDEX records current analysis.",
+      "name": "stannum.strict_analysis",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "STRICT_ANALYSIS",
+      "short_description": "Reject stamped indexes with analysis drift",
+      "source_line": 99,
+      "type": "bool"
+    },
+    {
+      "context": "Userset",
+      "default": "Auto",
+      "default_expression": "VacuumMergeStrategy::Auto",
+      "enum": "VacuumMergeStrategy",
+      "enum_name_rule": "pgrx PostgresGucEnum registers the variant identifier unless #[name] is set",
+      "flags": "GucFlags::default()",
+      "long_description": "Auto currently selects direct. Reconstruct performs full validation. Oversized inputs retain the legacy fallback regardless of this setting.",
+      "name": "stannum.experimental_vacuum_merge_strategy",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "VACUUM_MERGE_STRATEGY",
+      "short_description": "Experimental VACUUM merge strategy for controlled comparisons",
+      "source_line": 107,
+      "type": "enum",
+      "values": [
+        "Auto",
+        "Direct",
+        "Reconstruct"
+      ],
+      "variants": [
+        {
+          "config_name": "Auto",
+          "hidden": false,
+          "name": "Auto",
+          "ordinal": 0
+        },
+        {
+          "config_name": "Direct",
+          "hidden": false,
+          "name": "Direct",
+          "ordinal": 1
+        },
+        {
+          "config_name": "Reconstruct",
+          "hidden": false,
+          "name": "Reconstruct",
+          "ordinal": 2
+        }
+      ]
+    },
+    {
+      "context": "Userset",
+      "default": 1048576,
+      "default_expression": "1024 * 1024",
+      "flags": "GucFlags::default()",
+      "long_description": "A fold happens before either the byte or document cap is exceeded. A single oversized document is allowed.",
+      "maximum": 67108864,
+      "maximum_expression": "64 * 1024 * 1024",
+      "minimum": 1024,
+      "minimum_expression": "1024",
+      "name": "stannum.write_buffer_bytes",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "WRITE_BUFFER_BYTES",
+      "short_description": "Encoded bytes buffered before folding into a Stannum segment",
+      "source_line": 115,
+      "type": "int"
+    },
+    {
+      "context": "Userset",
+      "default": 1024,
+      "default_expression": "1024",
+      "flags": "GucFlags::default()",
+      "long_description": "Larger merges wait for VACUUM, including those that bring the directory back under max_segments; only the 128-entry on-disk bound forces the two smallest entries to merge above this budget. Zero defers every budgeted merge.",
+      "maximum": 2147483647,
+      "maximum_expression": "i32::MAX",
+      "minimum": 0,
+      "minimum_expression": "0",
+      "name": "stannum.max_merge_docs",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "MAX_MERGE_DOCS",
+      "short_description": "Document budget for ordinary merges performed by one inserting backend per fold",
+      "source_line": 125,
+      "type": "int"
+    },
+    {
+      "context": "Userset",
+      "default": 512,
+      "default_expression": "512",
+      "flags": "GucFlags::default()",
+      "long_description": "Lower values fold sooner, producing more and smaller segments.",
+      "maximum": 1000000,
+      "maximum_expression": "1_000_000",
+      "minimum": 1,
+      "minimum_expression": "1",
+      "name": "stannum.write_buffer_docs",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "WRITE_BUFFER_DOCS",
+      "short_description": "Documents buffered before folding into a Stannum segment",
+      "source_line": 135,
+      "type": "int"
+    },
+    {
+      "context": "Userset",
+      "default": 32768,
+      "default_expression": "32_768",
+      "flags": "GucFlags::default()",
+      "long_description": "Bounds build memory; lower values write more segments.",
+      "maximum": 10000000,
+      "maximum_expression": "10_000_000",
+      "minimum": 1,
+      "minimum_expression": "1",
+      "name": "stannum.build_segment_docs",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "BUILD_SEGMENT_DOCS",
+      "short_description": "Documents an index build accumulates per Stannum segment",
+      "source_line": 145,
+      "type": "int"
+    },
+    {
+      "context": "Userset",
+      "default": 128,
+      "default_expression": "MAX_SEGMENTS as i32",
+      "flags": "GucFlags::default()",
+      "long_description": "A soft bound: inserts merge the smallest entries within their budget, VACUUM without one. Tiered merges keep the count far lower. The on-disk directory holds at most 128 entries, a hard bound inserts enforce whatever the cost.",
+      "maximum": 128,
+      "maximum_expression": "MAX_SEGMENTS as i32",
+      "minimum": 1,
+      "minimum_expression": "1",
+      "name": "stannum.max_segments",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "MAX_SEGMENTS_GUC",
+      "short_description": "Segments an index directory may hold before its smallest entries merge",
+      "source_line": 155,
+      "type": "int"
+    },
+    {
+      "context": "Userset",
+      "default": 8,
+      "default_expression": "8",
+      "flags": "GucFlags::default()",
+      "long_description": "Segments are tiered by document count in powers of this factor; a tier holding this many segments merges them into one segment of the next tier.",
+      "maximum": 64,
+      "maximum_expression": "MAX_MERGE_TIER_FACTOR",
+      "minimum": 2,
+      "minimum_expression": "MIN_MERGE_TIER_FACTOR",
+      "name": "stannum.merge_tier_factor",
+      "registered_in": "postgres/src/storage/mod.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "MERGE_TIER_FACTOR",
+      "short_description": "Stannum segments per size tier before they merge",
+      "source_line": 165,
+      "type": "int"
+    },
+    {
+      "context": "Postmaster",
+      "default": 128,
+      "default_expression": "pg_sys::RM_MIN_CUSTOM_ID as i32",
+      "flags": "GucFlags::default()",
+      "long_description": "Must be identical on the primary and every standby, and unused by other extensions. Effective only with shared_preload_libraries.",
+      "maximum": 255,
+      "maximum_expression": "pg_sys::RM_MAX_CUSTOM_ID as i32",
+      "minimum": 128,
+      "minimum_expression": "pg_sys::RM_MIN_CUSTOM_ID as i32",
+      "name": "stannum.wal_rmgr_id",
+      "registered_in": "postgres/src/storage/wal.rs",
+      "registered_in_function": "init",
+      "registered_when": "shared_preload_libraries",
+      "setting": "RMGR_ID",
+      "short_description": "Custom WAL resource manager id used for Stannum removal-horizon records",
+      "source_line": 71,
+      "type": "int"
+    },
+    {
+      "context": "Userset",
+      "default": true,
+      "default_expression": "true",
+      "flags": "GucFlags::default()",
+      "long_description": "Off leaves the bitmap index scan path, which rechecks nothing either.",
+      "name": "stannum.enable_custom_scan",
+      "registered_in": "postgres/src/customscan.rs",
+      "registered_in_function": "init",
+      "registered_when": "init",
+      "setting": "ENABLE",
+      "short_description": "Enable Stannum's custom scan nodes for ==> queries",
+      "source_line": 107,
+      "type": "bool"
+    }
+  ],
+  "index_limit_errors": [
+    {
+      "message": "stannum multi-column indexes support at most 16 key columns",
+      "source": "postgres/src/storage/mod.rs",
+      "source_line": 1888
+    },
+    {
+      "message": "stannum multi-column indexes reject expression keys",
+      "source": "postgres/src/storage/mod.rs",
+      "source_line": 1895
+    }
+  ],
+  "operator_classes": [
+    {
+      "access_method": "stannum",
+      "default": true,
+      "for_type": "text",
+      "items": [
+        {
+          "arguments": [
+            "text",
+            "text"
+          ],
+          "arguments_canonical": [
+            "text",
+            "text"
+          ],
+          "kind": "operator",
+          "name": "==>",
+          "schema": "pg_catalog",
+          "strategy": 1
+        },
+        {
+          "arguments": [
+            "text",
+            "indexed_query"
+          ],
+          "arguments_canonical": [
+            "text",
+            "indexed_query"
+          ],
+          "kind": "operator",
+          "name": "==>",
+          "schema": "pg_catalog",
+          "strategy": 2
+        },
+        {
+          "kind": "storage",
+          "type": "text"
+        }
+      ],
+      "line": 595,
+      "name": "stannum_text_ops",
+      "schema": "stannum",
+      "source": "postgres/sql/stannum--0.4.0.sql"
+    }
+  ],
+  "operators": [
+    {
+      "identity": "==>(text,text)",
+      "left_type": "text",
+      "left_type_canonical": "text",
+      "line": 581,
+      "name": "==>",
+      "procedure": "stannum_text_cmpfunc",
+      "procedure_parallel": "SAFE",
+      "procedure_strict": true,
+      "procedure_support": "stannum_text_cmpfunc_support",
+      "procedure_volatility": "IMMUTABLE",
+      "restrict": "stannum_text_restrict",
+      "right_type": "text",
+      "right_type_canonical": "text",
+      "schema": "pg_catalog",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "support": null
+    },
+    {
+      "identity": "==>(text,indexed_query)",
+      "left_type": "text",
+      "left_type_canonical": "text",
+      "line": 588,
+      "name": "==>",
+      "procedure": "stannum_text_cmpfunc_indexed",
+      "procedure_parallel": "SAFE",
+      "procedure_strict": true,
+      "procedure_support": null,
+      "procedure_volatility": "STABLE",
+      "restrict": "stannum_text_restrict",
+      "right_type": "indexed_query",
+      "right_type_canonical": "indexed_query",
+      "schema": "pg_catalog",
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "support": null
+    }
+  ],
+  "pg_version_floor": {
+    "evidence": "lowest pgNN feature in postgres/Cargo.toml",
+    "major": 17
+  },
+  "pgrx": {
+    "enum_name_rule": "pgrx PostgresGucEnum registers the variant identifier unless #[name] is set",
+    "version": "0.19.1"
+  },
+  "reloptions": [
+    {
+      "default": 1,
+      "default_expression": "1",
+      "description": "Ignored Stannum segment-count compatibility option",
+      "ignored": true,
+      "kind": "int",
+      "line": 199,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 4096,
+      "maximum_expression": "4096",
+      "minimum": 1,
+      "minimum_expression": "1",
+      "name": "initial_segment_count",
+      "source": "postgres/src/options.rs",
+      "tin_ignore_warning": "Stannum accepts {name} for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    },
+    {
+      "default": 1,
+      "default_expression": "1",
+      "description": "Accepted for TIN DDL compatibility; ignored by Stannum",
+      "ignored": true,
+      "kind": "int",
+      "line": 207,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 4096,
+      "maximum_expression": "4096",
+      "minimum": 1,
+      "minimum_expression": "1",
+      "name": "target_segment_count",
+      "source": "postgres/src/options.rs",
+      "tin_ignore_warning": "Stannum accepts {name} for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    },
+    {
+      "default": 4194304,
+      "default_expression": "4_194_304",
+      "description": "Accepted for TIN DDL compatibility; ignored by Stannum",
+      "ignored": true,
+      "kind": "int",
+      "line": 208,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 2147483647,
+      "maximum_expression": "i32::MAX",
+      "minimum": 131072,
+      "minimum_expression": "131_072",
+      "name": "max_mutable_segment_size",
+      "source": "postgres/src/options.rs",
+      "tin_ignore_warning": "Stannum accepts {name} for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    },
+    {
+      "default": 2000,
+      "default_expression": "2000",
+      "description": "Accepted for TIN DDL compatibility; ignored by Stannum",
+      "ignored": true,
+      "kind": "int",
+      "line": 209,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 2147483647,
+      "maximum_expression": "i32::MAX",
+      "minimum": 100,
+      "minimum_expression": "100",
+      "name": "max_merged_segment_size",
+      "source": "postgres/src/options.rs",
+      "tin_ignore_warning": "Stannum accepts {name} for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    },
+    {
+      "default": 0.5,
+      "default_expression": "0.5",
+      "description": "Accepted for TIN DDL compatibility; ignored by Stannum",
+      "ignored": true,
+      "kind": "real",
+      "line": 223,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 1.0,
+      "maximum_expression": "1.0",
+      "minimum": 0.0,
+      "minimum_expression": "0.0",
+      "name": "dead_percent_threshold",
+      "source": "postgres/src/options.rs",
+      "tin_ignore_warning": "Stannum accepts {name} for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    },
+    {
+      "default": "unicode",
+      "default_expression": "TOKENIZER_UNICODE",
+      "default_ordinal": 0,
+      "description": "Token boundary policy",
+      "domain": [
+        "unicode",
+        "whitespace",
+        "jieba"
+      ],
+      "enum_table": "TOKENIZERS",
+      "ignored": false,
+      "kind": "enum",
+      "line": 232,
+      "lock": "ShareUpdateExclusiveLock",
+      "members": [
+        {
+          "ordinal": 0,
+          "symbol": "TOKENIZER_UNICODE",
+          "symbol_value": 0,
+          "value": "unicode"
+        },
+        {
+          "ordinal": 1,
+          "symbol": "TOKENIZER_WHITESPACE",
+          "symbol_value": 1,
+          "value": "whitespace"
+        },
+        {
+          "ordinal": 2,
+          "symbol": "TOKENIZER_JIEBA",
+          "symbol_value": 2,
+          "value": "jieba"
+        }
+      ],
+      "name": "tokenizer",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": "fold",
+      "default_expression": "FOLDING_FOLD",
+      "default_ordinal": 1,
+      "description": "Case folding policy",
+      "domain": [
+        "preserve",
+        "fold"
+      ],
+      "enum_table": "FOLDINGS",
+      "ignored": false,
+      "kind": "enum",
+      "line": 241,
+      "lock": "ShareUpdateExclusiveLock",
+      "members": [
+        {
+          "ordinal": 0,
+          "symbol": "FOLDING_PRESERVE",
+          "symbol_value": 0,
+          "value": "preserve"
+        },
+        {
+          "ordinal": 1,
+          "symbol": "FOLDING_FOLD",
+          "symbol_value": 1,
+          "value": "fold"
+        }
+      ],
+      "name": "case_folding",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": "fold",
+      "default_expression": "FOLDING_FOLD",
+      "default_ordinal": 1,
+      "description": "Accent folding policy",
+      "domain": [
+        "preserve",
+        "fold"
+      ],
+      "enum_table": "FOLDINGS",
+      "ignored": false,
+      "kind": "enum",
+      "line": 250,
+      "lock": "ShareUpdateExclusiveLock",
+      "members": [
+        {
+          "ordinal": 0,
+          "symbol": "FOLDING_PRESERVE",
+          "symbol_value": 0,
+          "value": "preserve"
+        },
+        {
+          "ordinal": 1,
+          "symbol": "FOLDING_FOLD",
+          "symbol_value": 1,
+          "value": "fold"
+        }
+      ],
+      "name": "accent_folding",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": "split",
+      "default_expression": "LONG_SPLIT",
+      "default_ordinal": 2,
+      "description": "Long-token policy",
+      "domain": [
+        "truncate",
+        "discard",
+        "split"
+      ],
+      "enum_table": "LONG_MODES",
+      "ignored": false,
+      "kind": "enum",
+      "line": 259,
+      "lock": "ShareUpdateExclusiveLock",
+      "members": [
+        {
+          "ordinal": 0,
+          "symbol": "LONG_TRUNCATE",
+          "symbol_value": 0,
+          "value": "truncate"
+        },
+        {
+          "ordinal": 1,
+          "symbol": "LONG_DISCARD",
+          "symbol_value": 1,
+          "value": "discard"
+        },
+        {
+          "ordinal": 2,
+          "symbol": "LONG_SPLIT",
+          "symbol_value": 2,
+          "value": "split"
+        }
+      ],
+      "name": "long_tokens",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": 256,
+      "default_expression": "256",
+      "description": "Maximum analyzed token length",
+      "ignored": false,
+      "kind": "int",
+      "line": 268,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 2692,
+      "maximum_expression": "MAX_TOKEN_BYTES as i32",
+      "minimum": 4,
+      "minimum_expression": "tokenizer::MIN_TOKEN_BYTES as i32",
+      "name": "max_token_bytes",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": "emoji",
+      "default_expression": "GRAPHEME_EMOJI",
+      "default_ordinal": 1,
+      "description": "Standalone grapheme policy",
+      "domain": [
+        "discard",
+        "emoji",
+        "retain"
+      ],
+      "enum_table": "GRAPHEME_MODES",
+      "ignored": false,
+      "kind": "enum",
+      "line": 277,
+      "lock": "ShareUpdateExclusiveLock",
+      "members": [
+        {
+          "ordinal": 0,
+          "symbol": "GRAPHEME_DISCARD",
+          "symbol_value": 0,
+          "value": "discard"
+        },
+        {
+          "ordinal": 1,
+          "symbol": "GRAPHEME_EMOJI",
+          "symbol_value": 1,
+          "value": "emoji"
+        },
+        {
+          "ordinal": 2,
+          "symbol": "GRAPHEME_RETAIN",
+          "symbol_value": 2,
+          "value": "retain"
+        }
+      ],
+      "name": "graphemes",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": "preserve",
+      "default_expression": "GAPS_PRESERVE",
+      "default_ordinal": 1,
+      "description": "Position policy for removed tokens",
+      "domain": [
+        "collapse",
+        "preserve"
+      ],
+      "enum_table": "GAP_MODES",
+      "ignored": false,
+      "kind": "enum",
+      "line": 286,
+      "lock": "ShareUpdateExclusiveLock",
+      "members": [
+        {
+          "ordinal": 0,
+          "symbol": "GAPS_COLLAPSE",
+          "symbol_value": 0,
+          "value": "collapse"
+        },
+        {
+          "ordinal": 1,
+          "symbol": "GAPS_PRESERVE",
+          "symbol_value": 1,
+          "value": "preserve"
+        }
+      ],
+      "name": "position_gaps",
+      "source": "postgres/src/options.rs"
+    },
+    {
+      "default": 1.2000000476837158,
+      "default_expression": "f64::from(Bm25Params::DEFAULT_K1)",
+      "description": "BM25 term-frequency saturation",
+      "ignored": false,
+      "kind": "real",
+      "line": 295,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 10000.0,
+      "maximum_expression": "f64::from(Bm25Params::K1_MAX)",
+      "minimum": 0.0,
+      "minimum_expression": "0.0",
+      "name": "k1",
+      "registered_value": 1.2000000476837158,
+      "source": "postgres/src/options.rs",
+      "source_literal": 1.2
+    },
+    {
+      "default": 0.75,
+      "default_expression": "f64::from(Bm25Params::DEFAULT_B)",
+      "description": "BM25 document-length normalization",
+      "ignored": false,
+      "kind": "real",
+      "line": 304,
+      "lock": "ShareUpdateExclusiveLock",
+      "maximum": 1.0,
+      "maximum_expression": "1.0",
+      "minimum": 0.0,
+      "minimum_expression": "0.0",
+      "name": "b",
+      "registered_value": 0.75,
+      "source": "postgres/src/options.rs",
+      "source_literal": 0.75
+    },
+    {
+      "alter_error": "REINDEX to change field_weights",
+      "alter_rejected": true,
+      "alter_subtypes": [
+        "AT_SetRelOptions",
+        "AT_ReplaceRelOptions",
+        "AT_ResetRelOptions"
+      ],
+      "default": null,
+      "default_expression": "std::ptr::null()",
+      "description": "Field weights as name:positive-float pairs",
+      "ignored": false,
+      "kind": "string",
+      "line": 313,
+      "lock": "ShareUpdateExclusiveLock",
+      "name": "field_weights",
+      "source": "postgres/src/options.rs",
+      "validation_errors": [
+        {
+          "message": "field_weights applies to multi-column stannum indexes",
+          "source": "postgres/src/storage/mod.rs",
+          "source_line": 1883
+        },
+        {
+          "message": "field_weights entries must be name:weight",
+          "source": "postgres/src/storage/mod.rs",
+          "source_line": 1909
+        },
+        {
+          "message": "field_weights weights must be finite positive numbers",
+          "source": "postgres/src/storage/mod.rs",
+          "source_line": 1911
+        },
+        {
+          "message": "invalid field_weights",
+          "source": "postgres/src/storage/mod.rs",
+          "source_line": 1914
+        },
+        {
+          "message": "field_weights names must match index columns",
+          "source": "postgres/src/storage/mod.rs",
+          "source_line": 1917
+        },
+        {
+          "message": "field_weights names must be a permutation of index columns",
+          "source": "postgres/src/storage/mod.rs",
+          "source_line": 1922
+        }
+      ],
+      "validator": null
+    },
+    {
+      "default": null,
+      "default_expression": "std::ptr::null()",
+      "description": "Literal scoring terms or auto/auto:zh/auto:en presets; full_score ignores this list",
+      "ignored": false,
+      "kind": "string",
+      "line": 321,
+      "lock": "ShareUpdateExclusiveLock",
+      "name": "score_stop_words",
+      "source": "postgres/src/options.rs",
+      "validator": null
+    }
+  ],
+  "sources": {
+    "constants": [
+      "postgres/src/bm25.rs",
+      "postgres/src/udfs.rs",
+      "postgres/src/storage/layout.rs",
+      "tokenizer/src/spec.rs"
+    ],
+    "control": "postgres/stannum.control",
+    "gucs": [
+      "postgres/src/storage/mod.rs",
+      "postgres/src/storage/wal.rs",
+      "postgres/src/customscan.rs"
+    ],
+    "pg_macros": "access/rmgr.h",
+    "reloptions": "postgres/src/options.rs",
+    "sql": "postgres/sql/stannum--0.4.0.sql"
+  },
+  "sql_statements_consumed": 60,
+  "tables": [
+    {
+      "acl": [
+        {
+          "action": "revoke",
+          "grantee": "PUBLIC",
+          "line": 17,
+          "privilege": "ALL"
+        }
+      ],
+      "columns": [
+        {
+          "check": null,
+          "constraints": [
+            "PRIMARY KEY"
+          ],
+          "default": null,
+          "name": "word",
+          "not_null": false,
+          "primary_key": true,
+          "type": "text",
+          "type_sql": "text"
+        },
+        {
+          "check": "freq >= 0",
+          "constraints": [
+            "NOT NULL",
+            "CHECK (freq >= 0)"
+          ],
+          "default": "0",
+          "name": "freq",
+          "not_null": true,
+          "primary_key": false,
+          "type": "integer",
+          "type_sql": "integer"
+        },
+        {
+          "check": null,
+          "constraints": [],
+          "default": null,
+          "name": "tag",
+          "not_null": false,
+          "primary_key": false,
+          "type": "text",
+          "type_sql": "text"
+        }
+      ],
+      "line": 12,
+      "name": "jieba_words",
+      "schema": "stannum",
+      "source": "postgres/sql/stannum--0.4.0.sql"
+    }
+  ],
+  "types": [
+    {
+      "input": "indexed_query_in",
+      "internallength": "variable",
+      "line": 193,
+      "name": "indexed_query",
+      "options": {
+        "INPUT": "indexed_query_in",
+        "INTERNALLENGTH": "variable",
+        "OUTPUT": "indexed_query_out",
+        "STORAGE": "extended"
+      },
+      "output": "indexed_query_out",
+      "schema": "stannum",
+      "shell": true,
+      "shell_line": 171,
+      "source": "postgres/sql/stannum--0.4.0.sql",
+      "storage": "extended"
+    }
+  ],
+  "views": [
+    {
+      "column_comments": {
+        "dictionary_pages": "Pages intersected by every immutable segment's dictionary extents, whether or not this backend ever read them. EXPLAIN's Dictionary Pages Read counts only the pages a given scan actually pinned; the two differ by design and agree only for a fully-scanned index."
+      },
+      "line": 161,
+      "name": "index_health",
+      "options": {
+        "security_invoker": true
+      },
+      "query": "SELECT c.oid::regclass AS index, s.* FROM pg_class c CROSS JOIN LATERAL @extschema@.index_stats(c.oid) s WHERE c.relkind = 'i' AND c.relam = (SELECT oid FROM pg_am WHERE amname = 'stannum')",
+      "schema": "stannum",
+      "source": "postgres/sql/stannum--0.4.0.sql"
+    }
+  ]
+}
