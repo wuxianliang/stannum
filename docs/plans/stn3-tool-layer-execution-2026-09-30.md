@@ -69,7 +69,7 @@ design disagree, **the design wins** and this plan gets a fix.
 
 Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
 
-- [ ] **1.1 Generate `docs/tool-contract.md` + manifest**
+- [x] **1.1 Generate `docs/tool-contract.md` + manifest** (1f60ba5)
   - Goal: the authoritative surface, generated not hand-written.
   - Scope: generator (tools script) reading `postgres/sql/stannum--0.4.0.sql`,
     `options.rs` reloptions, GUC registrations; emits the manifest with exact
