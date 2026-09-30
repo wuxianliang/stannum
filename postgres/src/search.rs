@@ -58,8 +58,7 @@ fn validate_shape(index: &PgRelation, snippets: bool) -> SnippetKeys {
                         "stannum.search() snippets require a positive text key; use snippet => 'none' for an expression index"
                     );
                 }
-                let attribute = pg_sys::TupleDescAttr((*heap).rd_att, i32::from(attnum - 1));
-                let typid = pg_sys::getBaseType((*attribute).atttypid);
+                let typid = attribute_type((*heap).rd_att, attnum);
                 if !matches!(
                     typid,
                     pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID | pg_sys::NAMEOID
@@ -86,8 +85,7 @@ fn validate_shape(index: &PgRelation, snippets: bool) -> SnippetKeys {
         }
         let heap_oid = pg_sys::IndexGetRelation(index.oid(), false);
         let heap = pg_sys::table_open(heap_oid, pg_sys::AccessShareLock as _);
-        let attribute = pg_sys::TupleDescAttr((*heap).rd_att, i32::from(key - 1));
-        let typid = pg_sys::getBaseType((*attribute).atttypid);
+        let typid = attribute_type((*heap).rd_att, key);
         let text_compatible = matches!(
             typid,
             pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID | pg_sys::NAMEOID
@@ -99,6 +97,17 @@ fn validate_shape(index: &PgRelation, snippets: bool) -> SnippetKeys {
             );
         }
         SnippetKeys::Single(key)
+    }
+}
+
+unsafe fn attribute_type(tupdesc: pg_sys::TupleDesc, attnum: i16) -> pg_sys::Oid {
+    let index = i32::from(attnum - 1);
+    unsafe {
+        #[cfg(not(feature = "pg18"))]
+        let attribute = &(*tupdesc).attrs.as_slice((*tupdesc).natts as usize)[index as usize];
+        #[cfg(feature = "pg18")]
+        let attribute = &*pg_sys::TupleDescAttr(tupdesc, index);
+        pg_sys::getBaseType(attribute.atttypid)
     }
 }
 
