@@ -122,7 +122,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
 All stock-engine (single-column) behavior; no fields yet. The `postgres/src/tool/`
 module lands here. This is the largest phase; steps are independently landable.
 
-- [ ] **2.1 `postgres/src/tool/` module + module layout**
+- [x] **2.1 `postgres/src/tool/` module + module layout** (a65ab44)
   - Goal: the L2 home exists; UDFs move in step by step; `postgres/src/fields/`
     created empty with the design §3 seam docs.
   - Done when: crate builds; module docs state the seam rules; no behavior
