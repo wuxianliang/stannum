@@ -797,7 +797,7 @@
     },
     "postgres/src/tool/search.rs": {
       "owner": "ben",
-      "evidence": "Original Stannum L2 pg_tests for the search/search_count SQL surface (design sections 4.1 and 5.1). Does not copy Lead sources; the #[pg_extern] bodies live in postgres/src/search.rs."
+      "evidence": "Original Stannum L2 SQL entry points for search()/search_count() (design sections 3 and 4.1). Thin #[pg_extern] wrappers delegate to postgres/src/search.rs; this file does not import IndexScorer or storage internals."
     },
     "postgres/src/tool/score.rs": {
       "owner": "ben",

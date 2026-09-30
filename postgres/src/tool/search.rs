@@ -2,10 +2,43 @@
 //
 // See LICENSE in the repository root for license terms.
 
-//! Search-family surface pg_tests (execution plan 2.4).
+//! `search` / `search_count` SQL entry points (design §3, §4.1).
 //!
-//! The `#[pg_extern]` bodies stay in `crate::search`. This module does not
-//! import `IndexScorer`, `storage::View`, or `fields`.
+//! Wrappers only: the engine body lives in `crate::search`. This module does
+//! not import `IndexScorer`, `storage::View`, or `fields`.
+
+use pgrx::iter::TableIterator;
+use pgrx::{PgRelation, default, name, pg_extern, pg_sys};
+
+#[pg_extern(volatile, parallel_unsafe)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "SQL surface is intentionally explicit"
+)]
+fn search(
+    index: PgRelation,
+    query: Option<&str>,
+    limit: default!(i32, 10),
+    snippet: default!(&str, "'html'"),
+    begin_tag: default!(&str, "'<mark>'"),
+    end_tag: default!(&str, "'</mark>'"),
+    k1: default!(Option<f32>, "NULL"),
+    b: default!(Option<f32>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(ctid, pg_sys::ItemPointerData),
+        name!(score, f32),
+        name!(snippet, Option<String>),
+    ),
+> {
+    crate::search::search(index, query, limit, snippet, begin_tag, end_tag, k1, b)
+}
+
+#[pg_extern(volatile, parallel_unsafe)]
+fn search_count(index: PgRelation, query: Option<&str>) -> i64 {
+    crate::search::search_count(index, query)
+}
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]

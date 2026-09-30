@@ -8,7 +8,7 @@ use crate::score::{
     PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, visible_tid_pairs,
 };
 use pgrx::iter::TableIterator;
-use pgrx::{FromDatum, PgRelation, default, name, pg_extern, pg_sys};
+use pgrx::{FromDatum, PgRelation, name, pg_sys};
 use rustc_hash::FxHashMap;
 use segment::Tid;
 use std::collections::BTreeSet;
@@ -382,20 +382,20 @@ fn snippet_of_fields(
         .map(|text| (text.clone(), Vec::new()))
 }
 
-#[pg_extern(volatile, parallel_unsafe)]
+/// Standalone `search()` body. The §4.1 `#[pg_extern]` lives in `tool::search`.
 #[expect(
     clippy::too_many_arguments,
-    reason = "SQL surface is intentionally explicit"
+    reason = "matches the SQL surface the tool-layer wrapper exposes"
 )]
-fn search(
+pub(crate) fn search(
     index: PgRelation,
     query: Option<&str>,
-    limit: default!(i32, 10),
-    snippet: default!(&str, "'html'"),
-    begin_tag: default!(&str, "'<mark>'"),
-    end_tag: default!(&str, "'</mark>'"),
-    k1: default!(Option<f32>, "NULL"),
-    b: default!(Option<f32>, "NULL"),
+    limit: i32,
+    snippet: &str,
+    begin_tag: &str,
+    end_tag: &str,
+    k1: Option<f32>,
+    b: Option<f32>,
 ) -> TableIterator<
     'static,
     (
@@ -445,8 +445,8 @@ fn search(
     TableIterator::new(rows)
 }
 
-#[pg_extern(volatile, parallel_unsafe)]
-fn search_count(index: PgRelation, query: Option<&str>) -> i64 {
+/// Standalone `search_count()` body. The §4.1 `#[pg_extern]` lives in `tool::search`.
+pub(crate) fn search_count(index: PgRelation, query: Option<&str>) -> i64 {
     crate::udfs::require_stannum_index(&index, "search_count");
     let query =
         query.unwrap_or_else(|| pgrx::error!("stannum.search_count() query must not be NULL"));

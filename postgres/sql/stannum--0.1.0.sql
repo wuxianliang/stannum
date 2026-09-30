@@ -350,8 +350,8 @@ REVOKE ALL ON FUNCTION @extschema@.score_bound_indexed(pg_catalog.tid, pg_catalo
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/search.rs:385
--- stannum::search::search
+-- postgres/src/tool/search.rs:13
+-- stannum::tool::search::search
 CREATE  FUNCTION "search"(
 	"index" regclass, /* PgRelation */
 	"query" TEXT, /* Option < & str > */
@@ -372,8 +372,8 @@ AS 'MODULE_PATHNAME', 'search_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/search.rs:448
--- stannum::search::search_count
+-- postgres/src/tool/search.rs:38
+-- stannum::tool::search::search_count
 CREATE  FUNCTION "search_count"(
 	"index" regclass, /* PgRelation */
 	"query" TEXT /* Option < & str > */
