@@ -79,7 +79,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
   - Review focus: §4.1 says the snapshot+manifest are authoritative and the
     doc is a summary — no drift between them.
 
-- [ ] **1.2 Record 0.4.0 answers**
+- [x] **1.2 Record 0.4.0 answers** (646e249)
   - Goal: `contract/expected/stannum-0.4.0/*.json` from the pinned producer.
   - Scope: recording job (commit `24f5c02`, PG 17, UTF8/`--no-locale`, PG minor
     written into the JSON, jieba = empty-table fingerprint after
