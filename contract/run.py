@@ -961,9 +961,12 @@ def compare_shape(case, got):
 DIVERGENCE_KINDS = {"improvement": "IMPROVED", "gap": "GAP"}
 
 
-def read_divergences(engine, recorded):
+def read_divergences(engine, recorded, live_version=None):
     """The documented divergences of `engine` from the recorded engine-version:
-    {case id: entry}, from divergences/<engine>.yaml."""
+    {case id: entry}, from divergences/<engine>.yaml. An entry with an
+    `engines` list applies only when the live extension version is in it
+    (the same scoping exclusions use), so one shared file can carry a
+    divergence that 0.4.0 replaying itself must not see."""
     path = SUITE / "divergences" / f"{engine}.yaml"
     if not path.exists():
         return {}
@@ -980,6 +983,9 @@ def read_divergences(engine, recorded):
         if entry.get("kind") not in DIVERGENCE_KINDS:
             raise CaseError(f"{path}: {entry.get('id')}: kind must be one of {', '.join(DIVERGENCE_KINDS)}")
         if entry.get("against") == recorded:
+            scoped = entry.get("engines")
+            if scoped and live_version not in scoped:
+                continue
             chosen[entry["id"]] = entry
     return chosen
 
@@ -1268,11 +1274,18 @@ def main():
     expected_source, expected, divergences = (None, {}, {})
     expected_dir = Path(args.check) if args.check else None
     has_recordings = bool(args.check) and expected_dir.is_dir() and any(expected_dir.glob("*.json"))
+    live_version = None
     if args.check and (cases or has_recordings):
+        probe = Session(dsn, None)
+        try:
+            live_version, _server = engine_facts(probe, args.engine)
+        finally:
+            probe.close()
         expected_source, expected = read_expected(args.check)
         try:
             divergences = read_divergences(
-                args.engine, f"{expected_source.get('engine')}-{expected_source.get('extension_version')}")
+                args.engine, f"{expected_source.get('engine')}-{expected_source.get('extension_version')}",
+                live_version=live_version)
         except CaseError as error:
             sys.exit(f"invalid divergence file: {error}")
         print(f"Comparing against {expected_source.get('engine')} {expected_source.get('extension_version')} "
