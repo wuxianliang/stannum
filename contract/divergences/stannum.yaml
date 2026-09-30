@@ -2,18 +2,116 @@
 #
 # See LICENSE in the repository root for license terms.
 
-# Intentional differences from a recorded engine-version. Empty on 0.4.0.
-# A later entry may pin the error text this engine must produce (design §4.2 / #88):
-#
-# divergences:
-#   - id: some.case
-#     against: stannum-0.4.0
-#     kind: gap
-#     captures: [error]
-#     summary: error text differs from 0.4.0
-#     expected:
-#       error:
-#         sqlstate: "22023"
-#         message: "exact text"
-#         # or message_prefix: "REINDEX to change field_weights"
-divergences: []
+# Intentional differences from a recorded engine-version, keyed by the live
+# engine (stannum.yaml) and the recorded engine-version each entry is against.
+# An entry must document its difference: the expected payload pins what the
+# engine knowingly answers differently (design 4.2 / 7).
+
+divergences:
+- id: catalog.gucs
+  against: stannum-0.4.0
+  kind: gap
+  captures:
+  - settings
+  summary: 'STN3 exposes twelve engine GUCs that 0.4.0 never registered. Design 4.1:
+    a GUC that arrives with upstream is newly exposed and may be added; it inherits
+    no 0.4.0 meaning. The nine frozen GUCs match the recording field for field.'
+  expected:
+    settings:
+      extra:
+      - - stannum.count_fold
+        - 'on'
+        - 'on'
+        - null
+        - null
+        - bool
+        - user
+        - null
+      - - stannum.count_page_threshold
+        - '0'
+        - '0'
+        - '0'
+        - '2147483647'
+        - integer
+        - user
+        - null
+      - - stannum.debug_seed_score
+        - '-1'
+        - '-1'
+        - '-1'
+        - '1.79769e+308'
+        - real
+        - superuser
+        - null
+      - - stannum.deferred_merge_docs
+        - '262144'
+        - '262144'
+        - '0'
+        - '2147483647'
+        - integer
+        - user
+        - null
+      - - stannum.force_count_pages
+        - 'off'
+        - 'off'
+        - null
+        - null
+        - bool
+        - user
+        - null
+      - - stannum.max_expansion_terms
+        - '65536'
+        - '65536'
+        - '1'
+        - '2147483647'
+        - integer
+        - user
+        - null
+      - - stannum.profile_count_selection
+        - 'off'
+        - 'off'
+        - null
+        - null
+        - bool
+        - user
+        - null
+      - - stannum.read_cache_mb
+        - '64'
+        - '64'
+        - '1'
+        - '1048576'
+        - integer
+        - user
+        - null
+      - - stannum.reader_cache_mb
+        - '384'
+        - '384'
+        - '1'
+        - '1048576'
+        - integer
+        - user
+        - null
+      - - stannum.reclaim_pages
+        - '2048'
+        - '2048'
+        - '1'
+        - '1048576'
+        - integer
+        - user
+        - null
+      - - stannum.warmup_chunks
+        - '256'
+        - '256'
+        - '0'
+        - '65536'
+        - integer
+        - user
+        - null
+      - - stannum.warmup_min_matches
+        - '4'
+        - '4'
+        - '0'
+        - '1.79769e+308'
+        - real
+        - user
+        - null
