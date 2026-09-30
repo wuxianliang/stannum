@@ -1688,6 +1688,7 @@ dependencies = [
  "segment",
  "serde",
  "serde_json",
+ "siphasher",
  "thiserror",
  "tinql",
  "tokenizer",

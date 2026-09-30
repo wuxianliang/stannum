@@ -4620,6 +4620,17 @@ fn build_index_scorer(
     })
 }
 
+fn analyzed_stop_words(csv: Option<&str>, tokenizer: &impl Tokenizer) -> Option<ScoreStopWords> {
+    csv.and_then(|csv| {
+        ScoreStopWords::from_reloption(&crate::stopwords::reloption(csv, false), |word| {
+            tokenizer
+                .tokenize(word)
+                .map(|t| t.text.into_owned())
+                .collect()
+        })
+    })
+}
+
 fn build_index_scorer_inner(
     key: CacheKey,
     k1: Option<f32>,
@@ -4675,7 +4686,7 @@ fn build_index_scorer_inner(
     let stop = if key.full {
         None
     } else {
-        stop_csv.as_deref().and_then(ScoreStopWords::from_csv)
+        analyzed_stop_words(stop_csv.as_deref(), tokenizer.as_ref())
     };
 
     let view = unsafe { crate::storage::view(index.oid()) };
@@ -4879,7 +4890,7 @@ fn build_corpus(
     let stop = if key.full {
         None
     } else {
-        stop_csv.as_deref().and_then(ScoreStopWords::from_csv)
+        analyzed_stop_words(stop_csv.as_deref(), &tokenizer)
     };
     let documents = load_documents(heap_oid, index.oid());
     let positioned = tokenize_documents(&documents, |document| tokenize_doc(document, &tokenizer));
@@ -5293,7 +5304,7 @@ fn score_inspect(
             .collect::<Vec<_>>()
     });
     let stop_csv = unsafe { crate::options::score_stop_words(index.as_ptr()) };
-    let stop = stop_csv.as_deref().and_then(ScoreStopWords::from_csv);
+    let stop = analyzed_stop_words(stop_csv.as_deref(), &tokenizer);
     let ratio = DenseRatio::new(dense_ratio);
     if !ratio.is_valid() {
         pgrx::error!("dense_ratio must be finite and non-negative");

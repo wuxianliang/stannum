@@ -10,6 +10,7 @@ use pgrx::pg_guard;
 mod am;
 mod bm25;
 mod customscan;
+mod dict;
 mod fields;
 mod fold;
 #[cfg(feature = "pg_test")]
@@ -23,6 +24,7 @@ mod query_limits;
 mod score;
 mod search;
 mod selectivity;
+mod stopwords;
 mod storage;
 mod stream;
 mod tf_bucket {
@@ -4831,14 +4833,13 @@ mod tests {
     }
 
     #[pg_test]
-    fn maintenance_options_apply_to_their_own_index() {
+    fn tin_maintenance_options_do_not_override_gucs() {
         let immutable = |index: &str| {
             value(&format!(
                 "SELECT count(*) FROM stannum.segment_info('{index}') WHERE kind = 'immutable'"
             ))
         };
-        // The write buffer folds at the index's own size: the smallest one
-        // allowed, where the setting's own caps would not fold.
+        // TIN storage reloptions are accepted and ignored; GUCs govern folding.
         Spi::run(
             "CREATE TABLE per_index(body text);
              CREATE INDEX per_index_default ON per_index USING stannum(body);
@@ -4852,8 +4853,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(immutable("per_index_default"), 0);
-        assert!(immutable("per_index_small") > 0);
-        // VACUUM's cleanup brings each directory under its own bound.
+        assert_eq!(immutable("per_index_small"), 0);
+        // VACUUM's cleanup uses the GUC directory bound for every index.
         Spi::run(
             "CREATE TABLE per_bound(body text);
              CREATE INDEX per_bound_default ON per_bound USING stannum(body);
@@ -4876,7 +4877,7 @@ mod tests {
             assert_clean(index);
         }
         assert_eq!(immutable("per_bound_default"), 9);
-        assert!(immutable("per_bound_two") <= 2);
+        assert_eq!(immutable("per_bound_two"), 9);
         Spi::run("SET LOCAL enable_seqscan = off").unwrap();
         assert_eq!(
             value("SELECT count(*) FROM per_bound WHERE body ==> 'needle'"),

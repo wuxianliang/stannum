@@ -86,7 +86,9 @@ static WRITE_BUFFER_DOCS: GucSetting<i32> = GucSetting::<i32>::new(512);
 static BUILD_SEGMENT_DOCS: GucSetting<i32> = GucSetting::<i32>::new(32_768);
 /// Soft bound on directory entries; the tiered policy normally stays well
 /// below it, and the on-disk [`MAX_SEGMENTS`] is the hard bound.
-static MAX_SEGMENTS_GUC: GucSetting<i32> = GucSetting::<i32>::new(MAX_SEGMENTS as i32);
+/// GUC identity is 1..=128 default 128 (0.4.0 dump); runtime clamps to 96.
+const MAX_SEGMENTS_GUC_BOUND: i32 = 128;
+static MAX_SEGMENTS_GUC: GucSetting<i32> = GucSetting::<i32>::new(MAX_SEGMENTS_GUC_BOUND);
 /// Segments a size tier holds before they merge into one segment of the next tier.
 static MERGE_TIER_FACTOR: GucSetting<i32> = GucSetting::<i32>::new(8);
 /// Experimental comparison control; Auto has no density heuristic.
@@ -106,7 +108,17 @@ pub const MAX_MERGE_TIER_FACTOR: i32 = 64;
 
 /// Registers the tunables. Low values exist so tests can drive folds,
 /// merges and reclamation at small scale; the defaults are the intended ones.
+pub(crate) static STRICT_ANALYSIS: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 pub fn init() {
+    GucRegistry::define_bool_guc(
+        c"stannum.strict_analysis",
+        c"Reject stamped indexes with analysis drift",
+        c"Legacy unstamped jieba indexes still warn; REINDEX records current analysis.",
+        &STRICT_ANALYSIS,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_enum_guc(
         c"stannum.experimental_vacuum_merge_strategy",
         c"Experimental strategy of the merges built without the metadata lock (VACUUM, deferred, build and full-directory merges), for controlled comparisons",
@@ -171,7 +183,7 @@ pub fn init() {
         c"A soft bound: inserts merge the smallest entries within their budget, VACUUM without one. Tiered merges keep the count far lower. The on-disk directory holds at most 96 entries, a hard bound inserts enforce whatever the cost.",
         &MAX_SEGMENTS_GUC,
         1,
-        MAX_SEGMENTS as i32,
+        MAX_SEGMENTS_GUC_BOUND,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -187,32 +199,26 @@ pub fn init() {
     );
 }
 
-/// The soft directory bound: the index's `target_segment_count` when it sets
-/// one, otherwise `stannum.max_segments`.
-unsafe fn max_segments(index: pg_sys::Relation) -> usize {
-    unsafe { crate::options::target_segment_count(index) }
-        .unwrap_or(MAX_SEGMENTS_GUC.get().max(1) as usize)
-        .min(MAX_SEGMENTS)
+/// The soft directory bound from `stannum.max_segments`, clamped to the
+/// on-disk [`MAX_SEGMENTS`]. TIN `target_segment_count` is accepted and ignored.
+unsafe fn max_segments(_index: pg_sys::Relation) -> usize {
+    (MAX_SEGMENTS_GUC.get().max(1) as usize).min(MAX_SEGMENTS)
 }
 
-/// The most input bytes a merge of this index takes: its
-/// `max_merged_segment_size` when it sets one, within what a run can record.
-unsafe fn segment_bytes_cap(index: pg_sys::Relation) -> u64 {
+/// The most input bytes a merge takes: the 3 GiB format ceiling. TIN
+/// `max_merged_segment_size` is accepted and ignored.
+unsafe fn segment_bytes_cap(_index: pg_sys::Relation) -> u64 {
     #[cfg(feature = "pg_test")]
     if let Some(cap) = testing::SEGMENT_BYTES_CAP_OVERRIDE.get() {
         return cap;
     }
-    unsafe { crate::options::merged_segment_bytes(index) }
-        .unwrap_or(SEGMENT_BYTES_CAP)
-        .min(SEGMENT_BYTES_CAP)
+    SEGMENT_BYTES_CAP
 }
 
-/// Encoded bytes the write buffer of this index holds before folding: its
-/// `max_mutable_segment_size` when it sets one, otherwise
-/// `stannum.write_buffer_bytes`.
-unsafe fn write_buffer_bytes(index: pg_sys::Relation) -> usize {
-    unsafe { crate::options::mutable_segment_bytes(index) }
-        .unwrap_or(WRITE_BUFFER_BYTES.get() as usize)
+/// Encoded bytes the write buffer holds before folding:
+/// `stannum.write_buffer_bytes`. TIN `max_mutable_segment_size` is ignored.
+unsafe fn write_buffer_bytes(_index: pg_sys::Relation) -> usize {
+    WRITE_BUFFER_BYTES.get() as usize
 }
 
 fn merge_tier_factor() -> u32 {
@@ -3769,7 +3775,6 @@ unsafe fn mostly_dead(
     meta: &Meta,
     considered: &mut HashSet<u32>,
 ) -> Option<SegmentEntry> {
-    let threshold = unsafe { crate::options::dead_fraction(index) };
     for entry in &meta.segments {
         if entry.dead.is_empty() || !considered.insert(entry.generation) {
             continue;
@@ -3781,7 +3786,7 @@ unsafe fn mostly_dead(
                 .map_err(|error| format!("Stannum {what}: {error}"))
         });
         if let Some(count) = unsafe { unlocked(index, meta.identity, entry, count) }
-            && f64::from(count) >= threshold * f64::from(entry.docs)
+            && u64::from(count) * 2 >= u64::from(entry.docs)
         {
             return Some(*entry);
         }
@@ -4452,6 +4457,24 @@ pub unsafe fn segment_rows(index: pg_sys::Relation) -> Vec<SegmentRow> {
         }
         rows
     }
+}
+
+/// The meta page's next_generation, for `index_stats`.
+///
+/// # Safety
+/// `index` is a live LDP2 index.
+pub unsafe fn next_generation(index: pg_sys::Relation) -> i64 {
+    i64::from(unsafe { read_meta(index, false) }.1.next_generation)
+}
+
+/// Dictionary page coverage. stn3 has no `dictionary_extent` helper; v1
+/// reports zero. The frozen `stats.index_stats` capture does not include
+/// this column.
+///
+/// # Safety
+/// `index` is a live LDP2 index.
+pub unsafe fn dictionary_pages(_index: pg_sys::Relation) -> u64 {
+    0
 }
 
 /// Identifies the contents of an index for planner memoization: a fold, a

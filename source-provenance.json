@@ -675,7 +675,10 @@
         "postgres/src/operator.rs",
         "postgres/src/highlight_udfs.rs",
         "postgres/src/tool/highlight.rs",
+        "postgres/src/tool/diagnostics.rs",
         "postgres/src/udfs.rs",
+        "postgres/src/dict.rs",
+        "postgres/src/stopwords.rs",
         "postgres/src/lib.rs"
       ],
       "evidence": "pgrx-generated SQL from inherited and Stannum Rust definitions, including support bindings and SQL wrappers. Reapply notice after generation."
@@ -695,6 +698,10 @@
     "postgres/src/customscan.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+    },
+    "postgres/src/dict.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum empty jieba_words table, frozen empty-dictionary fingerprint, and unicode/not-applicable index_analysis. Ported from the main-line dict.rs without jieba install/load or jieba_* UDFs."
     },
     "postgres/src/fields/mod.rs": {
       "owner": "ben",
@@ -768,6 +775,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
     },
+    "postgres/src/stopwords.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum function-word presets (stannum-stopwords-v1) and auto/auto:zh/auto:en reloption expansion. Ported from the main-line stopwords.rs; builtin_stop_words SQL entry point lives in postgres/src/tool/diagnostics.rs."
+    },
     "postgres/src/storage/mod.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
@@ -791,6 +802,10 @@
     "postgres/src/tool/capabilities.rs": {
       "owner": "ben",
       "evidence": "Original Stannum capabilities() document for the tool-layer contract (design section 4.2). Not copied from Lead."
+    },
+    "postgres/src/tool/diagnostics.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L2 SQL entry points for tokenize, ql_parse, builtin_stop_words, index_stats/index_health, and index_analysis (design sections 3 and 4.1). Thin #[pg_extern] wrappers; this file does not import IndexScorer or storage internals."
     },
     "postgres/src/tool/highlight.rs": {
       "owner": "ben",

@@ -12,6 +12,17 @@ The ordering of items is not stable, it is driven by a dependency graph.
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- postgres/src/dict.rs:46
+
+CREATE TABLE @extschema@.jieba_words (
+    word text PRIMARY KEY,
+    freq integer NOT NULL DEFAULT 0 CHECK (freq >= 0),
+    tag text
+);
+REVOKE ALL ON TABLE @extschema@.jieba_words FROM PUBLIC;
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- postgres/src/am.rs:18
 -- stannum::am::amhandler
 
@@ -20,6 +31,17 @@ The ordering of items is not stable, it is driven by a dependency graph.
         PARALLEL SAFE IMMUTABLE STRICT
         LANGUAGE c AS 'MODULE_PATHNAME', 'amhandler_wrapper';
     CREATE ACCESS METHOD stannum TYPE INDEX HANDLER @extschema@.amhandler;
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- postgres/src/tool/diagnostics.rs:63
+-- stannum::tool::diagnostics::builtin_stop_words
+CREATE  FUNCTION "builtin_stop_words"(
+	"preset" TEXT /* & str */
+) RETURNS SETOF TEXT /* & '_ str */
+IMMUTABLE STRICT PARALLEL SAFE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'builtin_stop_words_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -109,6 +131,25 @@ AS 'MODULE_PATHNAME', 'highlight_support_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- postgres/src/tool/diagnostics.rs:116
+-- stannum::tool::diagnostics::index_analysis
+CREATE  FUNCTION "index_analysis"(
+	"index" regclass /* PgRelation */
+) RETURNS TABLE (
+	"index_name" TEXT,  /* String */
+	"recorded_jieba_version" INT,  /* Option < i32 > */
+	"recorded_dict_fingerprint" bigint,  /* Option < i64 > */
+	"runtime_jieba_version" INT,  /* Option < i32 > */
+	"runtime_dict_fingerprint" bigint,  /* Option < i64 > */
+	"matches" bool,  /* Option < bool > */
+	"status" TEXT  /* String */
+)
+STRICT STABLE PARALLEL UNSAFE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'index_analysis_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- postgres/src/storage/wal.rs:264
 -- stannum::storage::wal::index_reads_allowed
 CREATE  FUNCTION "index_reads_allowed"(
@@ -117,6 +158,25 @@ CREATE  FUNCTION "index_reads_allowed"(
 STRICT VOLATILE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'index_reads_allowed_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- postgres/src/tool/diagnostics.rs:73
+-- stannum::tool::diagnostics::index_stats
+
+    CREATE FUNCTION @extschema@.index_stats("index" regclass)
+    RETURNS TABLE (documents bigint, dead_documents bigint, dead_ratio float8,
+        segments int, immutable_segments int, mutable_segments int,
+        next_generation bigint, total_pages bigint, dictionary_pages bigint,
+        total_length bigint, average_length float8,
+        analysis_matches bool, analysis_detail text)
+    STRICT VOLATILE PARALLEL UNSAFE
+    LANGUAGE c AS 'MODULE_PATHNAME', 'index_stats_wrapper';
+    CREATE VIEW @extschema@.index_health WITH (security_invoker = true) AS
+    SELECT c.oid::regclass AS index, s.* FROM pg_class c
+    CROSS JOIN LATERAL @extschema@.index_stats(c.oid) s
+    WHERE c.relkind = 'i' AND c.relam = (SELECT oid FROM pg_am WHERE amname = 'stannum');
+    COMMENT ON COLUMN @extschema@.index_health.dictionary_pages IS 'Pages intersected by every immutable segment''s dictionary extents, whether or not this backend ever read them. EXPLAIN''s Dictionary Pages Read counts only the pages a given scan actually pinned; the two differ by design and agree only for a fully-scanned index.';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -256,8 +316,8 @@ AS 'MODULE_PATHNAME', 'maybe_quote_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/udfs.rs:157
--- stannum::udfs::ql_parse
+-- postgres/src/tool/diagnostics.rs:37
+-- stannum::tool::diagnostics::ql_parse
 CREATE  FUNCTION "ql_parse"(
 	"query" TEXT, /* Option < & str > */
 	"surface" bool DEFAULT true, /* bool */
@@ -269,7 +329,7 @@ CREATE  FUNCTION "ql_parse"(
 	"graphemes" TEXT DEFAULT 'emoji', /* & str */
 	"position_gaps" TEXT DEFAULT 'preserve' /* & str */
 ) RETURNS TEXT /* Option < String > */
-IMMUTABLE PARALLEL SAFE
+STABLE PARALLEL UNSAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'ql_parse_wrapper';
 /* </end connected objects> */
@@ -514,8 +574,8 @@ ALTER FUNCTION @extschema@.stannum_text_cmpfunc(pg_catalog.text, pg_catalog.text
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/udfs.rs:120
--- stannum::udfs::tokenize
+-- postgres/src/tool/diagnostics.rs:13
+-- stannum::tool::diagnostics::tokenize
 CREATE  FUNCTION "tokenize"(
 	"text" TEXT, /* Option < & '_ str > */
 	"tokenizer" TEXT DEFAULT 'unicode', /* & str */
@@ -526,7 +586,7 @@ CREATE  FUNCTION "tokenize"(
 	"graphemes" TEXT DEFAULT 'emoji', /* & str */
 	"position_gaps" TEXT DEFAULT 'preserve' /* & str */
 ) RETURNS SETOF TEXT /* String */
-IMMUTABLE PARALLEL SAFE
+STABLE PARALLEL UNSAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'tokenize_wrapper';
 /* </end connected objects> */
