@@ -10,30 +10,16 @@
  },
  "cases": [
   {
-   "id": "parallel.custom_dict",
+   "id": "stats.index_stats",
    "captures": {
-    "script": [
-     {
-      "has_parallel_worker": false
-     },
-     {
-      "has_parallel_worker": false
-     },
-     40
-    ]
-   }
-  },
-  {
-   "id": "parallel.empty_dict",
-   "captures": {
-    "script": [
-     {
-      "has_parallel_worker": true
-     },
-     {
-      "has_parallel_worker": true
-     },
-     200
+    "value": [
+     [
+      2,
+      0,
+      0.0,
+      null,
+      null
+     ]
     ]
    }
   }

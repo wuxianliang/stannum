@@ -4,26 +4,49 @@
   "extension_version": "0.4.0",
   "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
   "host": "postgresql 17.11 homebrew aarch64",
-  "suite_commit": "fbf3d98b4cbb55650d664857de87eb51966ef8a1",
+  "suite_commit": "ce1ae6c34252da0f2e6642610599fdd3039611bc",
+  "extension_commit": "32211c25ddc86453e539c4d668d657e3e2f500e9",
   "runner_version": "2"
  },
  "cases": [
   {
    "id": "fields.phrase_no_cross",
    "captures": {
-    "value": 1
+    "value": [
+     [
+      1
+     ],
+     [
+      7
+     ]
+    ]
    }
   },
   {
    "id": "fields.phrase_scoped",
    "captures": {
-    "value": 1
+    "unscoped": [
+     [
+      1
+     ],
+     [
+      7
+     ]
+    ],
+    "scoped": 1
    }
   },
   {
    "id": "fields.then_no_cross",
    "captures": {
-    "value": 1
+    "value": [
+     [
+      1
+     ],
+     [
+      7
+     ]
+    ]
    }
   },
   {
@@ -38,6 +61,9 @@
      ],
      [
       4
+     ],
+     [
+      7
      ]
     ]
    }
@@ -61,6 +87,10 @@
      [
       4,
       "<mark>alpha</mark> xx beta"
+     ],
+     [
+      7,
+      "<mark>alpha</mark> beta"
      ]
     ],
     "wrapper": [
@@ -110,6 +140,17 @@
   {
    "id": "fields.patterns",
    "captures": {
+    "unscoped_wildcard": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      4
+     ]
+    ],
     "wildcard": [
      [
       1
