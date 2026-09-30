@@ -112,6 +112,114 @@ mod tests {
         assert_eq!(plan[0]["Plan"]["Plans"][0]["Index Name"], "lite_search_idx");
     }
 
+    /// Overflow is an inexact universe. With the custom scan off, `amgetbitmap`
+    /// must pass `recheck = !planned.exact` so BitmapHeapScan re-runs `==>`
+    /// and drops the non-matching rows the cursor included.
+    #[pg_test]
+    fn bitmap_recheck_filters_inexact_universe() {
+        Spi::run("CREATE TABLE overflow_docs (id int, body text)").unwrap();
+        Spi::run(
+            "INSERT INTO overflow_docs
+             SELECT n, 'zz' || lpad(n::text, 4, '0') FROM generate_series(1, 1100) n",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO overflow_docs
+             SELECT 2000 + n, 'other' || n FROM generate_series(1, 20) n",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX overflow_idx ON overflow_docs USING stannum (body)").unwrap();
+        Spi::run(
+            "SET LOCAL enable_seqscan = off;
+             SET LOCAL enable_indexscan = off;
+             SET LOCAL enable_bitmapscan = on;
+             SET LOCAL stannum.enable_custom_scan = off",
+        )
+        .unwrap();
+        let count =
+            Spi::get_one::<i64>("SELECT count(*) FROM overflow_docs WHERE body ==> 'zz*'").unwrap();
+        assert_eq!(count, Some(1100));
+        let leaked = Spi::get_one::<i64>(
+            "SELECT count(*) FROM overflow_docs WHERE id > 2000 AND body ==> 'zz*'",
+        )
+        .unwrap();
+        assert_eq!(leaked, Some(0));
+        let plan = Spi::get_one::<Json>(
+            "EXPLAIN (ANALYZE, FORMAT JSON)
+             SELECT id FROM overflow_docs WHERE body ==> 'zz*'",
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(plan[0]["Plan"]["Node Type"], "Bitmap Heap Scan");
+        assert!(
+            plan[0]["Plan"]["Recheck Cond"].to_string().contains("==>"),
+            "recheck cond {}",
+            plan[0]["Plan"]["Recheck Cond"]
+        );
+        assert_eq!(
+            plan[0]["Plan"]["Rows Removed by Index Recheck"].as_f64(),
+            Some(20.0)
+        );
+    }
+
+    #[pg_test(error = "access method \"stannum\" does not support multicolumn indexes")]
+    fn multi_column_create_index_still_fails() {
+        Spi::run("CREATE TABLE field_docs (id int, title text, body text)").unwrap();
+        Spi::run("CREATE INDEX field_idx ON field_docs USING stannum (title, body)").unwrap();
+    }
+
+    /// Scaffold until Phase 5. `amcanmulticol` stays false, so these cannot run.
+    #[pg_test]
+    #[ignore]
+    fn title_body_operator_scope_custom_scan() {
+        Spi::run(
+            "CREATE TABLE scoped (id int, title text, body text);
+             INSERT INTO scoped VALUES (1, 'alpha', 'beta'), (2, 'beta', 'alpha');
+             CREATE INDEX scoped_idx ON scoped USING stannum (title, body)",
+        )
+        .unwrap();
+        let title = Spi::get_one::<Vec<i32>>(
+            "SELECT array_agg(id ORDER BY id) FROM scoped WHERE title ==> 'alpha'",
+        )
+        .unwrap();
+        assert_eq!(title, Some(vec![1]));
+        let body = Spi::get_one::<Vec<i32>>(
+            "SELECT array_agg(id ORDER BY id) FROM scoped WHERE body ==> 'alpha'",
+        )
+        .unwrap();
+        assert_eq!(body, Some(vec![2]));
+    }
+
+    /// Scaffold until Phase 5, bitmap path (`enable_custom_scan = off`).
+    #[pg_test]
+    #[ignore]
+    fn title_body_operator_scope_bitmap() {
+        Spi::run(
+            "CREATE TABLE scoped_bm (id int, title text, body text);
+             INSERT INTO scoped_bm VALUES (1, 'alpha', 'beta'), (2, 'beta', 'alpha');
+             CREATE INDEX scoped_bm_idx ON scoped_bm USING stannum (title, body);
+             SET LOCAL enable_seqscan = off;
+             SET LOCAL stannum.enable_custom_scan = off",
+        )
+        .unwrap();
+        let title = Spi::get_one::<Vec<i32>>(
+            "SELECT array_agg(id ORDER BY id) FROM scoped_bm WHERE title ==> 'alpha'",
+        )
+        .unwrap();
+        assert_eq!(title, Some(vec![1]));
+        let body = Spi::get_one::<Vec<i32>>(
+            "SELECT array_agg(id ORDER BY id) FROM scoped_bm WHERE body ==> 'alpha'",
+        )
+        .unwrap();
+        assert_eq!(body, Some(vec![2]));
+        let plan =
+            Spi::get_one::<String>("EXPLAIN SELECT id FROM scoped_bm WHERE body ==> 'alpha'")
+                .unwrap()
+                .unwrap();
+        assert!(plan.contains("Bitmap Heap Scan"), "{plan}");
+    }
+
     #[pg_test]
     fn a_build_packs_its_segments_into_its_lowest_pages() {
         // Small build segments and a low merge cap (2 MB, below the smallest

@@ -602,8 +602,20 @@ pub(crate) unsafe fn bind_to_index(
         }
         crate::score::matching_stannum_indexes((*rte).relid, varno, document)
             .into_iter()
-            .find(|&index_oid| predicate_holds(root, varno, index_oid))
+            .find(|&(index_oid, _field)| predicate_holds(root, varno, index_oid))
+            .map(|(index_oid, _field)| index_oid)
     }
+}
+
+/// Rejects a `==>` query that scopes a field other than the column the clause
+/// answers. Field syntax is not in this tinql snapshot, and multi-column
+/// indexes are rejected at DDL until Phase 5, so the check is a no-op. The
+/// suitability path calls it so the rejection cannot depend on the chosen plan.
+fn check_clause_field_scope(
+    _document: *mut pg_sys::Node,
+    _query: *mut pg_sys::Node,
+    _index: pg_sys::Oid,
+) {
 }
 
 /// The right operand of the bound form: a bound constant for a constant
@@ -671,6 +683,7 @@ fn stannum_text_cmpfunc_support(request: Internal) -> Internal {
         let Some(index) = bind_to_index(request.root, document) else {
             return unhandled();
         };
+        check_clause_field_scope(document, query, index);
         let Some(operand) = bound_operand(query, index) else {
             return unhandled();
         };

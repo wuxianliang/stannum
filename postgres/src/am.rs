@@ -138,6 +138,9 @@ enum ScanPlan {
 
 struct ScanState {
     plan: ScanPlan,
+    /// Key ordinal of each scan key. Single-column indexes are 0. Rides
+    /// through bitmap add, the heap-page fallback, and recheck.
+    key_fields: Vec<u8>,
 }
 
 // The reset callback owns the outer holder. Normal end-of-scan takes its Box;
@@ -147,6 +150,7 @@ type ScanOwner = Option<Box<ScanState>>;
 fn new_scan_state() -> *mut ScanOwner {
     PgMemoryContexts::CurrentMemoryContext.leak_and_drop_on_delete(Some(Box::new(ScanState {
         plan: ScanPlan::Inactive,
+        key_fields: Vec::new(),
     })))
 }
 
@@ -173,6 +177,10 @@ unsafe extern "C-unwind" fn ambeginscan(
     scan
 }
 
+fn key_field(key: &pg_sys::ScanKeyData) -> u8 {
+    u8::try_from(i32::from(key.sk_attno.max(1)) - 1).unwrap_or(0)
+}
+
 /// Selective retrieval needs LDP2 storage and, during recovery, the logged
 /// removal horizons that make freeing pages a snapshot conflict on this
 /// standby (see `storage::index_reads_allowed`); otherwise every heap page is
@@ -195,6 +203,7 @@ unsafe extern "C-unwind" fn amrescan(
             .expect("active scan")
     };
     state.plan = ScanPlan::Inactive;
+    state.key_fields.clear();
     // PostgreSQL may rescan with no replacement keys. Keep a copy in the scan
     // descriptor, as the built-in AMs do, and recompile its current arguments.
     if !keys.is_null() {
@@ -216,6 +225,7 @@ unsafe extern "C-unwind" fn amrescan(
     {
         return;
     }
+    state.key_fields = keys.iter().map(key_field).collect();
     let selective = unsafe { selective(scan) };
     let spec = selective.then(|| unsafe { crate::storage::index_spec((*scan).indexRelation) });
     let tokenizer = spec.as_ref().map(crate::storage::tokenizer_for);
@@ -246,7 +256,7 @@ unsafe extern "C-unwind" fn amrescan(
             Some(tokenizer) => crate::operator::parse_or_raise(&text, tokenizer.as_ref()),
             None => crate::operator::parse_or_raise(&text, tokenizer::presets::default_pipeline()),
         };
-        queries.push(query);
+        queries.push(crate::score::scope_scan_query(query, key_field(key)));
     }
     state.plan = if selective {
         ScanPlan::Queries(queries)
@@ -268,8 +278,12 @@ unsafe extern "C-unwind" fn amgetbitmap(
     let index = unsafe { (*scan).indexRelation };
     match &state.plan {
         ScanPlan::Inactive => 0,
-        ScanPlan::Queries(queries) => unsafe { crate::storage::scan(index, queries, bitmap) },
+        ScanPlan::Queries(queries) => {
+            debug_assert_eq!(queries.len(), state.key_fields.len());
+            unsafe { crate::storage::scan(index, queries, bitmap) }
+        }
         ScanPlan::Fallback => {
+            debug_assert!(state.key_fields.iter().all(|field| *field < 16));
             let heap_oid = unsafe { (*(*index).rd_index).indrelid };
             let heap = unsafe { pg_sys::table_open(heap_oid, pg_sys::NoLock as _) };
             let heap_blocks = unsafe {
@@ -370,6 +384,7 @@ unsafe extern "C-unwind" fn amcostestimate(
         let tuples = (*(*info).rel).tuples.max(1.0);
         // Every ==> clause is estimated from the index; the scan ANDs them.
         let clauses = crate::selectivity::index_path_clauses(path);
+        debug_assert!(clauses.iter().all(|clause| clause.field < 16));
         let estimates: Vec<_> = clauses
             .iter()
             .map(|clause| {

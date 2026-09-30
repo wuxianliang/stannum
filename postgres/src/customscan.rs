@@ -263,6 +263,8 @@ unsafe fn descending(pathkey: *mut pg_sys::PathKey) -> bool {
 struct Match {
     clause: *mut pg_sys::OpExpr,
     index_oid: pg_sys::Oid,
+    /// Key ordinal this clause answers. Single-column indexes are 0.
+    field: u8,
     query: Option<String>,
     query_expr: *mut pg_sys::Node,
 }
@@ -345,16 +347,18 @@ unsafe fn find_match(
                 search.document,
             )
             .into_iter()
-            .filter(|&index_oid| {
+            .filter(|&(index_oid, _field)| {
                 crate::storage::is_segmented(index_oid) && predicate_proven(rel, index_oid)
             })
             .collect::<Vec<_>>();
-            let Some(index_oid) = crate::score::pick_index(&candidates, search.index) else {
+            let Some((index_oid, field)) = crate::score::pick_index(&candidates, search.index)
+            else {
                 continue;
             };
             return Some(Match {
                 clause: clause.cast(),
                 index_oid,
+                field,
                 query,
                 query_expr: search.query,
             });
@@ -492,6 +496,9 @@ struct Private {
     index_oid: u32,
     heap_oid: u32,
     query: String,
+    /// Key ordinal this clause answers. The scan key's implicit field scope
+    /// rides in the plan's private state; single-column indexes are 0.
+    field: u8,
     ordering: Option<Ordering>,
 }
 
@@ -529,6 +536,7 @@ impl Private {
                     list.push(make_int(ordering.top_k.map_or(-1, |k| k as i64)));
                 }
             }
+            list.push(make_int(i64::from(self.field)));
             list.into_pg()
         }
     }
@@ -554,6 +562,8 @@ impl Private {
                 })
             };
             let clause = pg_sys::list_nth(list, 3).cast::<pg_sys::OpExpr>();
+            let field_at = if int(4) == -1 { 5 } else { 11 };
+            let field = u8::try_from(int(field_at)).unwrap_or(0);
             let ordering = match int(4) {
                 -1 => None,
                 full => Some(Ordering {
@@ -571,6 +581,7 @@ impl Private {
                     index_oid: int(0) as u32,
                     heap_oid: int(1) as u32,
                     query: string(2),
+                    field,
                     ordering,
                 },
                 clause,
@@ -615,6 +626,7 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
             index_oid: found.index_oid.to_u32(),
             heap_oid: (*rte).relid.to_u32(),
             query: found.query.clone().unwrap_or_else(|| "<parameter>".into()),
+            field: found.field,
             ordering,
         };
         let mut path = pgrx::PgBox::<pg_sys::CustomPath>::alloc_node(pg_sys::NodeTag::T_CustomPath);
@@ -868,6 +880,7 @@ unsafe extern "C-unwind" fn upper_paths_hook(
             index_oid: found.index_oid.to_u32(),
             heap_oid: (*rte).relid.to_u32(),
             query: found.query.clone().unwrap_or_else(|| "<parameter>".into()),
+            field: found.field,
             ordering: None,
         };
         let mut path = pgrx::PgBox::<pg_sys::CustomPath>::alloc_node(pg_sys::NodeTag::T_CustomPath);
@@ -1316,7 +1329,8 @@ unsafe fn scan_query(exec: &ScanExec) -> Query {
         let index = pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _);
         let tokenizer = crate::storage::index_tokenizer(index);
         pg_sys::index_close(index, pg_sys::AccessShareLock as _);
-        crate::operator::parse_or_raise(&exec.private.query, tokenizer.as_ref())
+        let query = crate::operator::parse_or_raise(&exec.private.query, tokenizer.as_ref());
+        crate::score::scope_scan_query(query, exec.private.field)
     }
 }
 
@@ -1539,6 +1553,7 @@ unsafe fn passes_clause(
     exec: &ScanExec,
     slot: *mut pg_sys::TupleTableSlot,
 ) -> bool {
+    debug_assert!(exec.private.field < 16);
     unsafe {
         let econtext = (*node).ss.ps.ps_ExprContext;
         (*econtext).ecxt_scantuple = slot;
@@ -1551,6 +1566,7 @@ unsafe fn passes_clause(
 /// since (a prepared plan executed on a standby whose primary stopped logging
 /// removal horizons), and once decided the choice holds for the execution.
 unsafe fn heap_fallback(exec: &mut ScanExec) -> bool {
+    debug_assert!(exec.private.field < 16);
     if let Some(fallback) = exec.heap_fallback {
         return fallback;
     }

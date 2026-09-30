@@ -133,7 +133,9 @@ pub unsafe fn clause_estimate(
             return None;
         }
         let candidates = crate::score::matching_stannum_indexes((*rte).relid, varno, left);
-        let index_oid = crate::score::pick_index(&candidates, crate::operator::bound_index(right))?;
+        let (index_oid, field) =
+            crate::score::pick_index(&candidates, crate::operator::bound_index(right))?;
+        debug_assert!(field < 16);
         estimate_query(index_oid, &query)
     }
 }
@@ -261,6 +263,8 @@ pub fn heap_fetch(index: &IndexCost, heap_pages: f64) -> (f64, f64) {
 pub struct PathClause {
     pub query: Option<String>,
     pub bound: Option<pg_sys::Oid>,
+    /// Key ordinal the clause matches. Single-column indexes are 0.
+    pub field: u8,
 }
 
 /// The `==>` clauses of an index path.
@@ -284,9 +288,11 @@ pub unsafe fn index_path_clauses(path: *mut pg_sys::IndexPath) -> Vec<PathClause
                 continue;
             }
             let right = pg_sys::list_nth((*op).args, 1).cast::<pg_sys::Node>();
+            let field = u8::try_from(i32::from((*clause).indexcol.max(1)) - 1).unwrap_or(0);
             clauses.push(PathClause {
                 query: crate::operator::query_text(right),
                 bound: crate::operator::bound_index(right),
+                field,
             });
         }
         clauses

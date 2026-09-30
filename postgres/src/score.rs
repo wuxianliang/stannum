@@ -5225,34 +5225,47 @@ unsafe fn find_where_quals(node: *mut pg_sys::Node, binding: &mut QualBinding) {
 }
 
 /// The index a clause bound to `bound` should be answered by, among
-/// `candidates` (in OID order): the bound index when it is one of them,
-/// otherwise the first with the same tokenizer settings, so an index scan
-/// never disagrees with the clause's own evaluation.
+/// `candidates` (in OID order), with the key ordinal that clause matches.
+/// The bound index wins when it is one of them; otherwise the first with the
+/// same tokenizer settings, so an index scan never disagrees with the clause.
 pub(crate) unsafe fn pick_index(
-    candidates: &[pg_sys::Oid],
+    candidates: &[(pg_sys::Oid, u8)],
     bound: Option<pg_sys::Oid>,
-) -> Option<pg_sys::Oid> {
+) -> Option<(pg_sys::Oid, u8)> {
     match bound {
-        Some(bound) if candidates.contains(&bound) => Some(bound),
+        Some(bound) if candidates.iter().any(|(index, _)| *index == bound) => candidates
+            .iter()
+            .copied()
+            .find(|(index, _)| *index == bound),
         Some(bound) => {
             let spec = unsafe { crate::storage::spec_by_oid(bound) };
             candidates
                 .iter()
                 .copied()
-                .find(|&candidate| unsafe { crate::storage::spec_by_oid(candidate) } == spec)
+                .find(|(candidate, _)| unsafe { crate::storage::spec_by_oid(*candidate) == spec })
         }
         None => candidates.first().copied(),
     }
 }
 
-/// Every valid, ready, single-key stannum index of `heap_oid` whose key is
-/// `operand` (a variable of range-table entry `query_varno`, or an
-/// expression), in OID order.
+/// Restricts a `==>` scan query to key ordinal `field`.
+///
+/// Single-column indexes have no field metadata, so this is the identity and
+/// every match is ordinal 0. Phase 5 applies Appendix A's implicit scope.
+pub(crate) fn scope_scan_query(query: Query, field: u8) -> Query {
+    debug_assert!(field < 16);
+    query
+}
+
+/// Every valid, ready stannum index of `heap_oid` one of whose keys is
+/// `operand` (a variable of range-table entry `query_varno`, or, on a
+/// single-column index, an expression), in OID order, with the matched key
+/// ordinal. A single-column index matches at ordinal 0.
 pub(crate) unsafe fn matching_stannum_indexes(
     heap_oid: pg_sys::Oid,
     query_varno: i32,
     operand: *mut pg_sys::Node,
-) -> Vec<pg_sys::Oid> {
+) -> Vec<(pg_sys::Oid, u8)> {
     let stannum_name = CString::new("stannum").expect("static access method name is valid");
     let stannum_am = unsafe { pg_sys::get_index_am_oid(stannum_name.as_ptr(), false) };
     let normalized = unsafe { pg_sys::copyObjectImpl(operand.cast()).cast::<pg_sys::Node>() };
@@ -5265,34 +5278,46 @@ pub(crate) unsafe fn matching_stannum_indexes(
         let index = unsafe { pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _) };
         let metadata = unsafe { &*(*index).rd_index };
         let is_stannum = unsafe { (*(*index).rd_rel).relam } == stannum_am;
-        let suitable =
-            is_stannum && metadata.indisvalid && metadata.indisready && metadata.indnkeyatts == 1;
-        let matches = if suitable {
-            let key = unsafe { *metadata.indkey.values.as_ptr() };
-            if key > 0 {
-                !normalized.is_null()
-                    && unsafe { (*normalized).type_ } == pg_sys::NodeTag::T_Var
-                    && unsafe {
-                        let var = &*normalized.cast::<pg_sys::Var>();
-                        var.varno == 1 && var.varlevelsup == 0 && var.varattno == key
-                    }
-            } else {
+        let suitable = is_stannum && metadata.indisvalid && metadata.indisready;
+        let matched_column = if suitable {
+            let keys = unsafe {
+                std::slice::from_raw_parts(
+                    metadata.indkey.values.as_ptr(),
+                    metadata.indnkeyatts as usize,
+                )
+            };
+            if keys.len() == 1 && keys[0] <= 0 {
                 let expressions = unsafe { pg_sys::RelationGetIndexExpressions(index) };
                 if unsafe { pg_sys::list_length(expressions) } != 1 {
-                    false
+                    None
                 } else {
                     let indexed =
                         unsafe { pg_sys::list_nth(expressions, 0).cast::<pg_sys::Node>() };
                     let indexed = unsafe { pg_sys::strip_implicit_coercions(indexed) };
                     unsafe { pg_sys::equal(normalized.cast(), indexed.cast()) }
+                        .then_some((index_oid, 0))
+                }
+            } else if normalized.is_null()
+                || unsafe { (*normalized).type_ } != pg_sys::NodeTag::T_Var
+            {
+                None
+            } else {
+                let var = unsafe { &*normalized.cast::<pg_sys::Var>() };
+                if var.varno != 1 || var.varlevelsup != 0 || var.varattno <= 0 {
+                    None
+                } else {
+                    keys.iter()
+                        .position(|key| *key == var.varattno)
+                        .and_then(|ordinal| u8::try_from(ordinal).ok())
+                        .map(|ordinal| (index_oid, ordinal))
                 }
             }
         } else {
-            false
+            None
         };
         unsafe { pg_sys::index_close(index, pg_sys::AccessShareLock as _) };
-        if matches {
-            matched.push(index_oid);
+        if let Some(found) = matched_column {
+            matched.push(found);
         }
     }
     unsafe { pg_sys::table_close(heap, pg_sys::AccessShareLock as _) };
@@ -5414,7 +5439,7 @@ fn score_support(request: Internal) -> Internal {
                 continue;
             }
             let candidates = matching_stannum_indexes((*rte).relid, ctid.varno, document);
-            if let Some(index_oid) = pick_index(&candidates, bound) {
+            if let Some((index_oid, _field)) = pick_index(&candidates, bound) {
                 documents.push((document, query, index_oid));
             }
         }
