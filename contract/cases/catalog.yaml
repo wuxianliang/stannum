@@ -147,6 +147,7 @@ cases:
     capture:
       - value:
           as: settings
+          identity_set: true
           sql: >
             SELECT name, setting, boot_val, min_val, max_val, vartype, context, enumvals::text
             FROM pg_settings WHERE name LIKE 'stannum.%' ORDER BY name
