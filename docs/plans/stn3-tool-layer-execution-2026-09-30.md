@@ -46,7 +46,7 @@ design disagree, **the design wins** and this plan gets a fix.
     is green (build + upstream's own tests, PG 17 and 18).
   - Review focus: no source changes ride along with the branch creation.
 
-- [ ] **0.2 `contract/` skeleton**
+- [x] **0.2 `contract/` skeleton** (1a0a7b0)
   - Goal: the adapted engine-agnostic runner compiles and runs empty.
   - Scope: port `conformance/{run.py,cases,expected,divergences}` structure
     from upstream into `contract/`; empty case list; `--help` works.
@@ -54,7 +54,15 @@ design disagree, **the design wins** and this plan gets a fix.
     0 cases, 0 failures.
   - Review focus: the runner imports nothing from the repo (design §7).
 
-- [ ] **0.3 pgembed early smoke [checkpoint]**
+- [x] **0.3 pgembed early smoke [checkpoint]** (pgembed 3385c3b)
+  - PASS-with-caveat: wheel built+installed (extversion 0.1.0), single-column
+    index + upstream queries answer. Caveats: GitHub outage → local-repo
+    fetch override + hand-synced bundle stamp; from-scratch wipe+rebuild
+    re-proven at 2.8. Measured ledger (supersedes §3 prose for upstream
+    d57ef58): 15/16 reloptions present upstream (all but `field_weights`;
+    `score_stop_words` + five TIN options ARE registered upstream), no
+    `stannum.*` GUCs at all, `tokenize`/`ql_parse` IMMUTABLE PARALLEL SAFE
+    upstream vs 0.4.0's STABLE/UNSAFE.
   - Goal: prove the L3 install path on day one, scoped to what stock upstream
     provides.
   - Scope: pgembed `pgbuild/Makefile` pin → `stn3` HEAD; build wheel; install.
@@ -69,7 +77,7 @@ design disagree, **the design wins** and this plan gets a fix.
 
 Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
 
-- [x] **1.1 Generate `docs/tool-contract.md` + manifest** (1f60ba5)
+- [ ] **1.1 Generate `docs/tool-contract.md` + manifest**
   - Goal: the authoritative surface, generated not hand-written.
   - Scope: generator (tools script) reading `postgres/sql/stannum--0.4.0.sql`,
     `options.rs` reloptions, GUC registrations; emits the manifest with exact
@@ -79,7 +87,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
   - Review focus: §4.1 says the snapshot+manifest are authoritative and the
     doc is a summary — no drift between them.
 
-- [x] **1.2 Record 0.4.0 answers** (646e249)
+- [ ] **1.2 Record 0.4.0 answers**
   - Goal: `contract/expected/stannum-0.4.0/*.json` from the pinned producer.
   - Scope: recording job (commit `24f5c02`, PG 17, UTF8/`--no-locale`, PG minor
     written into the JSON, jieba = empty-table fingerprint after
@@ -95,7 +103,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
   - Review focus: coverage check — every function/reloption/GUC/operator/
     opclass/ACL/view-option has a case or an `exclusions.yaml` line.
 
-- [x] **1.3 `capabilities()` on both lineages** (stn3 9305ebd / main b195ab0)
+- [ ] **1.3 `capabilities()` on both lineages**
   - Goal: the function exists on 0.5.0 (stn3 branch) and its absence on 0.4.0
     is a recorded fact.
   - Scope: `postgres/src/tool/capabilities.rs`; `IMMUTABLE STRICT PARALLEL
@@ -106,7 +114,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
   - Review focus: design §4.2 — `limits` reports what 0.5.0 enforces; #88
     differences are divergence entries.
 
-**Phase gate P1:** suite green against 0.4.0 recordings; CI replay locked. — **MET**: 39 cases (1 engine-scoped exclusion, 38 recorded), replay green on PG17+PG18 CI jobs (runs 36672116737 / 36672015529); capabilities() live on stn3 with the §4.2 shape, type-strict gate, max_expansion=1024 measured against tinql.
+**Phase gate P1:** suite green against 0.4.0 recordings; CI replay locked.
 
 ---
 
