@@ -129,7 +129,7 @@ module lands here. This is the largest phase; steps are independently landable.
     change yet.
   - Review focus: L2 imports nothing from L0 internals (design §3).
 
-- [ ] **2.2 Operator, opclass, custom scan port**
+- [x] **2.2 Operator, opclass, custom scan port** (4078674)
   - Scope: `==>` both forms + `stannum_text_ops` + `bind_query` +
     `indexed_query` + SUPPORT + RESTRICT; custom scan with `Private.field`
     plumbing; **the planner widening** (design §3: keep `matching_stannum_indexes`
