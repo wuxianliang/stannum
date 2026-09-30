@@ -28,6 +28,7 @@ fn render_highlight(
     begin_tag: &str,
     end_tag: &str,
     query: Option<&str>,
+    field: Option<&str>,
 ) -> Option<String> {
     let text = text?;
     // Neither an explicit query nor a `==>` clause to take one from: the
@@ -35,10 +36,62 @@ fn render_highlight(
     let Some(query) = query else {
         return Some(text.to_owned());
     };
+    // Appendix A: a NULL field is single-column behavior (the query is
+    // unchanged). Named-field confinement is `project_to_field` (Phase 5);
+    // until then a named field is also query-unchanged so unscoped marks
+    // still land.
+    let _ = field;
     let positions = positions_from_query(pipeline, query, text);
     highlight_text(pipeline, text, begin_tag, end_tag, &positions)
         .map(Some)
         .unwrap_or_else(|error| pgrx::error!("{error}"))
+}
+
+/// Text-query 5-arg body. The §4.1 `#[pg_extern]` lives in `tool::highlight`.
+pub(crate) fn highlight_with_field(
+    text: Option<&str>,
+    begin_tag: &str,
+    end_tag: &str,
+    query: Option<&str>,
+    field: Option<&str>,
+) -> Option<String> {
+    render_highlight(
+        tokenizer::presets::default_pipeline(),
+        text,
+        begin_tag,
+        end_tag,
+        query,
+        field,
+    )
+}
+
+/// Bound 5-arg body. The §4.1 `#[pg_extern]` lives in `tool::highlight`.
+pub(crate) fn highlight_bound_with_field(
+    text: Option<&str>,
+    begin_tag: &str,
+    end_tag: &str,
+    query: indexed_query,
+    field: Option<&str>,
+) -> Option<String> {
+    let index = unsafe {
+        pgrx::PgRelation::with_lock(pg_sys::Oid::from(query.index), pg_sys::AccessShareLock as _)
+    };
+    crate::udfs::validate_stannum_index(&index, "highlight");
+    if let Some(field) = field {
+        // 0.4.0 `fields_meta` is None when `indnkeyatts < 2`, so a named
+        // field on a single-column index is unknown. Multi-column plans
+        // are Phase 5.
+        pgrx::error!("stannum.highlight(): unknown field '{field}'");
+    }
+    let pipeline = unsafe { crate::storage::tokenizer_by_oid(pg_sys::Oid::from(query.index)) };
+    render_highlight(
+        &pipeline,
+        text,
+        begin_tag,
+        end_tag,
+        Some(&query.query),
+        None,
+    )
 }
 
 fn render_highlight_ansi(
@@ -78,6 +131,7 @@ fn highlight(
         begin_tag,
         end_tag,
         query,
+        None,
     )
 }
 
@@ -93,7 +147,14 @@ fn highlight_bound(
     };
     crate::udfs::validate_stannum_index(&index, "highlight");
     let pipeline = unsafe { crate::storage::tokenizer_by_oid(pg_sys::Oid::from(query.index)) };
-    render_highlight(&pipeline, text, begin_tag, end_tag, Some(&query.query))
+    render_highlight(
+        &pipeline,
+        text,
+        begin_tag,
+        end_tag,
+        Some(&query.query),
+        None,
+    )
 }
 
 #[pg_extern(name = "highlight_ansi", immutable, parallel_safe)]
@@ -154,6 +215,44 @@ fn unhandled() -> Internal {
     Internal::from(Some(pg_sys::Datum::from(0_usize)))
 }
 
+/// Heap attnum ≤ 0 (whole-row or system column) never names a field.
+/// Used by [`column_field_name`] and tested independently of planner nodes.
+pub(crate) fn field_name_for_attnum(attnum: i16, plan_names: Option<&[String]>) -> Option<String> {
+    if attnum <= 0 {
+        return None;
+    }
+    // Single-column indexes have no field plan (`fields_meta` is None when
+    // `indnkeyatts < 2`). Multi-column name lookup is Phase 5.
+    let _ = plan_names;
+    None
+}
+
+/// The field name a plain column reference names on a multi-column index:
+/// the position of the Var's attribute in the index's key list selects the
+/// recorded field plan entry. Anything else — an expression, a foreign
+/// relation, a single-column index, attnum ≤ 0 — contributes no field.
+unsafe fn column_field_name(
+    parse: *mut pg_sys::Query,
+    document: *mut pg_sys::Node,
+    index: pg_sys::Oid,
+) -> Option<String> {
+    unsafe {
+        if document.is_null() || (*document).type_ != pg_sys::NodeTag::T_Var {
+            return None;
+        }
+        let var = document.cast::<pg_sys::Var>();
+        if (*var).varno < 1 || (*var).varno > pg_sys::list_length((*parse).rtable) {
+            return None;
+        }
+        let relation = pgrx::PgRelation::with_lock(index, pg_sys::AccessShareLock as _);
+        let metadata = (*relation.as_ptr()).rd_index;
+        if metadata.is_null() {
+            return None;
+        }
+        field_name_for_attnum((*var).varattno, None)
+    }
+}
+
 /// The queries as one text expression: constants are ORed into one
 /// constant; anything else keeps the first query.
 unsafe fn combined_query(queries: &[*mut pg_sys::Node]) -> *mut pg_sys::Node {
@@ -172,8 +271,11 @@ unsafe fn combined_query(queries: &[*mut pg_sys::Node]) -> *mut pg_sys::Node {
 }
 
 /// The overload of `name` taking an `indexed_query` in place of the text
-/// query at `query_position`.
-unsafe fn bound_overload(name: &CStr, query_position: usize) -> pg_sys::Oid {
+/// query at `query_position`, optionally with a trailing `field` text
+/// argument (the field-aware bound overload). SUPPORT is not attached to
+/// the 5-arg forms; this lookup is only used when `column_field_name`
+/// supplies a field (multi-column, Phase 5).
+unsafe fn bound_overload(name: &CStr, query_position: usize, field: bool) -> pg_sys::Oid {
     unsafe {
         let mut types = if query_position == 3 {
             vec![pg_sys::TEXTOID, pg_sys::TEXTOID, pg_sys::TEXTOID]
@@ -181,6 +283,9 @@ unsafe fn bound_overload(name: &CStr, query_position: usize) -> pg_sys::Oid {
             vec![pg_sys::TEXTOID, pg_sys::INT4OID]
         };
         types.push(crate::operator::indexed_query_type_oid());
+        if field {
+            types.push(pg_sys::TEXTOID);
+        }
         crate::operator::extension_function_oid(name, &types)
     }
 }
@@ -259,7 +364,15 @@ fn highlight_support(request: Internal) -> Internal {
         let Some(operand) = crate::operator::bound_operand(query, index) else {
             return unhandled();
         };
-        let overload = bound_overload(name, query_position);
+        // A multi-column index attributes a plain column reference to its
+        // field. Single-column and attnum ≤ 0 contribute nothing, so SUPPORT
+        // still rewrites to the 4-arg bound form.
+        let field = if name.to_bytes() == b"highlight" {
+            column_field_name(parse, document, index)
+        } else {
+            None
+        };
+        let overload = bound_overload(name, query_position, field.is_some());
         if overload == pg_sys::InvalidOid {
             return unhandled();
         }
@@ -273,6 +386,9 @@ fn highlight_support(request: Internal) -> Internal {
                     .cast()
             };
             args.push(argument);
+        }
+        if let Some(field) = field {
+            args.push(crate::operator::make_text_const(&field));
         }
         (*replacement).funcid = overload;
         (*replacement).args = args.into_pg();
@@ -307,11 +423,38 @@ mod tests {
     fn explicit_html_and_ansi_highlighting_render_matches() {
         let pipeline = tokenizer::presets::default_pipeline();
         assert_eq!(
-            render_highlight(pipeline, Some("Hi there"), "<b>", "</b>", Some("hi")),
+            render_highlight(pipeline, Some("Hi there"), "<b>", "</b>", Some("hi"), None),
+            Some("<b>Hi</b> there".into())
+        );
+        // Named field, unscoped query: still marks (query unchanged).
+        assert_eq!(
+            render_highlight(
+                pipeline,
+                Some("Hi there"),
+                "<b>",
+                "</b>",
+                Some("hi"),
+                Some("body"),
+            ),
             Some("<b>Hi</b> there".into())
         );
         let ansi = render_highlight_ansi(pipeline, Some("hi there"), None, Some("hi")).unwrap();
         assert!(ansi.contains("\x1b["));
         assert!(ansi.contains("hi"));
+    }
+}
+
+#[cfg(test)]
+mod attnum_tests {
+    use super::field_name_for_attnum;
+
+    #[test]
+    fn non_positive_attnum_names_no_field() {
+        let names = ["title".to_string(), "body".to_string()];
+        assert_eq!(field_name_for_attnum(0, Some(&names)), None);
+        assert_eq!(field_name_for_attnum(-1, Some(&names)), None);
+        // Single-column / no plan: a positive attnum still names nothing.
+        assert_eq!(field_name_for_attnum(1, None), None);
+        assert_eq!(field_name_for_attnum(1, Some(&names)), None);
     }
 }

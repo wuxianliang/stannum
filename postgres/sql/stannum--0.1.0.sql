@@ -56,7 +56,7 @@ AS 'MODULE_PATHNAME', 'full_score_with_bm25_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/highlight_udfs.rs:68
+-- postgres/src/highlight_udfs.rs:121
 -- stannum::highlight_udfs::highlight
 CREATE  FUNCTION "highlight"(
 	"text" TEXT, /* Option < & str > */
@@ -70,7 +70,22 @@ AS 'MODULE_PATHNAME', 'highlight_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/highlight_udfs.rs:99
+-- postgres/src/tool/highlight.rs:19
+-- stannum::tool::highlight::highlight
+CREATE  FUNCTION "highlight"(
+	"text" TEXT, /* Option < & str > */
+	"begin_tag" TEXT, /* & str */
+	"end_tag" TEXT, /* & str */
+	"query" TEXT, /* Option < & str > */
+	"field" TEXT /* Option < & str > */
+) RETURNS TEXT /* Option < String > */
+IMMUTABLE PARALLEL SAFE 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'highlight_field_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- postgres/src/highlight_udfs.rs:160
 -- stannum::highlight_udfs::highlight_ansi
 CREATE  FUNCTION "highlight_ansi"(
 	"text" TEXT, /* Option < & str > */
@@ -83,7 +98,7 @@ AS 'MODULE_PATHNAME', 'highlight_ansi_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/highlight_udfs.rs:188
+-- postgres/src/highlight_udfs.rs:293
 -- stannum::highlight_udfs::highlight_support
 CREATE  FUNCTION "highlight_support"(
 	"request" internal /* Internal */
@@ -138,19 +153,6 @@ CREATE TYPE indexed_query (
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/highlight_udfs.rs:108
--- stannum::highlight_udfs::highlight_ansi
-CREATE  FUNCTION "highlight_ansi"(
-	"text" TEXT, /* Option < & str > */
-	"wrap_to" INT, /* Option < i32 > */
-	"query" indexed_query /* indexed_query */
-) RETURNS TEXT /* Option < String > */
-STABLE PARALLEL SAFE 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'highlight_ansi_bound_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
 -- postgres/src/operator.rs:228
 -- stannum::operator::bind_query
 CREATE  FUNCTION "bind_query"(
@@ -163,7 +165,20 @@ AS 'MODULE_PATHNAME', 'bind_query_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/highlight_udfs.rs:84
+-- postgres/src/highlight_udfs.rs:169
+-- stannum::highlight_udfs::highlight_ansi
+CREATE  FUNCTION "highlight_ansi"(
+	"text" TEXT, /* Option < & str > */
+	"wrap_to" INT, /* Option < i32 > */
+	"query" indexed_query /* indexed_query */
+) RETURNS TEXT /* Option < String > */
+STABLE PARALLEL SAFE 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'highlight_ansi_bound_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- postgres/src/highlight_udfs.rs:138
 -- stannum::highlight_udfs::highlight
 CREATE  FUNCTION "highlight"(
 	"text" TEXT, /* Option < & str > */
@@ -177,7 +192,7 @@ AS 'MODULE_PATHNAME', 'highlight_bound_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- postgres/src/highlight_udfs.rs:283
+-- postgres/src/highlight_udfs.rs:399
 -- requires:
 --   highlight
 --   highlight_ansi
@@ -190,6 +205,21 @@ ALTER FUNCTION @extschema@.highlight(pg_catalog.text, pg_catalog.text, pg_catalo
     SUPPORT @extschema@.highlight_support;
 ALTER FUNCTION @extschema@.highlight_ansi(pg_catalog.text, pg_catalog.int4, pg_catalog.text)
     SUPPORT @extschema@.highlight_support;
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- postgres/src/tool/highlight.rs:33
+-- stannum::tool::highlight::highlight
+CREATE  FUNCTION "highlight"(
+	"text" TEXT, /* Option < & str > */
+	"begin_tag" TEXT, /* & str */
+	"end_tag" TEXT, /* & str */
+	"query" indexed_query, /* indexed_query */
+	"field" TEXT /* Option < & str > */
+) RETURNS TEXT /* Option < String > */
+STABLE PARALLEL SAFE 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'highlight_bound_field_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */

@@ -13,10 +13,12 @@
 //! but has no items yet, and this module does not import it, so L2 stays
 //! self-contained. Score-family `#[pg_extern]` bodies remain the owned shim
 //! in `crate::score`. `search`/`search_count` `#[pg_extern]` wrappers live
-//! here and delegate to `crate::search`; they do not import `IndexScorer`
+//! here and delegate to `crate::search`. The 5-arg `highlight` wrappers
+//! delegate to `crate::highlight_udfs`. They do not import `IndexScorer`
 //! or `storage` internals.
 
 mod capabilities;
+mod highlight;
 #[cfg(feature = "pg_test")]
 mod score;
 mod search;

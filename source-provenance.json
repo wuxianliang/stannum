@@ -674,6 +674,7 @@
         "postgres/src/search.rs",
         "postgres/src/operator.rs",
         "postgres/src/highlight_udfs.rs",
+        "postgres/src/tool/highlight.rs",
         "postgres/src/udfs.rs",
         "postgres/src/lib.rs"
       ],
@@ -717,7 +718,7 @@
       "owner": "mixed",
       "upstream_path": "postgres/src/highlight_udfs.rs",
       "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+      "evidence": "Inherited upstream file with Stannum changes: 5-arg highlight bodies, column_field_name attnum gate, and SUPPORT rewrite that stays 4-arg on single-column. Retain PlanetScale credit."
     },
     "postgres/src/lib.rs": {
       "owner": "mixed",
@@ -790,6 +791,10 @@
     "postgres/src/tool/capabilities.rs": {
       "owner": "ben",
       "evidence": "Original Stannum capabilities() document for the tool-layer contract (design section 4.2). Not copied from Lead."
+    },
+    "postgres/src/tool/highlight.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L2 SQL entry points for the 5-arg highlight() overloads (design sections 3 and 4.1). Thin #[pg_extern] wrappers delegate to postgres/src/highlight_udfs.rs; this file does not import IndexScorer or storage internals."
     },
     "postgres/src/tool/mod.rs": {
       "owner": "ben",
