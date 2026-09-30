@@ -788,6 +788,10 @@
       "owner": "ben",
       "evidence": "Original Stannum L2 tool-layer module. States the design section 3 seam: this layer imports nothing from engine internals."
     },
+    "postgres/src/tool/score.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L2 pg_tests for the score-family SQL surface (design sections 4.1 and 5.1, Appendix A). Does not copy Lead sources; the #[pg_extern] bodies stay in postgres/src/score.rs."
+    },
     "postgres/src/udfs.rs": {
       "owner": "mixed",
       "upstream_path": "postgres/src/udfs.rs",

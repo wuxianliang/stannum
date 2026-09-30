@@ -11,7 +11,9 @@
 //! It may depend on `pgrx` and `serde_json`, and, only where a UDF genuinely
 //! needs the field model, on the `fields` layer (L1). `fields` is declared
 //! but has no items yet, and this module does not import it, so L2 stays
-//! self-contained. Later steps (2.2-2.6) land UDF families here one at a
-//! time.
+//! self-contained. Score-family `#[pg_extern]` bodies remain the owned shim
+//! in `crate::score`; this layer holds the §4.1 surface tests for them.
 
 mod capabilities;
+#[cfg(feature = "pg_test")]
+mod score;

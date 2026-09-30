@@ -863,4 +863,94 @@ mod tests {
         assert_eq!(sum_scores_in_order(scores), 1.0);
         assert_eq!(sum_scores_in_order(scores.into_iter().rev()), 0.0);
     }
+
+    /// Design §5.1 R-BIT: `bm25_idf` is `f64`, cast to `f32`, *then* multiply
+    /// by boost; saturation products stay `f32`; terms fold with
+    /// `sum_scores_in_order`. Reconstructs the expression independently of
+    /// `TermScorer's` tables so a drift in operation order fails this test
+    /// rather than a SQL recording.
+    fn r_bit_term_score(
+        total_docs: u64,
+        df: u64,
+        boost: f32,
+        params: Bm25Params,
+        average_document_length: f32,
+        term_frequency: u32,
+        document_length: u32,
+    ) -> f32 {
+        let idf = bm25_idf(total_docs, df) as f32;
+        let multiplier = idf * boost;
+        let tf = TfBucket::from_count(term_frequency).representative_count() as f32;
+        let k1_plus_one = params.k1 + 1.0;
+        let k1_one_minus_b = params.k1 * (1.0 - params.b);
+        let document_length_factor = params.k1 * params.b / average_document_length;
+        let numerator = multiplier * tf * k1_plus_one;
+        let denominator = tf + k1_one_minus_b + document_length_factor * document_length as f32;
+        numerator / denominator
+    }
+
+    #[test]
+    fn term_scorer_r_bit_casts_idf_before_boost() {
+        let params = Bm25Params::default();
+        // Wrong order (multiply in f64, then cast) is a different model on
+        // some (N, df, boost); the product after the f32 cast is R-BIT.
+        let order_differs = [10_u64, 100, 1_000, 100_000]
+            .into_iter()
+            .flat_map(|n| [1_u64, 3, 10].map(move |df| (n, df)))
+            .flat_map(|(n, df)| [0.1_f32, 0.7, 2.5, 3.0].map(move |boost| (n, df, boost)))
+            .filter(|(n, df, _)| *df <= *n)
+            .any(|(n, df, boost)| {
+                let idf = bm25_idf(n, df);
+                (idf as f32 * boost).to_bits() != ((idf * f64::from(boost)) as f32).to_bits()
+            });
+        assert!(
+            order_differs,
+            "the f64→f32-then-boost order must be observable"
+        );
+
+        let cases = [
+            (100_u64, 10_u64, 0.7_f32, params, 80.0_f32, 1_u32, 1_u32),
+            (100, 10, 0.7, params, 80.0, 5, 17),
+            (100, 10, 0.7, params, 80.0, 20, 80),
+            (100, 10, 0.7, params, 80.0, 42, 250),
+            (100, 10, 0.7, params, 80.0, u32::MAX, 1_024),
+            (5, 5, 2.5, Bm25Params { k1: 0.0, b: 1.0 }, 1.0, 3, 1),
+            (1_000, 1, 3.0, Bm25Params { k1: 0.3, b: 0.99 }, 0.01, 10, 4),
+        ];
+        for (n, df, boost, params, avgdl, tf, len) in cases {
+            let reconstructed = r_bit_term_score(n, df, boost, params, avgdl, tf, len);
+            let scorer = TermScorer::from_statistics(n, df, boost, params, avgdl).unwrap();
+            assert_eq!(
+                scorer.score_count(tf, len).to_bits(),
+                reconstructed.to_bits(),
+                "n={n} df={df} boost={boost} tf={tf} len={len}"
+            );
+        }
+
+        // arithmetic.row3 corpus: three docs ("needle", "needle needle", "pad"),
+        // N=3, df=2, avgdl=4/3. Recorded 0.4.0 search bits (hex of float4send).
+        let avgdl = 4.0_f32 / 3.0_f32;
+        let short = r_bit_term_score(3, 2, 1.0, params, avgdl, 1, 1);
+        let long = r_bit_term_score(3, 2, 1.0, params, avgdl, 2, 2);
+        let scorer = TermScorer::from_statistics(3, 2, 1.0, params, avgdl).unwrap();
+        assert_eq!(short.to_bits(), 0x3f06_0744);
+        assert_eq!(long.to_bits(), 0x3f11_0b5e);
+        assert_eq!(scorer.score_count(1, 1).to_bits(), short.to_bits());
+        assert_eq!(scorer.score_count(2, 2).to_bits(), long.to_bits());
+
+        let first = TermScorer::from_statistics(100, 10, 0.7, params, 80.0)
+            .unwrap()
+            .score_count(1, 1);
+        let second = TermScorer::from_statistics(100, 22, 1.0, params, 80.0)
+            .unwrap()
+            .score_count(5, 17);
+        let reconstructed = sum_scores_in_order([
+            r_bit_term_score(100, 10, 0.7, params, 80.0, 1, 1),
+            r_bit_term_score(100, 22, 1.0, params, 80.0, 5, 17),
+        ]);
+        assert_eq!(
+            sum_scores_in_order([first, second]).to_bits(),
+            reconstructed.to_bits()
+        );
+    }
 }
