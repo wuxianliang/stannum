@@ -10,6 +10,7 @@ use pgrx::pg_guard;
 mod am;
 mod bm25;
 mod customscan;
+mod fields;
 mod fold;
 #[cfg(feature = "pg_test")]
 mod heap_probe;

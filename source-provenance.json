@@ -694,6 +694,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
     },
+    "postgres/src/fields/mod.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 field-model module. Empty; states the design section 3 contract (codec, fused scorer, norms and aggregate-df readers; does not absorb the owned shims). Not copied from Lead."
+    },
     "postgres/src/fold.rs": {
       "owner": "ben",
       "evidence": "Original Boolean count executor over document ordinals, written for Stannum."
