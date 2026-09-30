@@ -357,3 +357,66 @@ jobs:
           name: reference-oracle
           path: ${{ runner.temp }}/reference-oracle
           if-no-files-found: ignore
+
+  # Replay the pinned 0.4.0 answers. Check mode never writes; a dirty
+  # contract/expected tree after the replay fails the job.
+  contract-replay:
+    name: Tool contract replay (PostgreSQL 17)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PG_MAJOR: "17"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install PostgreSQL 17 from PGDG
+        run: |
+          sudo apt-get install --yes --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install --yes --no-install-recommends \
+            "postgresql-${PG_MAJOR}" "postgresql-server-dev-${PG_MAJOR}" \
+            libclang-dev pkg-config libssl-dev python3-venv
+          sudo systemctl stop postgresql || true
+          sudo chown -R "$USER" "/usr/lib/postgresql/${PG_MAJOR}" "/usr/share/postgresql/${PG_MAJOR}"
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: contract-pg17
+
+      - name: Cache cargo-pgrx
+        id: pgrx-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-pgrx
+          key: cargo-pgrx-${{ env.PGRX_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install cargo-pgrx
+        if: steps.pgrx-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-pgrx --version "$PGRX_VERSION" --locked
+
+      - name: Point pgrx at the installed server
+        run: |
+          echo "PGRX_HOME=$RUNNER_TEMP/pgrx" >> "$GITHUB_ENV"
+          PGRX_HOME="$RUNNER_TEMP/pgrx" cargo pgrx init "--pg${PG_MAJOR}=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
+
+      - name: Install release build
+        run: cargo pgrx install --release --package stannum --no-default-features --features "pg${PG_MAJOR}"
+
+      - name: Replay the 0.4.0 contract and refuse a rewrite
+        env:
+          CONFORMANCE_DSN: host=localhost port=55432 dbname=postgres
+        run: |
+          initdb -D "$RUNNER_TEMP/contract-data" -U "$USER" -A trust --no-locale --encoding=UTF8
+          pg_ctl -D "$RUNNER_TEMP/contract-data" \
+            -o "-p 55432 -c listen_addresses=localhost -c unix_socket_directories=$RUNNER_TEMP" \
+            -l "$RUNNER_TEMP/contract.log" -w start || { cat "$RUNNER_TEMP/contract.log"; exit 1; }
+          psql -h localhost -p 55432 -d postgres -v ON_ERROR_STOP=1 -c "CREATE EXTENSION stannum;"
+          python3 -m venv "$RUNNER_TEMP/contract-venv"
+          "$RUNNER_TEMP/contract-venv/bin/pip" install 'psycopg[binary]' pyyaml
+          "$RUNNER_TEMP/contract-venv/bin/python" contract/run.py --engine stannum \
+            --check contract/expected/stannum-0.4.0
+          git diff --exit-code -- contract/expected
+          python3 tools/generate_tool_contract.py --check
