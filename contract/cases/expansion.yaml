@@ -1,0 +1,32 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: expansion
+corpora:
+  over:
+    columns: "id int primary key, body text"
+    setup_sql:
+      - "INSERT INTO {table} SELECT n, 'zz' || lpad(n::text, 4, '0') FROM generate_series(1, 1100) n"
+      - "INSERT INTO {table} SELECT 2000 + n, 'other' || n FROM generate_series(1, 20) n"
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body)"
+cases:
+  - id: expansion.over_limit
+    description: >
+      A prefix that expands past max_expansion (1024) is recorded as the producer's
+      superset count and membership sample. This case does not assert exactness.
+    corpus: over
+    capture:
+      - value:
+          as: search_count
+          sql: "SELECT stannum.search_count('{index}'::regclass, 'zz*')"
+      - value:
+          as: operator_count
+          sql: "SELECT count(*) FROM {table} WHERE body ==> 'zz*'"
+      - value:
+          as: sample
+          sql: >
+            SELECT id FROM {table}
+            WHERE id IN (1, 1100, 2001)
+            ORDER BY id

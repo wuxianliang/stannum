@@ -1,0 +1,156 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: catalog
+cases:
+  - id: catalog.functions
+    description: Every stannum function's identity, volatility, parallel safety, strictness, and SUPPORT attachment.
+    covers:
+      - function:amhandler(internal)
+      - function:builtin_stop_words(text)
+      - function:full_score(tid)
+      - function:full_score(tid,float4,float4)
+      - function:highlight(text,text,text,text)
+      - function:highlight(text,text,text,text,text)
+      - function:highlight_ansi(text,int4,text)
+      - function:highlight_support(internal)
+      - function:index_analysis(regclass)
+      - function:index_reads_allowed(regclass)
+      - function:index_stats(regclass)
+      - function:indexed_query_in(cstring)
+      - function:indexed_query_out(indexed_query)
+      - function:bind_query(text,oid)
+      - function:highlight(text,text,text,indexed_query,text)
+      - function:highlight_ansi(text,int4,indexed_query)
+      - function:highlight(text,text,text,indexed_query)
+      - function:jieba_add_word(text,int4,text)
+      - function:jieba_delete_word(text)
+      - function:jieba_dict_version()
+      - function:jieba_reload_dict()
+      - function:logs_removal_horizons(regclass)
+      - function:max_score(tid)
+      - function:maybe_quote(text)
+      - function:ql_parse(text,bool,text,text,text,text,int4,text,text)
+      - function:score(tid,float4,float4,float4,text[],text[])
+      - function:score_bound(text,text,int4,int4,int4,float4,float4,float4,text[],text[])
+      - function:score_bound_indexed(tid,text,int4,int4,int4,float4,float4,float4,text[],text[])
+      - function:score_inspect(regclass,text,float4,text[],text[])
+      - function:score_support(internal)
+      - function:search(regclass,text,int4,text,text,text,float4,float4)
+      - function:search_count(regclass,text)
+      - function:segment_info(regclass)
+      - function:stannum_text_cmpfunc(text,text)
+      - function:stannum_text_cmpfunc_indexed(text,indexed_query)
+      - function:stannum_text_cmpfunc_support(internal)
+      - function:stannum_text_restrict(internal,oid,internal,int4)
+      - function:tokenize(text,text,text,text,text,int4,text,text)
+      - function:verify_index(regclass,bool)
+      - function:version()
+      - function:wal_rmgr_id()
+      - support:full_score(tid)->score_support
+      - support:full_score(tid,float4,float4)->score_support
+      - support:highlight(text,text,text,text)->highlight_support
+      - support:highlight_ansi(text,int4,text)->highlight_support
+      - support:max_score(tid)->score_support
+      - support:score(tid,float4,float4,float4,text[],text[])->score_support
+      - support:stannum_text_cmpfunc(text,text)->stannum_text_cmpfunc_support
+    capture:
+      - value:
+          sql: >
+            SELECT p.proname, pg_get_function_identity_arguments(p.oid),
+                   p.provolatile, p.proparallel, p.proisstrict,
+                   p.proacl IS NULL, s.proname
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            LEFT JOIN pg_proc s ON s.oid = p.prosupport
+            WHERE n.nspname = 'stannum'
+            ORDER BY 1, 2
+  - id: catalog.operators
+    description: Both ==> operators, their procedures, RESTRICT, and the default opclass.
+    covers:
+      - operator:==>(text,text)
+      - operator:==>(text,indexed_query)
+      - support:operator:==>(text,text)->stannum_text_cmpfunc_support
+      - restrict:operator:==>(text,text)->stannum_text_restrict
+      - restrict:operator:==>(text,indexed_query)->stannum_text_restrict
+      - opclass:stannum_text_ops
+    capture:
+      - value:
+          as: operators
+          sql: >
+            SELECT o.oprname, format_type(o.oprleft, NULL), format_type(o.oprright, NULL),
+                   p.proname, rp.proname
+            FROM pg_operator o
+            JOIN pg_namespace n ON n.oid = o.oprnamespace
+            JOIN pg_proc p ON p.oid = o.oprcode
+            LEFT JOIN pg_proc rp ON rp.oid = o.oprrest
+            WHERE n.nspname = 'stannum'
+            ORDER BY 2, 3
+      - value:
+          as: opclass
+          sql: >
+            SELECT opc.opcname, opc.opcdefault, am.amname
+            FROM pg_opclass opc
+            JOIN pg_namespace n ON n.oid = opc.opcnamespace
+            JOIN pg_am am ON am.oid = opc.opcmethod
+            WHERE n.nspname = 'stannum'
+            ORDER BY 1
+  - id: catalog.acls
+    description: jieba_words REVOKE, score_bound REVOKE, and index_health security_invoker.
+    covers:
+      - acl:table:stannum.jieba_words
+      - acl:function:score_bound(text,text,int4,int4,int4,float4,float4,float4,text[],text[])
+      - acl:function:score_bound_indexed(tid,text,int4,int4,int4,float4,float4,float4,text[],text[])
+      - view:index_health.security_invoker
+    capture:
+      - value:
+          as: relations
+          sql: >
+            SELECT c.relname, c.relacl IS NULL, c.reloptions
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'stannum' AND c.relname IN ('jieba_words', 'index_health')
+            ORDER BY 1
+      - value:
+          as: functions
+          sql: >
+            SELECT p.proname, pg_get_function_identity_arguments(p.oid), p.proacl IS NULL
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'stannum'
+              AND p.proname IN ('score_bound', 'score_bound_indexed')
+            ORDER BY 1, 2
+  - id: catalog.gucs
+    description: Userset GUCs after LOAD, plus the postmaster wal_rmgr_id GUC staying unregistered. SHOW casing is Auto.
+    covers:
+      - guc:stannum.strict_analysis
+      - guc:stannum.experimental_vacuum_merge_strategy
+      - guc:stannum.write_buffer_bytes
+      - guc:stannum.max_merge_docs
+      - guc:stannum.write_buffer_docs
+      - guc:stannum.build_segment_docs
+      - guc:stannum.max_segments
+      - guc:stannum.merge_tier_factor
+      - guc:stannum.wal_rmgr_id
+      - guc:stannum.enable_custom_scan
+    capture:
+      - value:
+          as: settings
+          sql: >
+            SELECT name, setting, boot_val, min_val, max_val, vartype, context, enumvals::text
+            FROM pg_settings WHERE name LIKE 'stannum.%' ORDER BY name
+      - value:
+          as: show_strategy
+          sql: SHOW stannum.experimental_vacuum_merge_strategy
+      - value:
+          as: wal_rmgr_guc_absent
+          sql: >
+            SELECT NOT EXISTS (
+              SELECT 1 FROM pg_settings WHERE name = 'stannum.wal_rmgr_id')
+  - id: catalog.version
+    description: stannum.version() is recorded, and check mode treats it as a version that may change.
+    capture:
+      - value:
+          sql: SELECT stannum.version()
+          normalize: version

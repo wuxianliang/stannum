@@ -1,0 +1,77 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: calls
+corpora:
+  docs:
+    columns: "id int primary key, body text"
+    rows:
+      - [1, "needle in the haystack"]
+      - [2, "unrelated pad"]
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body)"
+  jieba:
+    columns: "id int primary key, body text"
+    rows:
+      - [1, "beijing"]
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body) WITH (tokenizer = jieba)"
+cases:
+  - id: calls.search
+    description: pgembed StannumIndex.search named-arg form, joined on ctid, tie-broken by ctid.
+    corpus: docs
+    capture:
+      - value:
+          sql: >
+            SELECT d.id, s.ctid::text, encode(float4send(s.score::real), 'hex'), s.snippet
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 5, "snippet" => 'html') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+  - id: calls.search_tags
+    description: begin_tag and end_tag override the snippet marks, matching the pgembed optional args.
+    corpus: docs
+    capture:
+      - value:
+          sql: >
+            SELECT s.snippet FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 5, "snippet" => 'html',
+                                "begin_tag" => '<b>', "end_tag" => '</b>') s
+              ON d.ctid = s.ctid
+            ORDER BY d.ctid
+  - id: calls.search_count
+    description: pgembed StannumIndex.search_count.
+    corpus: docs
+    capture:
+      - value:
+          sql: "SELECT stannum.search_count('{index}'::regclass, 'needle')"
+  - id: calls.index_analysis
+    description: pgembed StannumIndex.analysis. Schema-qualified index_name is omitted.
+    corpus: jieba
+    capture:
+      - value:
+          sql: >
+            SELECT recorded_jieba_version, to_hex(recorded_dict_fingerprint),
+                   runtime_jieba_version, to_hex(runtime_dict_fingerprint), matches, status
+            FROM stannum.index_analysis('{index}'::regclass)
+  - id: calls.verify_index
+    description: pgembed StannumIndex.check_health calls verify_index(index, heap_check => false).
+    corpus: docs
+    capture:
+      - value:
+          sql: >
+            SELECT severity, location, message
+            FROM stannum.verify_index('{index}'::regclass, heap_check => false)
+  - id: calls.stop_words
+    description: pgembed loads stannum.builtin_stop_words('auto').
+    corpus: docs
+    capture:
+      - value:
+          sql: "SELECT tok FROM stannum.builtin_stop_words('auto') AS t(tok) ORDER BY tok"
+  - id: calls.tokenize_named
+    description: pgembed tokenizes with tokenizer => the index tokenizer.
+    corpus: docs
+    capture:
+      - value:
+          sql: "SELECT tok FROM stannum.tokenize('Hello World', tokenizer => 'unicode') AS t(tok)"

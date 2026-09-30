@@ -1,0 +1,21 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: tokenizer
+cases:
+  - id: tokenizer.unicode_whitespace
+    description: unicode and whitespace tokenizers are symmetric with themselves and differ on case and marks.
+    capture:
+      - value:
+          as: unicode
+          sql: "SELECT tok FROM stannum.tokenize('Hello Café', tokenizer => 'unicode') AS t(tok)"
+      - value:
+          as: whitespace
+          sql: "SELECT tok FROM stannum.tokenize('Hello Café', tokenizer => 'whitespace') AS t(tok)"
+      - value:
+          as: quote
+          sql: "SELECT stannum.maybe_quote('hello')"
+      - value:
+          as: parse
+          sql: "SELECT stannum.ql_parse('title:(needle)', true, 'unicode', 'fold', 'fold', 'split', 256, 'emoji', 'preserve')"

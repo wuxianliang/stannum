@@ -1,0 +1,147 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: ddl
+corpora:
+  weights:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: beer, body: wine}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body) WITH (field_weights = 'title:3,body:1')"
+  accepted:
+    columns: "id int primary key, body text"
+    rows:
+      - [1, needle]
+    index_sql:
+      - >-
+        CREATE INDEX {index} ON {table} USING {engine}(body) WITH (
+        tokenizer = unicode, case_folding = fold, accent_folding = fold,
+        long_tokens = split, max_token_bytes = 256, graphemes = emoji,
+        position_gaps = preserve, k1 = 1.2, b = 0.75, score_stop_words = 'auto')
+  tin:
+    columns: "id int primary key, body text"
+    rows:
+      - [1, pad]
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body)"
+cases:
+  - id: ddl.columns_16
+    description: A 16-key index is accepted.
+    capture:
+      - script:
+          steps:
+            - sql: >-
+                CREATE TABLE wide16 (id int primary key,
+                c0 text, c1 text, c2 text, c3 text, c4 text, c5 text, c6 text, c7 text,
+                c8 text, c9 text, c10 text, c11 text, c12 text, c13 text, c14 text, c15 text)
+              capture: false
+            - sql: >-
+                INSERT INTO wide16 VALUES (1,'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p')
+              capture: false
+            - sql: >-
+                CREATE INDEX wide16_idx ON wide16 USING stannum(
+                c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15)
+              capture: false
+            - sql: "SELECT stannum.search_count('wide16_idx', 'a')"
+  - id: ddl.columns_17
+    description: A 17th key column is rejected.
+    capture:
+      - script:
+          steps:
+            - sql: >-
+                CREATE TABLE wide17 (id int primary key,
+                c0 text, c1 text, c2 text, c3 text, c4 text, c5 text, c6 text, c7 text,
+                c8 text, c9 text, c10 text, c11 text, c12 text, c13 text, c14 text, c15 text, c16 text)
+              capture: false
+            - sql: >-
+                CREATE INDEX wide17_idx ON wide17 USING stannum(
+                c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16)
+  - id: ddl.include_rejected
+    description: amcaninclude is not set, so INCLUDE is rejected.
+    capture:
+      - script:
+          steps:
+            - sql: "CREATE TABLE inc_docs (id int primary key, body text)"
+              capture: false
+            - sql: "CREATE INDEX inc_idx ON inc_docs USING stannum(body) INCLUDE (id)"
+  - id: ddl.expression_key
+    description: A multi-column index rejects an expression key.
+    capture:
+      - script:
+          steps:
+            - sql: "CREATE TABLE expr_docs (id int primary key, title text, body text)"
+              capture: false
+            - sql: "CREATE INDEX expr_idx ON expr_docs USING stannum((lower(title)), body)"
+  - id: ddl.field_weights_alter
+    description: ALTER INDEX SET and RESET of field_weights are rejected once the library is loaded.
+    corpus: weights
+    capture:
+      - error:
+          as: set_weights
+          sql: "ALTER INDEX {index} SET (field_weights = 'title:2,body:1')"
+      - error:
+          as: reset_weights
+          sql: "ALTER INDEX {index} RESET (field_weights)"
+  - id: ddl.reloptions_accepted
+    description: The non-ignored reloptions, including tokenizer=unicode, k1=1.2, and b=0.75, are accepted.
+    corpus: accepted
+    covers:
+      - reloption:tokenizer
+      - reloption:case_folding
+      - reloption:accent_folding
+      - reloption:long_tokens
+      - reloption:max_token_bytes
+      - reloption:graphemes
+      - reloption:position_gaps
+      - reloption:k1
+      - reloption:b
+      - reloption:score_stop_words
+      - reloption:field_weights
+    capture:
+      - value:
+          sql: "SELECT reloptions FROM pg_class WHERE relname = '{index}'"
+      - value:
+          as: weights_stored
+          corpus: weights
+          sql: "SELECT reloptions FROM pg_class WHERE relname = '{index}'"
+  - id: ddl.tin_ignored
+    description: Five TIN-compatibility reloptions are accepted and warn that Stannum ignores them.
+    corpus: tin
+    covers:
+      - reloption:initial_segment_count
+      - reloption:target_segment_count
+      - reloption:max_mutable_segment_size
+      - reloption:max_merged_segment_size
+      - reloption:dead_percent_threshold
+    capture:
+      - notices:
+          as: initial_segment_count
+          sql: "CREATE INDEX tin_a ON {table} USING stannum(body) WITH (initial_segment_count = 2)"
+      - notices:
+          as: target_segment_count
+          sql: "CREATE INDEX tin_b ON {table} USING stannum(body) WITH (target_segment_count = 1)"
+      - notices:
+          as: max_mutable_segment_size
+          sql: "CREATE INDEX tin_c ON {table} USING stannum(body) WITH (max_mutable_segment_size = 4194304)"
+      - notices:
+          as: max_merged_segment_size
+          sql: "CREATE INDEX tin_d ON {table} USING stannum(body) WITH (max_merged_segment_size = 2000)"
+      - notices:
+          as: dead_percent_threshold
+          sql: "CREATE INDEX tin_e ON {table} USING stannum(body) WITH (dead_percent_threshold = 0.5)"
+  - id: ddl.tokenizer_jieba
+    description: tokenizer=jieba is a real enum value on this 0.4.0 lineage.
+    capture:
+      - script:
+          steps:
+            - sql: "CREATE TABLE jieba_docs (id int primary key, body text)"
+              capture: false
+            - sql: "INSERT INTO jieba_docs VALUES (1, 'hello')"
+              capture: false
+            - sql: "CREATE INDEX jieba_docs_idx ON jieba_docs USING stannum(body) WITH (tokenizer = jieba)"
+              capture: false
+            - sql: >
+                SELECT to_hex(runtime_dict_fingerprint), matches
+                FROM stannum.index_analysis('jieba_docs_idx')

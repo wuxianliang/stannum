@@ -1,0 +1,43 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: parallel
+cases:
+  - id: parallel.custom_dict
+    description: >
+      A nonempty jieba_words dictionary returns the serial rows and both plans
+      (custom scan on and off) have no parallel worker. Plan text is reduced to
+      that flag so costs and oids are not recorded.
+    capture:
+      - script:
+          steps:
+            - sql: "INSERT INTO stannum.jieba_words (word, freq, tag) VALUES ('customtoken', 10, 'n')"
+              capture: false
+            - sql: "CREATE TABLE par_docs (id int primary key, body text)"
+              capture: false
+            - sql: "INSERT INTO par_docs SELECT n, 'customtoken pad ' || n FROM generate_series(1, 40) n"
+              capture: false
+            - sql: "CREATE INDEX par_idx ON par_docs USING stannum(body) WITH (tokenizer = jieba)"
+              capture: false
+            - sql: "SET max_parallel_workers_per_gather = 2"
+              capture: false
+            - sql: "SET parallel_setup_cost = 0"
+              capture: false
+            - sql: "SET parallel_tuple_cost = 0"
+              capture: false
+            - sql: "SET min_parallel_table_scan_size = 0"
+              capture: false
+            - sql: "SET min_parallel_index_scan_size = 0"
+              capture: false
+            - sql: "SET enable_seqscan = off"
+              capture: false
+            - sql: "SET stannum.enable_custom_scan = on"
+              capture: false
+            - sql: "EXPLAIN SELECT id FROM par_docs WHERE body ==> 'customtoken'"
+              normalize: explain_parallel
+            - sql: "SET stannum.enable_custom_scan = off"
+              capture: false
+            - sql: "EXPLAIN SELECT id FROM par_docs WHERE body ==> 'customtoken'"
+              normalize: explain_parallel
+            - sql: "SELECT count(*) FROM par_docs WHERE body ==> 'customtoken'"

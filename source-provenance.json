@@ -1014,6 +1014,50 @@
     "contract/run.py": {
       "owner": "ben",
       "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7); engine-agnostic runner structure preserved, case list emptied until the pinned 0.4.0 producer records answers."
+    },
+    "contract/exclusions.yaml": {
+      "owner": "ben",
+      "evidence": "Original exclusion list for the 0.4.0 tool-contract suite. Cites the HOT-underfill pg_test that is not expressible as SQL."
+    },
+    "contract/divergences/stannum.yaml": {
+      "owner": "ben",
+      "evidence": "Original divergence file for the stannum tool-contract suite. Empty on 0.4.0; entries may carry expected error text for later engines."
+    },
+    "contract/cases/arithmetic.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for the design section 5.2 arithmetic rows. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/calls.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for the pgembed call patterns. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/catalog.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for the catalog surface, GUCs, and ACLs. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/ddl.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for DDL limits and reloptions. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/expansion.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for expansion past max_expansion. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/fields.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for fielded phrases, spans, highlights, and patterns. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/parallel.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for a nonempty custom dictionary forcing serial plans. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/segments.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for a token posted in two segments plus a dead document. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/tokenizer.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for tokenizer symmetry. Expected values are recorded, not hand-written."
     }
   }
 }

@@ -1,0 +1,50 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: segments
+corpora:
+  two:
+    columns: "id int primary key, body text"
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body)"
+    after_index_sql:
+      - "SET stannum.write_buffer_docs = 1"
+      - "SET stannum.max_merge_docs = 0"
+      - "INSERT INTO {table} VALUES (1, 'needle'), (2, 'needle other')"
+      - "DELETE FROM {table} WHERE id = 1"
+      - "INSERT INTO {table} VALUES (3, 'needle')"
+      - "RESET stannum.write_buffer_docs"
+      - "RESET stannum.max_merge_docs"
+cases:
+  - id: segments.two_plus_dead
+    description: >
+      The same token posted into more than one segment, plus a deleted document
+      that remains in N until rewrite. Page counts and root blocks are omitted.
+      average_length is the hard-coded 0.0.
+    corpus: two
+    capture:
+      - value:
+          as: segments
+          sql: >
+            SELECT ordinal, kind, docs, dead_docs, sum_doc_lengths
+            FROM stannum.segment_info('{index}'::regclass) ORDER BY ordinal
+      - value:
+          as: stats
+          sql: >
+            SELECT documents, dead_documents, segments, average_length, analysis_matches
+            FROM stannum.index_stats('{index}'::regclass)
+      - value:
+          as: visible
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+      - value:
+          as: health
+          sql: >
+            SELECT documents, dead_documents, average_length
+            FROM stannum.index_health
+            WHERE index = '{index}'::regclass

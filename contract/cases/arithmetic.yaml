@@ -1,0 +1,124 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: arithmetic
+corpora:
+  row1:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: needle, body: pad}
+      - {id: 2, title: pad, body: needle}
+      - {id: 3, title: "needle needle", body: pad}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body)"
+  row2:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: needle, body: pad}
+      - {id: 2, title: pad, body: "needle needle needle"}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body) WITH (field_weights = 'title:3,body:1')"
+  row3:
+    columns: "id int primary key, body text"
+    rows:
+      - [1, needle]
+      - [2, "needle needle"]
+      - [3, pad]
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body)"
+  row4:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: needle, body: pad}
+      - {id: 2, title: pad, body: needle}
+      - {id: 3, title: needle, body: needle}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body)"
+  row5:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: needle, body: x}
+      - {id: 2, title: needle, body: "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x"}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body)"
+cases:
+  - id: arithmetic.row1_unweighted_tie
+    description: >
+      Unweighted (title, body). Aggregate df of needle is 3, so ids 1 and 2 tie
+      and id 3 ranks first. Tie identity is f32 bits; tie order is ascending ctid.
+    corpus: row1
+    capture:
+      - value:
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 10, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('{index}'::regclass, 'needle')"
+  - id: arithmetic.row2_field_weights
+    description: >
+      field_weights title:3,body:1. One short title hit against one high-tf body
+      hit. Order and bits are the 0.4.0 recording; weight sits inside tf* and len*.
+    corpus: row2
+    capture:
+      - value:
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 10, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+  - id: arithmetic.row3_single_column
+    description: Single-column index, weight 1.0, no fielded key. Order matches the 0.4.0 recording.
+    corpus: row3
+    capture:
+      - value:
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 10, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+  - id: arithmetic.row4_both_fields
+    description: >
+      A document containing the term in both fields, beside field-only hits.
+      search_count is the union of matching documents. Score bits lock the fused key.
+    corpus: row4
+    capture:
+      - value:
+          as: ranked
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 10, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('{index}'::regclass, 'needle')"
+  - id: arithmetic.row5_scoped_length
+    description: >
+      Equal title tf and unequal body lengths. Unscoped and title:(needle) both
+      rank the short document first; mask-only len* would tie them. Bits must not tie.
+    corpus: row5
+    capture:
+      - value:
+          as: unscoped
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 10, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+      - value:
+          as: scoped
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:(needle)', "limit" => 10, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
