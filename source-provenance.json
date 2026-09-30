@@ -524,9 +524,61 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
     },
+    "contract/cases/arithmetic.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for the design section 5.2 arithmetic rows. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/calls.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for the pgembed call patterns. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/capabilities.yaml": {
+      "owner": "ben",
+      "evidence": "Original shape gate for stannum.capabilities(). Spec is embedded in the case (design section 4.2 / section 7 item 3); there is no 0.4.0 recording."
+    },
+    "contract/cases/catalog.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for the catalog surface, GUCs, and ACLs. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/ddl.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for DDL limits and reloptions. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/expansion.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for expansion past max_expansion. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/fields.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract cases for fielded phrases, spans, highlights, and patterns. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/parallel.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for a nonempty custom dictionary forcing serial plans. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/segments.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for a token posted in two segments plus a dead document. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/stats.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case locking index_stats.average_length at 0.0. Expected values are recorded, not hand-written."
+    },
+    "contract/cases/tokenizer.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case for tokenizer symmetry. Expected values are recorded, not hand-written."
+    },
+    "contract/divergences/stannum.yaml": {
+      "owner": "ben",
+      "evidence": "Original divergence file for the stannum tool-contract suite. Empty on 0.4.0; entries may carry expected error text for later engines."
+    },
+    "contract/exclusions.yaml": {
+      "owner": "ben",
+      "evidence": "Exclusion list for the tool-contract suite. HOT underfill cites the pg_test that is not expressible as SQL. capabilities.shape is excluded only on engine 0.4.0 (design section 7 item 3, 0.5.0-only / new-objects)."
+    },
     "contract/run.py": {
       "owner": "ben",
-      "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7); engine-agnostic runner structure preserved, case list emptied until the pinned 0.4.0 producer records answers."
+      "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7). Carries the 0.4.0 cases plus the capabilities shape gate and engine-scoped exclusions."
     },
     "docs/query-language/README.md": {
       "owner": "mixed",
@@ -723,6 +775,14 @@
     "postgres/src/tin_conformance.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation, written 2026-09-26 to record and replay PlanetScale TIN 1.0.3 responses."
+    },
+    "postgres/src/tool/capabilities.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum capabilities() document for the tool-layer contract (design section 4.2). Not copied from Lead."
+    },
+    "postgres/src/tool/mod.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L2 tool-layer module. States the design section 3 seam: this layer imports nothing from engine internals."
     },
     "postgres/src/udfs.rs": {
       "owner": "mixed",

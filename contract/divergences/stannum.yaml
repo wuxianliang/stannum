@@ -1,0 +1,19 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+# Intentional differences from a recorded engine-version. Empty on 0.4.0.
+# A later entry may pin the error text this engine must produce (design §4.2 / #88):
+#
+# divergences:
+#   - id: some.case
+#     against: stannum-0.4.0
+#     kind: gap
+#     captures: [error]
+#     summary: error text differs from 0.4.0
+#     expected:
+#       error:
+#         sqlstate: "22023"
+#         message: "exact text"
+#         # or message_prefix: "REINDEX to change field_weights"
+divergences: []

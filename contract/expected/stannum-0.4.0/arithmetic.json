@@ -1,0 +1,107 @@
+{
+ "source": {
+  "engine": "stannum",
+  "extension_version": "0.4.0",
+  "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+  "host": "postgresql 17.11 homebrew aarch64",
+  "suite_commit": "fbf3d98b4cbb55650d664857de87eb51966ef8a1",
+  "runner_version": "2"
+ },
+ "cases": [
+  {
+   "id": "arithmetic.row1_unweighted_tie",
+   "captures": {
+    "value": [
+     [
+      3,
+      "3e2e071f"
+     ],
+     [
+      1,
+      "3e113925"
+     ],
+     [
+      2,
+      "3e113925"
+     ]
+    ],
+    "count": 3
+   }
+  },
+  {
+   "id": "arithmetic.row2_field_weights",
+   "captures": {
+    "value": [
+     [
+      1,
+      "3e99424c"
+     ],
+     [
+      2,
+      "3e8ca98f"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "arithmetic.row3_single_column",
+   "captures": {
+    "value": [
+     [
+      2,
+      "3f110b5e"
+     ],
+     [
+      1,
+      "3f060744"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "arithmetic.row4_both_fields",
+   "captures": {
+    "ranked": [
+     [
+      3,
+      "3e3c031f"
+     ],
+     [
+      1,
+      "3e08bc74"
+     ],
+     [
+      2,
+      "3e08bc74"
+     ]
+    ],
+    "count": 3
+   }
+  },
+  {
+   "id": "arithmetic.row5_scoped_length",
+   "captures": {
+    "unscoped": [
+     [
+      1,
+      "3e91be8d"
+     ],
+     [
+      2,
+      "3e0953d6"
+     ]
+    ],
+    "scoped": [
+     [
+      1,
+      "3e91be8d"
+     ],
+     [
+      2,
+      "3e0953d6"
+     ]
+    ]
+   }
+  }
+ ]
+}

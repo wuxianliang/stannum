@@ -1,0 +1,41 @@
+{
+ "source": {
+  "engine": "stannum",
+  "extension_version": "0.4.0",
+  "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+  "host": "postgresql 17.11 homebrew aarch64",
+  "suite_commit": "d07c135b17a547ee85a890bbd7d9960a675fa164",
+  "extension_commit": "32211c25ddc86453e539c4d668d657e3e2f500e9",
+  "runner_version": "2"
+ },
+ "cases": [
+  {
+   "id": "parallel.custom_dict",
+   "captures": {
+    "script": [
+     {
+      "has_parallel_worker": false
+     },
+     {
+      "has_parallel_worker": false
+     },
+     40
+    ]
+   }
+  },
+  {
+   "id": "parallel.empty_dict",
+   "captures": {
+    "script": [
+     {
+      "has_parallel_worker": true
+     },
+     {
+      "has_parallel_worker": true
+     },
+     200
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: capabilities
+cases:
+  - id: capabilities.shape
+    description: >
+      §4.2 shape gate for stannum.capabilities(). The literals are the
+      contract, not a 0.4.0 recording (design §7 item 3, 0.5.0-only /
+      new-objects). Object key order is not compared: jsonb sorts keys, so
+      the gate compares sorted key sets. Array order of tokenizers and
+      stop_word_presets is the byte contract. The function is IMMUTABLE
+      STRICT PARALLEL SAFE and returns jsonb.
+    shape: true
+    capture:
+      - value:
+          as: shape
+          sql: |
+            SELECT p.provolatile,
+                   p.proparallel,
+                   p.proisstrict,
+                   p.prosecdef,
+                   pg_get_function_result(p.oid),
+                   pg_get_function_identity_arguments(p.oid),
+                   (SELECT array_agg(k ORDER BY k COLLATE "C")
+                      FROM jsonb_object_keys(c) AS k),
+                   (c->>'contract_version')::int,
+                   (SELECT array_agg(k ORDER BY k COLLATE "C")
+                      FROM jsonb_object_keys(c->'engine') AS k),
+                   c#>>'{engine,name}',
+                   c#>>'{engine,format}',
+                   c#>>'{engine,version}',
+                   (SELECT array_agg(k ORDER BY k COLLATE "C")
+                      FROM jsonb_object_keys(c->'features') AS k),
+                   (c#>>'{features,bm25f}')::boolean,
+                   (c#>>'{features,field_phrases}')::boolean,
+                   (c#>>'{features,field_highlights}')::boolean,
+                   (c#>>'{features,highlight_field_arity}')::int,
+                   ARRAY(
+                     SELECT elem
+                     FROM jsonb_array_elements_text(c#>'{features,tokenizers}')
+                       WITH ORDINALITY AS t(elem, ord)
+                     ORDER BY ord),
+                   ARRAY(
+                     SELECT elem
+                     FROM jsonb_array_elements_text(c#>'{features,stop_word_presets}')
+                       WITH ORDINALITY AS t(elem, ord)
+                     ORDER BY ord),
+                   (c#>>'{features,jieba_ddl}')::boolean,
+                   (c#>>'{features,standby_reads}')::boolean,
+                   (SELECT array_agg(k ORDER BY k COLLATE "C")
+                      FROM jsonb_object_keys(c->'limits') AS k),
+                   (c#>>'{limits,max_expansion}')::int
+            FROM stannum.capabilities() AS c
+            CROSS JOIN pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'stannum' AND p.proname = 'capabilities'
+          expect:
+            # volatility, parallel, strict, secdef, result, args,
+            # top keys, contract_version, engine keys, name, format, version,
+            # feature keys, bm25f, field_phrases, field_highlights, arity,
+            # tokenizers, stop_word_presets, jieba_ddl, standby_reads,
+            # limit keys, max_expansion
+            - - i
+              - s
+              - true
+              - false
+              - jsonb
+              - ""
+              - [contract_version, engine, features, limits]
+              - 1
+              - [format, name, version]
+              - stannum
+              - STN3
+              - "0.5.0"
+              - [bm25f, field_highlights, field_phrases, highlight_field_arity, jieba_ddl, standby_reads, stop_word_presets, tokenizers]
+              - true
+              - true
+              - true
+              - 5
+              - [unicode, whitespace, jieba]
+              - ["auto", "auto:zh", "auto:en"]
+              - true
+              - true
+              - [max_expansion]
+              - 1024

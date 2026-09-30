@@ -1,0 +1,144 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: fields
+corpora:
+  spans:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: "alpha beta", body: other}
+      - {id: 2, title: alpha, body: beta}
+      - {id: 3, title: "beta alpha", body: pad}
+      - {id: 4, title: "alpha xx beta", body: pad}
+      - {id: 5, title: null, body: "needle here"}
+      - {id: 6, title: needle, body: null}
+      - {id: 7, title: pad, body: "alpha beta"}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body)"
+  patterns:
+    columns: "id int primary key, title text, body text"
+    rows:
+      - {id: 1, title: apple, body: other}
+      - {id: 2, title: apply, body: zebra}
+      - {id: 3, title: needle, body: "alpha beta"}
+      - {id: 4, title: zzz, body: apple}
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(title, body)"
+cases:
+  - id: fields.phrase_no_cross
+    description: An unscoped phrase matches inside one field only, never across fields.
+    corpus: spans
+    capture:
+      - value:
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, '"alpha beta"', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+  - id: fields.phrase_scoped
+    description: >
+      A body-only phrase matches unscoped search and must not be returned by title:().
+    corpus: spans
+    capture:
+      - value:
+          as: unscoped
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, '"alpha beta"', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: scoped
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:("alpha beta")', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+  - id: fields.then_no_cross
+    description: Unscoped THEN must not match across fields.
+    corpus: spans
+    capture:
+      - value:
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'alpha THEN/0 beta', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+  - id: fields.near_no_cross
+    description: Unscoped NEAR must not match across fields.
+    corpus: spans
+    capture:
+      - value:
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'alpha NEAR/1 beta', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+  - id: fields.snippets
+    description: >
+      search() returns the wrapper field, else the first field with a mark,
+      else the first non-NULL column. NULL columns are skipped.
+    corpus: spans
+    capture:
+      - value:
+          as: unscoped
+          sql: >
+            SELECT d.id, s.snippet FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'alpha', "limit" => 10) s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: wrapper
+          sql: >
+            SELECT d.id, s.snippet FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:(alpha)', "limit" => 10) s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: null_skip
+          sql: >
+            SELECT d.id, s.snippet FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'needle', "limit" => 10) s
+              ON d.ctid = s.ctid ORDER BY d.id
+  - id: fields.highlight_spans
+    description: 5-arg highlight confines marks to the named field; unknown field errors.
+    corpus: spans
+    capture:
+      - value:
+          as: field_mark
+          sql: >
+            SELECT id, stannum.highlight(title, '<mark>', '</mark>', 'alpha', 'title')
+            FROM {table} WHERE id = 1
+      - error:
+          as: unknown_field
+          sql: "SELECT stannum.highlight('alpha', '<mark>', '</mark>', 'alpha', 'nope')"
+  - id: fields.patterns
+    description: >
+      Fielded wildcard, regex, fuzzy, and range via title:(...). The body-only
+      apple row is an off-field hit: unscoped wildcard returns it, title:() does not.
+    corpus: patterns
+    capture:
+      - value:
+          as: unscoped_wildcard
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'app*', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: wildcard
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:(app*)', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: regex
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:(MATCHES app.*)', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: fuzzy
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:(apple~1)', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: range
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('{index}'::regclass, 'title:(apple TO apply)', snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id

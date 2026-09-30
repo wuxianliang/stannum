@@ -1,4 +1,8 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
 # Cases
 
-Empty case list. Do not port `conformance/cases/*.yaml` here. Tool-contract
-cases land in plan step 1.2 (`docs/plans/stn3-tool-layer-execution-2026-09-30.md`).
+Declarative tool-contract cases for plan step 1.2. One file per `area`;
+the file stem is the area name. Do not port `conformance/cases/*.yaml`.

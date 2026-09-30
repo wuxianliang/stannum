@@ -26,6 +26,7 @@ mod stream;
 mod tf_bucket {
     pub(crate) use segment::tf_bucket::*;
 }
+mod tool;
 mod udfs;
 
 /// Stannum against TIN 1.0.3's recorded answers (see the module).

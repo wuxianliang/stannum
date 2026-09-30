@@ -1,0 +1,24 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+area: stats
+corpora:
+  stats_docs:
+    columns: "id int primary key, body text"
+    rows:
+      - [1, needle]
+      - [2, pad]
+    index_sql:
+      - "CREATE INDEX {index} ON {table} USING {engine}(body)"
+cases:
+  - id: stats.index_stats
+    corpus: stats_docs
+    description: >
+      index_stats.average_length is the hard-coded 0.0. documents and the
+      analysis columns are present; a missing column errors instead of recording.
+    capture:
+      - value:
+          sql: >
+            SELECT documents, dead_documents, average_length, analysis_matches, analysis_detail
+            FROM stannum.index_stats('{index}'::regclass)

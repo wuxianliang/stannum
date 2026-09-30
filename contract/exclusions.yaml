@@ -1,0 +1,23 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+# Case ids deliberately not recorded, and object-coverage waivers.
+# An excluded case skips; it does not fail check mode for a missing recording.
+# `engines`, when set, scopes the skip to those live extension versions during
+# --check and --record only. Other engines still run the case.
+excluded:
+  - id: hot.underfill
+    reason: >-
+      Not a SQL case. A normal HOT update leaves only the root indexed.
+      Enforcement is the pg_test search_acceptance_rejects_hot_root_and_member_underfill
+      in postgres/src/search.rs, which injects PrunedCandidates holding both
+      root and member. accepted_pruned_rows rejects when visible.len() != pruned.rows.len().
+  - id: capabilities.shape
+    engines: ["0.4.0"]
+    reason: >-
+      0.5.0-only / new-objects (design §7 item 3). capabilities() has no
+      0.4.0 recording; its gate is the §4.2 shape, not a replay. The
+      function does not exist on 0.4.0, so the case is excluded from the
+      0.4.0 replay only.
+objects: []
