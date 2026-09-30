@@ -1,0 +1,537 @@
+{
+ "source": {
+  "engine": "stannum",
+  "extension_version": "0.4.0",
+  "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+  "host": "postgresql 17.11 homebrew aarch64",
+  "suite_commit": "fbf3d98b4cbb55650d664857de87eb51966ef8a1",
+  "runner_version": "2"
+ },
+ "cases": [
+  {
+   "id": "catalog.functions",
+   "captures": {
+    "value": [
+     [
+      "amhandler",
+      "internal",
+      "i",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "bind_query",
+      "query text, index oid",
+      "i",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "builtin_stop_words",
+      "preset text",
+      "i",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "full_score",
+      "ctid tid",
+      "i",
+      "u",
+      true,
+      true,
+      "score_support"
+     ],
+     [
+      "full_score",
+      "ctid tid, k1 real, b real",
+      "i",
+      "u",
+      false,
+      true,
+      "score_support"
+     ],
+     [
+      "highlight",
+      "text text, begin_tag text, end_tag text, query stannum.indexed_query",
+      "s",
+      "s",
+      false,
+      true,
+      null
+     ],
+     [
+      "highlight",
+      "text text, begin_tag text, end_tag text, query stannum.indexed_query, field text",
+      "s",
+      "s",
+      false,
+      true,
+      null
+     ],
+     [
+      "highlight",
+      "text text, begin_tag text, end_tag text, query text",
+      "i",
+      "s",
+      false,
+      true,
+      "highlight_support"
+     ],
+     [
+      "highlight",
+      "text text, begin_tag text, end_tag text, query text, field text",
+      "i",
+      "s",
+      false,
+      true,
+      null
+     ],
+     [
+      "highlight_ansi",
+      "text text, wrap_to integer, query stannum.indexed_query",
+      "s",
+      "s",
+      false,
+      true,
+      null
+     ],
+     [
+      "highlight_ansi",
+      "text text, wrap_to integer, query text",
+      "i",
+      "s",
+      false,
+      true,
+      "highlight_support"
+     ],
+     [
+      "highlight_support",
+      "request internal",
+      "i",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "index_analysis",
+      "index regclass",
+      "s",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "index_reads_allowed",
+      "index regclass",
+      "v",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "index_stats",
+      "index regclass",
+      "v",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "indexed_query_in",
+      "input cstring",
+      "i",
+      "s",
+      false,
+      true,
+      null
+     ],
+     [
+      "indexed_query_out",
+      "input stannum.indexed_query",
+      "i",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "jieba_add_word",
+      "word text, freq integer, tag text",
+      "v",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "jieba_delete_word",
+      "word text",
+      "v",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "jieba_dict_version",
+      "",
+      "s",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "jieba_reload_dict",
+      "",
+      "v",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "logs_removal_horizons",
+      "index regclass",
+      "v",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "max_score",
+      "ctid tid",
+      "i",
+      "u",
+      true,
+      true,
+      "score_support"
+     ],
+     [
+      "maybe_quote",
+      "text text",
+      "i",
+      "s",
+      false,
+      true,
+      null
+     ],
+     [
+      "ql_parse",
+      "query text, surface boolean, tokenizer text, case_folding text, accent_folding text, long_tokens text, max_token_bytes integer, graphemes text, position_gaps text",
+      "s",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "score",
+      "ctid tid, dense_ratio real, k1 real, b real, term_add text[], term_replace text[]",
+      "i",
+      "u",
+      false,
+      true,
+      "score_support"
+     ],
+     [
+      "score_bound",
+      "document text, query text, heap_oid integer, index_oid integer, mode integer, dense_ratio real, k1 real, b real, term_add text[], term_replace text[]",
+      "v",
+      "u",
+      false,
+      false,
+      null
+     ],
+     [
+      "score_bound_indexed",
+      "ctid tid, query text, heap_oid integer, index_oid integer, mode integer, dense_ratio real, k1 real, b real, term_add text[], term_replace text[]",
+      "v",
+      "u",
+      false,
+      false,
+      null
+     ],
+     [
+      "score_inspect",
+      "index regclass, query text, dense_ratio real, term_add text[], term_replace text[]",
+      "v",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "score_support",
+      "request internal",
+      "i",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "search",
+      "index regclass, query text, \"limit\" integer, snippet text, begin_tag text, end_tag text, k1 real, b real",
+      "v",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "search_count",
+      "index regclass, query text",
+      "v",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "segment_info",
+      "index regclass",
+      "v",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "stannum_text_cmpfunc",
+      "document text, query text",
+      "i",
+      "s",
+      true,
+      true,
+      "stannum_text_cmpfunc_support"
+     ],
+     [
+      "stannum_text_cmpfunc_indexed",
+      "document text, query stannum.indexed_query",
+      "s",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "stannum_text_cmpfunc_support",
+      "request internal",
+      "i",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "stannum_text_restrict",
+      "internal, oid, internal, integer",
+      "v",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "tokenize",
+      "text text, tokenizer text, case_folding text, accent_folding text, long_tokens text, max_token_bytes integer, graphemes text, position_gaps text",
+      "s",
+      "u",
+      false,
+      true,
+      null
+     ],
+     [
+      "verify_index",
+      "index regclass, heap_check boolean",
+      "v",
+      "u",
+      true,
+      true,
+      null
+     ],
+     [
+      "version",
+      "",
+      "i",
+      "s",
+      true,
+      true,
+      null
+     ],
+     [
+      "wal_rmgr_id",
+      "",
+      "s",
+      "s",
+      true,
+      true,
+      null
+     ]
+    ]
+   }
+  },
+  {
+   "id": "catalog.operators",
+   "captures": {
+    "operators": [],
+    "opclass": [
+     [
+      "stannum_text_ops",
+      true,
+      "stannum"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "catalog.acls",
+   "captures": {
+    "relations": [
+     [
+      "index_health",
+      true,
+      [
+       "security_invoker=true"
+      ]
+     ],
+     [
+      "jieba_words",
+      false,
+      null
+     ]
+    ],
+    "functions": [
+     [
+      "score_bound",
+      "document text, query text, heap_oid integer, index_oid integer, mode integer, dense_ratio real, k1 real, b real, term_add text[], term_replace text[]",
+      false
+     ],
+     [
+      "score_bound_indexed",
+      "ctid tid, query text, heap_oid integer, index_oid integer, mode integer, dense_ratio real, k1 real, b real, term_add text[], term_replace text[]",
+      false
+     ]
+    ]
+   }
+  },
+  {
+   "id": "catalog.gucs",
+   "captures": {
+    "settings": [
+     [
+      "stannum.build_segment_docs",
+      "32768",
+      "32768",
+      "1",
+      "10000000",
+      "integer",
+      "user",
+      null
+     ],
+     [
+      "stannum.enable_custom_scan",
+      "on",
+      "on",
+      null,
+      null,
+      "bool",
+      "user",
+      null
+     ],
+     [
+      "stannum.experimental_vacuum_merge_strategy",
+      "Auto",
+      "Auto",
+      null,
+      null,
+      "enum",
+      "user",
+      "{Auto,Direct,Reconstruct}"
+     ],
+     [
+      "stannum.max_merge_docs",
+      "1024",
+      "1024",
+      "0",
+      "2147483647",
+      "integer",
+      "user",
+      null
+     ],
+     [
+      "stannum.max_segments",
+      "128",
+      "128",
+      "1",
+      "128",
+      "integer",
+      "user",
+      null
+     ],
+     [
+      "stannum.merge_tier_factor",
+      "8",
+      "8",
+      "2",
+      "64",
+      "integer",
+      "user",
+      null
+     ],
+     [
+      "stannum.strict_analysis",
+      "off",
+      "off",
+      null,
+      null,
+      "bool",
+      "user",
+      null
+     ],
+     [
+      "stannum.write_buffer_bytes",
+      "1048576",
+      "1048576",
+      "1024",
+      "67108864",
+      "integer",
+      "user",
+      null
+     ],
+     [
+      "stannum.write_buffer_docs",
+      "512",
+      "512",
+      "1",
+      "1000000",
+      "integer",
+      "user",
+      null
+     ]
+    ],
+    "show_strategy": "Auto",
+    "wal_rmgr_guc_absent": true
+   }
+  },
+  {
+   "id": "catalog.version",
+   "captures": {
+    "value": "0.4.0"
+   }
+  }
+ ]
+}

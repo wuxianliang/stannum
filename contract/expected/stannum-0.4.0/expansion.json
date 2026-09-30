@@ -1,0 +1,30 @@
+{
+ "source": {
+  "engine": "stannum",
+  "extension_version": "0.4.0",
+  "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+  "host": "postgresql 17.11 homebrew aarch64",
+  "suite_commit": "fbf3d98b4cbb55650d664857de87eb51966ef8a1",
+  "runner_version": "2"
+ },
+ "cases": [
+  {
+   "id": "expansion.over_limit",
+   "captures": {
+    "search_count": 1120,
+    "operator_count": 1100,
+    "sample": [
+     [
+      1
+     ],
+     [
+      1100
+     ],
+     [
+      2001
+     ]
+    ]
+   }
+  }
+ ]
+}

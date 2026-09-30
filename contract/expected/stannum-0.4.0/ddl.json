@@ -1,0 +1,125 @@
+{
+ "source": {
+  "engine": "stannum",
+  "extension_version": "0.4.0",
+  "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+  "host": "postgresql 17.11 homebrew aarch64",
+  "suite_commit": "fbf3d98b4cbb55650d664857de87eb51966ef8a1",
+  "runner_version": "2"
+ },
+ "cases": [
+  {
+   "id": "ddl.columns_16",
+   "captures": {
+    "script": [
+     1
+    ]
+   }
+  },
+  {
+   "id": "ddl.columns_17",
+   "captures": {
+    "script": [
+     {
+      "error": {
+       "sqlstate": "XX000",
+       "message": "stannum multi-column indexes support at most 16 key columns"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "ddl.include_rejected",
+   "captures": {
+    "script": [
+     {
+      "error": {
+       "sqlstate": "0A000",
+       "message": "access method \"stannum\" does not support included columns"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "ddl.expression_key",
+   "captures": {
+    "script": [
+     {
+      "error": {
+       "sqlstate": "XX000",
+       "message": "stannum multi-column indexes reject expression keys"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "ddl.field_weights_alter",
+   "captures": {
+    "set_weights": {
+     "sqlstate": "XX000",
+     "message": "REINDEX to change field_weights"
+    },
+    "reset_weights": {
+     "sqlstate": "XX000",
+     "message": "REINDEX to change field_weights"
+    }
+   }
+  },
+  {
+   "id": "ddl.reloptions_accepted",
+   "captures": {
+    "value": [
+     "tokenizer=unicode",
+     "case_folding=fold",
+     "accent_folding=fold",
+     "long_tokens=split",
+     "max_token_bytes=256",
+     "graphemes=emoji",
+     "position_gaps=preserve",
+     "k1=1.2",
+     "b=0.75",
+     "score_stop_words=auto"
+    ],
+    "weights_stored": [
+     "field_weights=title:3,body:1"
+    ]
+   }
+  },
+  {
+   "id": "ddl.tin_ignored",
+   "captures": {
+    "initial_segment_count": [
+     "Stannum accepts initial_segment_count for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    ],
+    "target_segment_count": [
+     "Stannum accepts target_segment_count for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    ],
+    "max_mutable_segment_size": [
+     "Stannum accepts max_mutable_segment_size for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    ],
+    "max_merged_segment_size": [
+     "Stannum accepts max_merged_segment_size for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    ],
+    "dead_percent_threshold": [
+     "Stannum accepts dead_percent_threshold for TIN compatibility but ignores it; Stannum's storage and maintenance settings apply"
+    ]
+   }
+  },
+  {
+   "id": "ddl.tokenizer_jieba",
+   "captures": {
+    "script": [
+     [
+      [
+       "6855a0736155f3dd",
+       true
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}
