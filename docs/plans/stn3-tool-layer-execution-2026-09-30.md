@@ -95,7 +95,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
   - Review focus: coverage check — every function/reloption/GUC/operator/
     opclass/ACL/view-option has a case or an `exclusions.yaml` line.
 
-- [ ] **1.3 `capabilities()` on both lineages**
+- [x] **1.3 `capabilities()` on both lineages** (stn3 9305ebd / main b195ab0)
   - Goal: the function exists on 0.5.0 (stn3 branch) and its absence on 0.4.0
     is a recorded fact.
   - Scope: `postgres/src/tool/capabilities.rs`; `IMMUTABLE STRICT PARALLEL
@@ -106,7 +106,7 @@ Runs on the **`main` lineage** (`24f5c02`), not on `stn3`.
   - Review focus: design §4.2 — `limits` reports what 0.5.0 enforces; #88
     differences are divergence entries.
 
-**Phase gate P1:** suite green against 0.4.0 recordings; CI replay locked.
+**Phase gate P1:** suite green against 0.4.0 recordings; CI replay locked. — **MET**: 39 cases (1 engine-scoped exclusion, 38 recorded), replay green on PG17+PG18 CI jobs (runs 36672116737 / 36672015529); capabilities() live on stn3 with the §4.2 shape, type-strict gate, max_expansion=1024 measured against tinql.
 
 ---
 
