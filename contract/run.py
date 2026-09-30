@@ -869,6 +869,18 @@ def only_errors(record):
                             for v in captures.values())
 
 
+def capture_set_mismatch(case, want, got):
+    """Three-way equality of capture names. A divergence must not consume this."""
+    case_names = [capture["as"] for capture in case["capture"]]
+    want_names = set((want or {}).get("captures") or {})
+    got_names = set((got or {}).get("captures") or {})
+    if set(case_names) != want_names or set(case_names) != got_names:
+        return "FAIL", (
+            f"capture set mismatch; case {case_names}; recorded {sorted(want_names)}; "
+            f"live {sorted(got_names)}")
+    return None
+
+
 def compare_case(case, want, got):
     if "corpus_error" in got or "corpus_error" in want:
         if "corpus_error" not in got:
@@ -894,13 +906,9 @@ def compare_case(case, want, got):
             return "FAIL", "recorded engine crashed; answered wrongly: " + ", ".join(
                 f"{name} {brief(got['captures'][name])}, correct {brief(expect[name])}" for name in wrong)
         return "PASS", "recorded engine crashed; answered correctly"
-    case_names = [capture["as"] for capture in case["capture"]]
-    want_names = list((want.get("captures") or {}))
-    got_names = list((got.get("captures") or {}))
-    if set(want_names) != set(case_names) or set(got_names) != set(case_names):
-        return "FAIL", (
-            f"capture set mismatch; case {case_names}; recorded {sorted(want_names)}; "
-            f"live {sorted(got_names)}")
+    mismatch = capture_set_mismatch(case, want, got)
+    if mismatch:
+        return mismatch
     statuses, details = [], []
     for capture in case["capture"]:
         name = capture["as"]
@@ -977,6 +985,9 @@ def compare_divergent(case, want, got, entry):
     """Checks a documented divergence: exactly the listed captures differ, and
     for an improvement each is one the recorded engine refused and this one
     answered. Anything else fails, so the file cannot hide a regression."""
+    mismatch = capture_set_mismatch(case, want, got)
+    if mismatch:
+        return mismatch
     listed = set(entry["captures"])
     captures = {capture["as"]: capture for capture in case["capture"]}
     unknown = listed - set(captures)
@@ -985,7 +996,7 @@ def compare_divergent(case, want, got, entry):
     differing = set()
     for name, capture in captures.items():
         if name not in (want.get("captures") or {}) or name not in (got.get("captures") or {}):
-            continue
+            return "FAIL", f"capture set mismatch at {name}; a divergence cannot hide that"
         status, detail = compare_capture(case, capture, want["captures"][name], got["captures"][name])
         if status == "FAIL":
             if name not in listed:
@@ -1274,9 +1285,11 @@ def main():
             if args.check:
                 status, detail = compare_case(case, expected[case["id"]], record)
                 entry = divergences.get(case["id"])
-                if entry and status != "PASS":
+                # A capture-set mismatch is structural. Divergence dispatch must
+                # not replace it with GAP/IMPROVED.
+                if entry and status != "PASS" and not capture_set_mismatch(case, expected[case["id"]], record):
                     status, detail = compare_divergent(case, expected[case["id"]], record, entry)
-                elif entry:
+                elif entry and status == "PASS":
                     status, detail = "FAIL", "matches the recorded engine; remove the documented divergence"
                 emit(status, case["id"], detail)
             else:

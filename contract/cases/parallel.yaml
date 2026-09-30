@@ -43,13 +43,16 @@ cases:
             - sql: "SELECT count(*) FROM par_docs WHERE body ==> 'customtoken'"
   - id: parallel.empty_dict
     description: >
-      Empty jieba_words keeps parallel eligibility. On this 0.4.0 producer a
+      The script deletes jieba_words first, so the dictionary is empty rather than
+      whatever the cluster baseline was. On this 0.4.0 producer a
       200-row jieba index with gather-capable settings and enable_custom_scan
       off plans Gather and Workers Planned: 1. Both explains are recorded as
       the has_parallel_worker flag, not raw plan text.
     capture:
       - script:
           steps:
+            - sql: "DELETE FROM stannum.jieba_words"
+              capture: false
             - sql: "CREATE TABLE empty_docs (id int primary key, body text)"
               capture: false
             - sql: "INSERT INTO empty_docs SELECT n, 'customtoken pad ' || n FROM generate_series(1, 200) n"
