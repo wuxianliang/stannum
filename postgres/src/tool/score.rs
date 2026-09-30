@@ -17,9 +17,9 @@ mod tests {
     }
 
     fn force_index_scan() {
-        // score/full_score are SUPPORT-rewritten; a seq scan hits the stub
-        // and errors "cannot be used in this query context".
-        Spi::run("SET LOCAL enable_seqscan = off").unwrap();
+        // score/full_score are SUPPORT-rewritten; a seq scan or bitmap heap
+        // scan hits the stub and errors "cannot be used in this query context".
+        Spi::run("SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off").unwrap();
     }
 
     fn outcome(sql: &str) -> Option<(String, String)> {
@@ -128,6 +128,14 @@ mod tests {
                    FROM row3 WHERE body ==> 'needle') s",
         );
         assert_eq!(ranked, r#"[[2, "3f110b5e"], [1, "3f060744"]]"#);
+        // dense_ratio => 1.0 retains every term, matching the full program.
+        let dense = text(
+            "SELECT coalesce(json_agg(json_build_array(id, encode(float4send(score), 'hex'))
+             ORDER BY score DESC, ctid), '[]')::text
+             FROM (SELECT id, ctid, stannum.score(ctid, dense_ratio => 1.0) AS score
+                   FROM row3 WHERE body ==> 'needle') s",
+        );
+        assert_eq!(dense, r#"[[2, "3f110b5e"], [1, "3f060744"]]"#);
     }
 
     #[pg_test]
@@ -195,6 +203,42 @@ mod tests {
             added.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             added_again.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         );
+        let without = Spi::get_one::<Vec<f32>>(
+            "SELECT array_agg(stannum.score(ctid) ORDER BY id)
+             FROM edits WHERE body ==> 'alpha' AND id <= 2",
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            without.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            added.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "term_add must change score() on a document that holds the added term"
+        );
+    }
+
+    /// Boost is applied after the f64→f32 IDF cast (R-BIT). Pin the full hex
+    /// of `alpha^2.0` so a later cast-order swap cannot hide behind rounding.
+    #[pg_test]
+    fn alpha_boost_two_score_hex_matches_cast_order() {
+        Spi::run(
+            "CREATE TABLE boosts (id int PRIMARY KEY, body text);
+             INSERT INTO boosts VALUES (1, 'alpha'), (2, 'pad');
+             CREATE INDEX boosts_idx ON boosts USING stannum (body)",
+        )
+        .unwrap();
+        force_index_scan();
+        let boosted = text(
+            "SELECT coalesce(json_agg(json_build_array(id, encode(float4send(score), 'hex'))
+             ORDER BY score DESC, ctid), '[]')::text
+             FROM (SELECT id, ctid, stannum.score(ctid) AS score
+                   FROM boosts WHERE body ==> 'alpha^2.0') s",
+        );
+        assert_eq!(boosted, r#"[[1, "3fb17218"]]"#);
+        let unboosted = text(
+            "SELECT encode(float4send(stannum.score(ctid, dense_ratio => 1.0)), 'hex')
+             FROM boosts WHERE body ==> 'alpha'",
+        );
+        assert_eq!(unboosted, "3f317218");
     }
 
     #[pg_test]

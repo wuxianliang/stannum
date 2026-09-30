@@ -12,8 +12,11 @@
 //! needs the field model, on the `fields` layer (L1). `fields` is declared
 //! but has no items yet, and this module does not import it, so L2 stays
 //! self-contained. Score-family `#[pg_extern]` bodies remain the owned shim
-//! in `crate::score`; this layer holds the §4.1 surface tests for them.
+//! in `crate::score`; search/search_count bodies live in `crate::search`.
+//! This layer holds the §4.1 surface tests for them.
 
 mod capabilities;
 #[cfg(feature = "pg_test")]
 mod score;
+#[cfg(feature = "pg_test")]
+mod search;

@@ -21,6 +21,7 @@ mod operator;
 pub(crate) mod options;
 mod query_limits;
 mod score;
+mod search;
 mod selectivity;
 mod storage;
 mod stream;

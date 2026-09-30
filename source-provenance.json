@@ -671,6 +671,7 @@
       "generated_from": [
         "postgres/src/am.rs",
         "postgres/src/score.rs",
+        "postgres/src/search.rs",
         "postgres/src/operator.rs",
         "postgres/src/highlight_udfs.rs",
         "postgres/src/udfs.rs",
@@ -752,6 +753,12 @@
       "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
       "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
     },
+    "postgres/src/search.rs": {
+      "owner": "mixed",
+      "upstream_path": "postgres/src/highlight.rs",
+      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+      "evidence": "Port of the 0.4.0 standalone search()/search_count() SRF onto STN3. Not a byte copy of Lead; PlanetScale credit is retained because snippet and score paths call inherited highlight and score code."
+    },
     "postgres/src/selectivity.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 69577a09af81322bcf2a036558e8b90c19346cb3."
@@ -787,6 +794,10 @@
     "postgres/src/tool/mod.rs": {
       "owner": "ben",
       "evidence": "Original Stannum L2 tool-layer module. States the design section 3 seam: this layer imports nothing from engine internals."
+    },
+    "postgres/src/tool/search.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L2 pg_tests for the search/search_count SQL surface (design sections 4.1 and 5.1). Does not copy Lead sources; the #[pg_extern] bodies live in postgres/src/search.rs."
     },
     "postgres/src/tool/score.rs": {
       "owner": "ben",
@@ -831,6 +842,10 @@
     "postgres/tests/ranked_fuzz.py": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in c66fd1b570fc111d9cbe3d399065736d8013a447."
+    },
+    "postgres/tests/search_srf.py": {
+      "owner": "ben",
+      "evidence": "Port of the 0.4.0 installed SQL, permission, RLS, and MVCC fallback integration test onto STN3."
     },
     "postgres/tests/test_wide_cursor.py": {
       "owner": "ben",

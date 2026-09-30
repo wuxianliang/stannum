@@ -849,6 +849,16 @@ pub(crate) struct TopK {
     pub(crate) streamed: bool,
 }
 
+pub(crate) struct RankedCandidate {
+    pub(crate) indexed_tid: Tid,
+    pub(crate) score: f32,
+}
+
+pub(crate) struct PrunedCandidates {
+    pub(crate) rows: Vec<RankedCandidate>,
+    pub(crate) complete: bool,
+}
+
 /// How a query's leaf terms combine into its candidate set.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Combine {
@@ -1396,6 +1406,22 @@ impl IndexScorer {
             zero_fill,
             ordinal,
             streamed: false,
+        })
+    }
+
+    /// The WAND candidates exposed to standalone callers without exposing the
+    /// scan-specific `TopK` representation.
+    pub(crate) fn pruned_top_k(&self, k: usize) -> Option<PrunedCandidates> {
+        if k > PRUNE_MAX_K {
+            return None;
+        }
+        self.top_k(k).map(|top| PrunedCandidates {
+            rows: top
+                .rows
+                .into_iter()
+                .map(|(score, indexed_tid)| RankedCandidate { indexed_tid, score })
+                .collect(),
+            complete: top.complete,
         })
     }
 
@@ -4392,6 +4418,76 @@ unsafe fn visible_tids(heap_oid: pg_sys::Oid, tids: BTreeSet<Tid>) -> Vec<Tid> {
     visible
 }
 
+pub(crate) struct VisibleTid {
+    pub(crate) indexed_tid: Tid,
+    pub(crate) visible_tid: Tid,
+}
+
+/// Filters roots to visible HOT members, retaining the first root for each
+/// member in TID order. The fetch state and slot are shared by the batch.
+///
+/// # Safety
+/// `heap_oid` names a relation the caller may open; an active snapshot exists.
+pub(crate) unsafe fn visible_tid_pairs(
+    heap_oid: pg_sys::Oid,
+    tids: BTreeSet<Tid>,
+) -> Vec<VisibleTid> {
+    unsafe {
+        let heap = pg_sys::table_open(heap_oid, pg_sys::AccessShareLock as _);
+        let fetch = pg_sys::table_index_fetch_begin(heap);
+        let slot = pg_sys::table_slot_create(heap, std::ptr::null_mut());
+        let snapshot = pg_sys::GetActiveSnapshot();
+        let mut visible = Vec::new();
+        let mut seen = FxHashSet::default();
+        for indexed_tid in tids {
+            pgrx::check_for_interrupts!();
+            let mut pointer = pg_sys::ItemPointerData {
+                ip_blkid: pg_sys::BlockIdData {
+                    bi_hi: (indexed_tid.block >> 16) as u16,
+                    bi_lo: indexed_tid.block as u16,
+                },
+                ip_posid: indexed_tid.offset,
+            };
+            let mut call_again = false;
+            let mut all_dead = false;
+            let mut found = false;
+            loop {
+                if pg_sys::table_index_fetch_tuple(
+                    fetch,
+                    &mut pointer,
+                    snapshot,
+                    slot,
+                    &mut call_again,
+                    &mut all_dead,
+                ) {
+                    found = true;
+                    break;
+                }
+                if !call_again {
+                    break;
+                }
+            }
+            if !found {
+                continue;
+            }
+            let member = (*slot).tts_tid;
+            let block = (u32::from(member.ip_blkid.bi_hi) << 16) | u32::from(member.ip_blkid.bi_lo);
+            let visible_tid = Tid::new(block, member.ip_posid)
+                .unwrap_or_else(|_| pgrx::error!("invalid visible heap tuple location"));
+            if seen.insert(visible_tid) {
+                visible.push(VisibleTid {
+                    indexed_tid,
+                    visible_tid,
+                });
+            }
+        }
+        pg_sys::ExecDropSingleTupleTableSlot(slot);
+        pg_sys::table_index_fetch_end(fetch);
+        pg_sys::table_close(heap, pg_sys::AccessShareLock as _);
+        visible
+    }
+}
+
 /// A fresh identity for a ranked scan; see [`SCAN_SCORERS`].
 pub(crate) fn scan_id() -> u64 {
     next_stamp()
@@ -4487,6 +4583,29 @@ pub(crate) fn publish_scan_scorer(scan: u64, mut scorer: IndexScorer, ranked: &[
             scorer,
         });
     });
+}
+
+pub(crate) fn build_standalone_scorer(
+    heap_oid: pg_sys::Oid,
+    index_oid: pg_sys::Oid,
+    query: &str,
+    k1: Option<f32>,
+    b: Option<f32>,
+) -> IndexScorer {
+    let key = CacheKey {
+        statement: 0,
+        heap_oid: heap_oid.to_u32(),
+        index_oid: index_oid.to_u32(),
+        query: query.to_owned(),
+        full: true,
+        dense: 0.0_f32.to_bits(),
+        k1: bits(k1),
+        b: bits(b),
+        add: None,
+        replace: None,
+        field: 0,
+    };
+    build_index_scorer(key, k1, b, None, None)
 }
 
 fn build_index_scorer(
@@ -4666,6 +4785,52 @@ impl IndexScorer {
             .collect();
         self.max = Some(max);
         max
+    }
+
+    /// Enumerate every planned root matching this scorer's full query.
+    /// Walks `planned.cursor` and never reads `planned.exact` (design §5.1).
+    pub(crate) fn matching_tids(&self) -> BTreeSet<Tid> {
+        let mut candidates = BTreeSet::new();
+        for ((segment, dead), label) in self.view.sources.iter().zip(&self.view.labels) {
+            pgrx::check_for_interrupts!();
+            let planned = plan(&self.query, &**segment, &Limits::default())
+                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let mut cursor = planned.cursor;
+            if let Some(dead) = dead {
+                let dead = segment_error_in(
+                    crate::storage::dead_cursor(&**segment, dead),
+                    &format!("{label} dead list"),
+                );
+                cursor = Box::new(segment_error_in(
+                    segment::set::Difference::new(cursor, dead),
+                    label,
+                ));
+            }
+            while let Some(tid) = cursor.current() {
+                candidates.insert(tid);
+                segment_error_in(cursor.advance(), label);
+                if candidates.len().is_multiple_of(256) {
+                    pgrx::check_for_interrupts!();
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Score the supplied indexed roots in their stable TID order.
+    pub(crate) fn score_matching_tids(&mut self, tids: &BTreeSet<Tid>) -> Vec<RankedCandidate> {
+        tids.iter()
+            .enumerate()
+            .map(|(n, indexed_tid)| {
+                if n.is_multiple_of(64) {
+                    pgrx::check_for_interrupts!();
+                }
+                RankedCandidate {
+                    indexed_tid: *indexed_tid,
+                    score: self.score(*indexed_tid),
+                }
+            })
+            .collect()
     }
 }
 
