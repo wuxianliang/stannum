@@ -27,7 +27,13 @@ case with no recording, a recording with no case, and a capture-name set that
 does not match the case. A SKIP in check mode fails the run; an exclusion is
 EXCLUDED and does not. Record mode fails on CRASH, ERROR, or LOST. Duplicate case
 ids fail at load. `contract/exclusions.yaml` lists case ids deliberately not
-recorded (`excluded: [{id, reason}, ...]`); an excluded case skips. The same
+recorded (`excluded: [{id, reason}, ...]`); an excluded case skips. An entry
+may set `engines: ["0.4.0"]`: that skip applies only when `--check` or
+`--record` runs against an engine whose `extversion` is in the list. Other
+engines still execute the case. A case with `shape: true` embeds its answer
+in the capture (`expect`) and needs no recording; `--check` compares that
+spec when the case is not excluded and has no recording file. `--shape` runs
+those cases without an expected directory. The same
 file's `objects` list waives manifest coverage. Every function, reloption,
 GUC, operator, opclass, SUPPORT attachment, the `jieba_words` ACL, and
 `index_health.security_invoker` needs a case `covers` entry or an objects

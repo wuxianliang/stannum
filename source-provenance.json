@@ -1027,6 +1027,10 @@
       "owner": "ben",
       "evidence": "Original 0.4.0 contract cases for the design section 5.2 arithmetic rows. Expected values are recorded, not hand-written."
     },
+    "contract/cases/capabilities.yaml": {
+      "owner": "ben",
+      "evidence": "Original shape gate for stannum.capabilities(). Spec is embedded in the case (design §4.2 / §7 item 3); there is no 0.4.0 recording."
+    },
     "contract/cases/calls.yaml": {
       "owner": "ben",
       "evidence": "Original 0.4.0 contract cases for the pgembed call patterns. Expected values are recorded, not hand-written."

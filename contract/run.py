@@ -6,7 +6,7 @@
 """Run the stannum tool-contract suite against one engine.
 
     python3 contract/run.py --engine tin|stannum [--dsn-env NAME]
-        [--record OUTDIR | --check EXPECTED_DIR] [--area A] [--case ID]
+        [--record OUTDIR | --check EXPECTED_DIR | --shape] [--area A] [--case ID]
         [--skip-crash] [--host-note TEXT]
 
 The connection string is read from the environment variable named by
@@ -132,6 +132,12 @@ def validate_case(case, seen):
                 raise CaseError(f"{case_id}: capture script needs 'steps', each with 'sql'")
         if capture["kind"] == "notices" and "sql" not in capture and "sql" not in case:
             raise CaseError(f"{case_id}: capture notices needs 'sql'")
+    if case.get("shape"):
+        for capture in case["capture"]:
+            if "expect" not in capture:
+                raise CaseError(f"{case_id}: shape capture {capture['as']} needs embedded 'expect'")
+    elif any("expect" in capture for capture in case["capture"]):
+        raise CaseError(f"{case_id}: 'expect' is only valid on a shape case")
 
 
 def normalize_capture(case_id, item):
@@ -922,6 +928,28 @@ def compare_case(case, want, got):
     return "PASS", ""
 
 
+def compare_shape(case, got):
+    """Compare a shape case to the spec embedded in its captures. No recording."""
+    if "corpus_error" in got:
+        return "FAIL", f"could not build the corpus: {brief(got['corpus_error'])}"
+    if got.get("server_crashed"):
+        return "FAIL", "the server crashed"
+    if "connection_lost" in (got.get("captures") or {}):
+        return "FAIL", f"connection lost: {got['captures']['connection_lost']}"
+    for capture in case["capture"]:
+        name = capture["as"]
+        live = (got.get("captures") or {}).get(name)
+        if isinstance(live, dict) and "error" in live:
+            error = live["error"]
+            return "FAIL", f"{name}: ERROR {error.get('sqlstate')} {error.get('message')}"
+        expect = capture.get("expect")
+        if expect is None:
+            return "FAIL", f"{name}: shape capture has no embedded expect"
+        if normalized(capture, expect) != normalized(capture, live):
+            return "FAIL", f"{name}: got {brief(live)}, spec {brief(expect)}"
+    return "PASS", "shape"
+
+
 # ---------------------------------------------------------------- divergences
 
 DIVERGENCE_KINDS = {"improvement": "IMPROVED", "gap": "GAP"}
@@ -1105,7 +1133,9 @@ def load_exclusions(path=None):
 
     ``excluded`` is a list of ``{id, reason}`` (or a mapping of id to reason).
     An excluded case skips in check mode and does not fail for a missing
-    recording. ``objects`` waives manifest coverage the same way.
+    recording. ``engines``, when set, scopes that skip to those live
+    extension versions during ``--check`` and ``--record`` only; other
+    engines still run the case. ``objects`` waives manifest coverage.
     """
     path = Path(path) if path else SUITE / "exclusions.yaml"
     if not path.exists():
@@ -1121,9 +1151,18 @@ def load_exclusions(path=None):
         case_id, reason = entry.get("id"), entry.get("reason")
         if not case_id or not reason:
             sys.exit(f"{path}: each exclusion needs id and reason")
+        extra = set(entry) - {"id", "reason", "engines"}
+        if extra:
+            sys.exit(f"{path}: exclusion {case_id} has unknown keys {sorted(extra)}")
+        engines = entry.get("engines")
+        if engines is not None:
+            if (not isinstance(engines, list) or not engines
+                    or not all(isinstance(item, str) and item for item in engines)):
+                sys.exit(f"{path}: exclusion {case_id}: engines must be a non-empty list of versions")
+            engines = tuple(engines)
         if case_id in cases:
             sys.exit(f"{path}: duplicate exclusion {case_id}")
-        cases[case_id] = reason
+        cases[case_id] = {"reason": reason, "engines": engines}
     for entry in document.get("objects") or []:
         object_id, reason = entry.get("id"), entry.get("reason")
         if not object_id or not reason:
@@ -1188,6 +1227,8 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--record", metavar="OUTDIR", help="write answers to OUTDIR/<engine>-<version>/<area>.json")
     mode.add_argument("--check", metavar="EXPECTED_DIR", help="compare answers with a recorded directory")
+    mode.add_argument("--shape", action="store_true",
+                      help="run shape-gated cases against the spec embedded in the case; no recording")
     parser.add_argument("--area", action="append", default=[], help="only this area (repeatable)")
     parser.add_argument("--case", action="append", default=[], help="only this case id or glob (repeatable)")
     parser.add_argument("--skip-crash", action="store_true",
@@ -1206,7 +1247,16 @@ def main():
     except CaseError as error:
         sys.exit(f"invalid case file: {error}")
     cases = selected(all_cases, set(args.area), args.case)
-    if not cases and all_cases:
+    if args.shape:
+        if not args.area and not args.case:
+            cases = [case for case in cases if case.get("shape")]
+        else:
+            plain = [case["id"] for case in cases if not case.get("shape")]
+            if plain:
+                sys.exit("--shape cannot run non-shape cases: " + ", ".join(plain))
+        if not cases:
+            sys.exit("no shape case matches the --area/--case filters")
+    elif not cases and all_cases:
         sys.exit("no case matches the --area/--case filters")
 
     expected_source, expected, divergences = (None, {}, {})
@@ -1254,8 +1304,13 @@ def main():
         print(f"Scratch schema: {schema}")
 
         def skip_reason(case):
-            if case["id"] in excluded:
-                return "EXCLUDED", f"excluded: {excluded[case['id']]}"
+            entry = excluded.get(case["id"])
+            if entry:
+                engines = entry["engines"]
+                # Global exclusions always skip. Engine-scoped ones skip only a
+                # versioned replay of that extension version (design §7 item 3).
+                if engines is None or ((args.check or args.record) and version in engines):
+                    return "EXCLUDED", f"excluded: {entry['reason']}"
             if crash_tagged(case, args.engine, version) and args.skip_crash:
                 return "SKIP", f"tagged crashes: {args.engine}-{version}"
             return None
@@ -1273,7 +1328,7 @@ def main():
             if reason:
                 emit(reason[0], case["id"], reason[1])
                 continue
-            if args.check and case["id"] not in expected:
+            if args.check and case["id"] not in expected and not case.get("shape"):
                 emit("FAIL", case["id"], "no expectation recorded")
                 continue
             failed = [corpus_errors[name] for name in case_corpora(case) if name in corpus_errors]
@@ -1282,7 +1337,7 @@ def main():
             else:
                 record = execute_case(session, args.engine, case, risky=bool(case.get("risky") or tagged))
             results[case["id"]] = record
-            if args.check:
+            if args.check and case["id"] in expected:
                 status, detail = compare_case(case, expected[case["id"]], record)
                 entry = divergences.get(case["id"])
                 # A capture-set mismatch is structural. Divergence dispatch must
@@ -1292,6 +1347,12 @@ def main():
                 elif entry and status == "PASS":
                     status, detail = "FAIL", "matches the recorded engine; remove the documented divergence"
                 emit(status, case["id"], detail)
+            elif case.get("shape"):
+                # 0.5.0-only gate (design §7 item 3): the spec is in the case, not a recording.
+                status, detail = compare_shape(case, record)
+                emit(status, case["id"], detail)
+            elif args.check:
+                emit("FAIL", case["id"], "no expectation recorded")
             else:
                 if "corpus_error" in record:
                     error = record["corpus_error"]
@@ -1359,7 +1420,8 @@ def main():
                                  merge=bool(args.merge or args.case or args.area))
         for path in written:
             print(f"Recorded {path}")
-    record_bad = counts.get("CRASH", 0) + counts.get("ERROR", 0) + counts.get("LOST", 0) + len(gaps)
+    record_bad = (counts.get("CRASH", 0) + counts.get("ERROR", 0) + counts.get("LOST", 0)
+                  + counts.get("FAIL", 0) + len(gaps))
     return 1 if record_bad else 0
 
 
