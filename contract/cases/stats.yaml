@@ -4,7 +4,7 @@
 
 area: stats
 corpora:
-  docs:
+  stats_docs:
     columns: "id int primary key, body text"
     rows:
       - [1, needle]
@@ -13,6 +13,7 @@ corpora:
       - "CREATE INDEX {index} ON {table} USING {engine}(body)"
 cases:
   - id: stats.index_stats
+    corpus: stats_docs
     description: >
       index_stats.average_length is the hard-coded 0.0. documents and the
       analysis columns are present; a missing column errors instead of recording.
