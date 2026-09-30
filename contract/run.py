@@ -582,7 +582,13 @@ def run_notices(session, sql, settings):
 
 
 def snapshot_jieba(connection):
-    """Rows of the extension-global dictionary, so a case can restore them."""
+    """Rows of the extension-global dictionary, so a case can restore them.
+
+    Engines that do not have the table yet (stn3 before the jieba DDL lands)
+    have nothing to restore. A missing relation is not an error.
+    """
+    if connection.execute("SELECT to_regclass(%s) IS NULL", (JIEBA_WORDS,)).fetchone()[0]:
+        return None
     return connection.execute(
         f"SELECT word, freq, tag FROM {JIEBA_WORDS} ORDER BY word").fetchall()
 
