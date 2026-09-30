@@ -33,6 +33,75 @@ mod tf_bucket {
 mod tool;
 mod udfs;
 
+// `cargo test` / `cargo pgrx test` links this crate into a host executable, not
+// a backend. pgrx's `pg_guard_ffi_boundary` references backend globals. x86_64
+// Linux full RELRO resolves those relocations at process start; aarch64 GNU ld
+// drops unused ones. Define the symbols only for that host binary. The pg_test
+// extension is built without `cfg(test)` and uses the real postgres symbols.
+#[cfg(test)]
+mod host_test_backend_symbols {
+    use pgrx::pg_sys::{ErrorContextCallback, ErrorData, MemoryContext, Size, sigjmp_buf};
+
+    #[unsafe(no_mangle)]
+    static mut CurrentMemoryContext: MemoryContext = std::ptr::null_mut();
+    #[unsafe(no_mangle)]
+    static mut ErrorContext: MemoryContext = std::ptr::null_mut();
+    #[unsafe(no_mangle)]
+    static mut PG_exception_stack: *mut sigjmp_buf = std::ptr::null_mut();
+    #[unsafe(no_mangle)]
+    static mut error_context_stack: *mut ErrorContextCallback = std::ptr::null_mut();
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn CopyErrorData() -> *mut ErrorData {
+        std::ptr::null_mut()
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn FreeErrorData(_edata: *mut ErrorData) {}
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn FlushErrorState() {}
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn palloc0(_size: Size) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn pfree(_pointer: *mut std::ffi::c_void) {}
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn message_level_is_interesting(_elevel: i32) -> bool {
+        false
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errstart(_elevel: i32, _domain: *const std::ffi::c_char) -> bool {
+        false
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errfinish(
+        _filename: *const std::ffi::c_char,
+        _lineno: i32,
+        _funcname: *const std::ffi::c_char,
+    ) {
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errcode(_sqlerrcode: i32) -> i32 {
+        0
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errmsg(_fmt: *const std::ffi::c_char) -> i32 {
+        0
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errdetail(_fmt: *const std::ffi::c_char) -> i32 {
+        0
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errhint(_fmt: *const std::ffi::c_char) -> i32 {
+        0
+    }
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn errcontext_msg(_fmt: *const std::ffi::c_char) -> i32 {
+        0
+    }
+}
+
 /// Stannum against TIN 1.0.3's recorded answers (see the module).
 #[cfg(feature = "pg_test")]
 mod tin_conformance;

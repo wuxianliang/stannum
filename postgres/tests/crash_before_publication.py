@@ -154,10 +154,12 @@ def main():
         and crashes before the meta page."""
         sql("CREATE TABLE vacuumed(id int, body text); CREATE INDEX vacuumed_idx ON vacuumed USING stannum(body);"
             "SET stannum.write_buffer_docs=1000;"
-            "INSERT INTO vacuumed SELECT n, 'needle w' || n || repeat(' filler', 20) FROM generate_series(1, 400) n;")
-        dead = sql("WITH gone AS (DELETE FROM vacuumed WHERE id % 2 = 0 RETURNING ctid) "
-                   "SELECT array_agg(ctid::text) FROM gone;")
-        crash('', f"SELECT tests.direct_bulk_delete('vacuumed_idx'::regclass::oid, '{dead}');",
+            "INSERT INTO vacuumed SELECT n, 'needle w' || n || repeat(' filler', 20) FROM generate_series(1, 400) n;"
+            "CREATE TABLE vacuumed_dead AS "
+            "WITH gone AS (DELETE FROM vacuumed WHERE id % 2 = 0 RETURNING ctid) "
+            "SELECT array_agg(ctid::text) AS tids FROM gone;")
+        crash('', "SELECT tests.direct_bulk_delete('vacuumed_idx'::regclass::oid, "
+              "(SELECT tids FROM vacuumed_dead));",
               'bulk_delete:buffered')
         orphans = assert_only_orphans('vacuumed_idx')
         assert sql("SELECT sum(docs) FROM stannum.segment_info('vacuumed_idx');") == '400'
@@ -227,7 +229,11 @@ def main():
                  '--encoding=UTF8', '--data-checksums'])
         with (data / 'postgresql.conf').open('a') as f:
             f.write(f"\nlisten_addresses=''\nport=28941\nunix_socket_directories='{root}'\n"
-                    "shared_buffers='64MB'\nrestart_after_crash=on\n")
+                    "shared_buffers='64MB'\nrestart_after_crash=on\n"
+                    # The vacuum case commits DELETE before the hooked bulk-delete.
+                    # A concurrent autovacuum would rewrite the buffer first and
+                    # the injected crash would not fire.
+                    "autovacuum=off\n")
         command(['pg_ctl', '-D', str(data), '-l', str(log), '-w', 'start'])
         sql('CREATE EXTENSION stannum;')
         results = {name: {'orphans_after_crash': cases[name]()} for name in selected}
