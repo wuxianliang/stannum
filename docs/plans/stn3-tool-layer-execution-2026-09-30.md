@@ -164,7 +164,7 @@ module lands here. This is the largest phase; steps are independently landable.
   - Done when: highlight cases green single-column.
   - Review focus: `column_field_name` returns nothing for attnum ≤ 0.
 
-- [ ] **2.6 Diagnostics, GUCs, `jieba_words` table (empty)**
+- [x] **2.6 Diagnostics, GUCs, `jieba_words` table (empty)** (c90703d)
   - Scope: `verify_index`, `segment_info`, `index_stats` (average_length 0.0),
     `index_health` view (security_invoker), `index_analysis`, `version`,
     `wal_rmgr_id` fn+GUC, `index_reads_allowed`, `logs_removal_horizons`,
