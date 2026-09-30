@@ -158,7 +158,7 @@ module lands here. This is the largest phase; steps are independently landable.
     ported) green single-column.
   - Review focus: design §5.1's three overflow outcomes; MVCC/visibility.
 
-- [ ] **2.5 Highlight family**
+- [x] **2.5 Highlight family** (d90a80e)
   - Scope: all §4.1 overloads incl. 5-arg and `indexed_query` forms,
     `highlight_support` on the right forms only, unknown-field error text.
   - Done when: highlight cases green single-column.
