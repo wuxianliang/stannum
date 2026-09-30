@@ -205,7 +205,7 @@ pub fn init() {
     GucRegistry::define_bool_guc(
         c"stannum.enable_custom_scan",
         c"Enable Stannum's custom scan nodes for ==> queries",
-        c"Off leaves the bitmap index scan path, which rechecks nothing either.",
+        c"Off leaves the bitmap index scan path, which rechecks an inexact plan.",
         &ENABLE,
         GucContext::Userset,
         GucFlags::default(),
@@ -563,7 +563,11 @@ impl Private {
             };
             let clause = pg_sys::list_nth(list, 3).cast::<pg_sys::OpExpr>();
             let field_at = if int(4) == -1 { 5 } else { 11 };
-            let field = u8::try_from(int(field_at)).unwrap_or(0);
+            let field = if pg_sys::list_length(list) > field_at {
+                u8::try_from(int(field_at)).unwrap_or(0)
+            } else {
+                0
+            };
             let ordering = match int(4) {
                 -1 => None,
                 full => Some(Ordering {
@@ -1212,6 +1216,7 @@ unsafe fn gather(exec: &mut ScanExec) {
                 ordering.b,
                 ordering.term_add.clone(),
                 ordering.term_replace.clone(),
+                exec.private.field,
             )
         });
         let top_k = exec.private.ordering.as_ref().and_then(|o| o.top_k);
@@ -1459,6 +1464,7 @@ unsafe fn complete(exec: &mut ScanExec) {
             ordering.b,
             ordering.term_add.clone(),
             ordering.term_replace.clone(),
+            exec.private.field,
         );
         // A scan can complete more than once, so the consumed locations accumulate.
         let emitted: Vec<Tid> = exec.tids[..exec.next].to_vec();
@@ -2005,10 +2011,7 @@ unsafe extern "C-unwind" fn exec_count(
             pg_sys::table_endscan(scan);
         } else {
             let index_oid = pg_sys::Oid::from(exec.private.index_oid);
-            let index = pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _);
-            let tokenizer = crate::storage::index_tokenizer(index);
-            pg_sys::index_close(index, pg_sys::AccessShareLock as _);
-            let query = crate::operator::parse_or_raise(&exec.private.query, tokenizer.as_ref());
+            let query = scan_query(exec);
             let view = crate::storage::view(index_oid);
             crate::storage::race_point("count:view");
             let (view, visibility) = settle_view(exec, index_oid, view);

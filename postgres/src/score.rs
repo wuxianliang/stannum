@@ -48,6 +48,8 @@ pub(crate) struct CacheKey {
     b: Option<u32>,
     add: Option<Vec<String>>,
     replace: Option<Vec<String>>,
+    /// Key ordinal the clause answers. Unscoped SQL scorers use 0.
+    field: u8,
 }
 
 struct ScoreCorpus {
@@ -342,6 +344,7 @@ fn score_bound(
         b: bits(b),
         add: term_add.clone(),
         replace: term_replace.clone(),
+        field: 0,
     };
     SCORE_CACHE.with_borrow_mut(|cache| {
         let statement = key.statement;
@@ -393,6 +396,7 @@ fn score_bound_indexed(
             && key.query == query
             && key.add.as_deref() == term_add.as_deref()
             && key.replace.as_deref() == term_replace.as_deref()
+            && key.field == 0
     };
     let matches = |key: &CacheKey| key.statement == statement && same_query(key);
     if mode < 2 {
@@ -455,6 +459,7 @@ fn score_bound_indexed(
                 b: bits(b),
                 add: term_add.clone(),
                 replace: term_replace.clone(),
+                field: 0,
             };
             build_index_scorer(key, k1, b, term_add.clone(), term_replace.clone())
         };
@@ -4429,6 +4434,7 @@ pub(crate) fn scorer_for_scan(
     b: Option<f32>,
     term_add: Option<Vec<String>>,
     term_replace: Option<Vec<String>>,
+    field: u8,
 ) -> IndexScorer {
     let key = CacheKey {
         statement: current_statement(),
@@ -4441,6 +4447,7 @@ pub(crate) fn scorer_for_scan(
         b: bits(b),
         add: term_add.clone(),
         replace: term_replace.clone(),
+        field,
     };
     let published = SCAN_SCORERS.with_borrow_mut(|scans| {
         scans
@@ -4522,9 +4529,15 @@ fn build_index_scorer_inner(
     if !key.full && !dense.is_valid() {
         pgrx::error!("dense_ratio must be finite and non-negative");
     }
-    let query = parse_tinql_to_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
-        crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
-    });
+    let query = scope_scan_query(
+        parse_tinql_to_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
+            crate::operator::raise_query_error(
+                &error,
+                format!("Stannum score query error: {error}"),
+            )
+        }),
+        key.field,
+    );
     let scoring =
         parse_tinql_to_scoring_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
             crate::operator::raise_query_error(

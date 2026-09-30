@@ -288,7 +288,10 @@ pub unsafe fn index_path_clauses(path: *mut pg_sys::IndexPath) -> Vec<PathClause
                 continue;
             }
             let right = pg_sys::list_nth((*op).args, 1).cast::<pg_sys::Node>();
-            let field = u8::try_from(i32::from((*clause).indexcol.max(1)) - 1).unwrap_or(0);
+            // indexcol is the 0-based key position. A negative value is not a key.
+            let Some(field) = key_ordinal((*clause).indexcol) else {
+                continue;
+            };
             clauses.push(PathClause {
                 query: crate::operator::query_text(right),
                 bound: crate::operator::bound_index(right),
@@ -296,5 +299,26 @@ pub unsafe fn index_path_clauses(path: *mut pg_sys::IndexPath) -> Vec<PathClause
             });
         }
         clauses
+    }
+}
+
+/// `IndexClause.indexcol` is 0-based, unlike scan-key `sk_attno`.
+///
+/// A negative column is not a key and is dropped. Values that do not fit in
+/// `u8` are dropped; the index cap is 16.
+pub(crate) fn key_ordinal(indexcol: i16) -> Option<u8> {
+    u8::try_from(indexcol).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_ordinal;
+
+    #[test]
+    fn key_ordinal_uses_the_zero_based_index_column() {
+        assert_eq!(key_ordinal(0), Some(0));
+        assert_eq!(key_ordinal(1), Some(1));
+        assert_eq!(key_ordinal(15), Some(15));
+        assert_eq!(key_ordinal(-1), None);
     }
 }

@@ -1448,6 +1448,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
         let before = scorer.score(tid);
         assert!(before > 0.0);
