@@ -103,6 +103,10 @@ def check(root, files, entries, write=False):
         if owner in {"planetscale", "mixed"} and not entry.get("upstream_path"):
             errors.append(f"{path}: missing upstream source path")
             continue
+        # Released pgrx snapshots whose leading bytes are pinned by recorded
+        # source line numbers. A prepended notice would move that surface.
+        if entry.get("notice") == "withheld":
+            continue
         try:
             expected = rewrite(path, content, owner)
         except ValueError as error:

@@ -54,6 +54,20 @@ class SourceHeadersTest(unittest.TestCase):
             self.assertTrue(any("no reviewed provenance" in error for error in errors))
             self.assertTrue(any("no tracked file" in error for error in errors))
 
+    def test_withheld_notice_skips_header_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "snapshot.sql").write_text("/* generated */\nSELECT 1;\n")
+            entries = {
+                "snapshot.sql": {
+                    "owner": "mixed",
+                    "upstream_path": "postgres/src",
+                    "notice": "withheld",
+                    "evidence": "line numbers pinned",
+                }
+            }
+            self.assertEqual(check(root, ["snapshot.sql"], entries), [])
+
     def test_write_then_check(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
