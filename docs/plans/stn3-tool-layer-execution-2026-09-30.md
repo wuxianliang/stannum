@@ -141,7 +141,7 @@ module lands here. This is the largest phase; steps are independently landable.
   - Review focus: Appendix A implicit scope; overflow = `inexact_universe`
     with recheck only on scan/bitmap paths.
 
-- [ ] **2.3 Score family on the stock engine**
+- [x] **2.3 Score family on the stock engine** (1d7ebd0)
   - Scope: `score`, `full_score`, `max_score`, `score_inspect`,
     `score_bound(_indexed)` incl. `REVOKE`s; `dense_ratio`/`term_add`/
     `term_replace`; `TermScorer` (R-BIT) parity including the f64→f32 idf cast.
