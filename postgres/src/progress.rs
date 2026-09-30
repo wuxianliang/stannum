@@ -65,8 +65,16 @@ fn update(index: u32, value: i64) {
     if !IN_INDEX_BUILD.get() {
         return;
     }
+    write_progress_param(index, value);
+}
+
+#[cfg(not(test))]
+fn write_progress_param(index: u32, value: i64) {
     unsafe { pg_sys::pgstat_progress_update_param(index as std::ffi::c_int, value) };
 }
+
+#[cfg(test)]
+fn write_progress_param(_index: u32, _value: i64) {}
 
 /// Names this access method's build subphases for the progress view.
 #[pg_guard]
