@@ -40,3 +40,18 @@ fn capabilities() -> JsonB {
         "limits": { "max_expansion": MAX_EXPANSION },
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_EXPANSION;
+
+    #[test]
+    fn max_expansion_matches_tinql_default() {
+        let enforced = tinql::runtime::plan::Limits::default().max_expansion;
+        assert_eq!(
+            usize::try_from(MAX_EXPANSION).expect("cap fits usize"),
+            enforced,
+            "capabilities().limits.max_expansion must be what tinql enforces"
+        );
+    }
+}

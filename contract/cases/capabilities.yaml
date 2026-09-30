@@ -10,7 +10,9 @@ cases:
       contract, not a 0.4.0 recording (design §7 item 3, 0.5.0-only /
       new-objects). Object key order is not compared: jsonb sorts keys, so
       the gate compares sorted key sets. Array order of tokenizers and
-      stop_word_presets is the byte contract. The function is IMMUTABLE
+      stop_word_presets is the byte contract. Numbers and booleans are
+      checked with jsonb_typeof plus jsonb equality, not a text cast.
+      engine.version stays a text comparison. The function is IMMUTABLE
       STRICT PARALLEL SAFE and returns jsonb.
     shape: true
     capture:
@@ -25,7 +27,8 @@ cases:
                    pg_get_function_identity_arguments(p.oid),
                    (SELECT array_agg(k ORDER BY k COLLATE "C")
                       FROM jsonb_object_keys(c) AS k),
-                   (c->>'contract_version')::int,
+                   jsonb_typeof(c->'contract_version'),
+                   c->'contract_version' = '1'::jsonb,
                    (SELECT array_agg(k ORDER BY k COLLATE "C")
                       FROM jsonb_object_keys(c->'engine') AS k),
                    c#>>'{engine,name}',
@@ -33,35 +36,46 @@ cases:
                    c#>>'{engine,version}',
                    (SELECT array_agg(k ORDER BY k COLLATE "C")
                       FROM jsonb_object_keys(c->'features') AS k),
-                   (c#>>'{features,bm25f}')::boolean,
-                   (c#>>'{features,field_phrases}')::boolean,
-                   (c#>>'{features,field_highlights}')::boolean,
-                   (c#>>'{features,highlight_field_arity}')::int,
+                   jsonb_typeof(c#>'{features,bm25f}'),
+                   c#>'{features,bm25f}' = 'true'::jsonb,
+                   jsonb_typeof(c#>'{features,field_phrases}'),
+                   c#>'{features,field_phrases}' = 'true'::jsonb,
+                   jsonb_typeof(c#>'{features,field_highlights}'),
+                   c#>'{features,field_highlights}' = 'true'::jsonb,
+                   jsonb_typeof(c#>'{features,highlight_field_arity}'),
+                   c#>'{features,highlight_field_arity}' = '5'::jsonb,
+                   jsonb_typeof(c#>'{features,tokenizers}'),
                    ARRAY(
                      SELECT elem
                      FROM jsonb_array_elements_text(c#>'{features,tokenizers}')
                        WITH ORDINALITY AS t(elem, ord)
                      ORDER BY ord),
+                   jsonb_typeof(c#>'{features,stop_word_presets}'),
                    ARRAY(
                      SELECT elem
                      FROM jsonb_array_elements_text(c#>'{features,stop_word_presets}')
                        WITH ORDINALITY AS t(elem, ord)
                      ORDER BY ord),
-                   (c#>>'{features,jieba_ddl}')::boolean,
-                   (c#>>'{features,standby_reads}')::boolean,
+                   jsonb_typeof(c#>'{features,jieba_ddl}'),
+                   c#>'{features,jieba_ddl}' = 'true'::jsonb,
+                   jsonb_typeof(c#>'{features,standby_reads}'),
+                   c#>'{features,standby_reads}' = 'true'::jsonb,
                    (SELECT array_agg(k ORDER BY k COLLATE "C")
                       FROM jsonb_object_keys(c->'limits') AS k),
-                   (c#>>'{limits,max_expansion}')::int
+                   jsonb_typeof(c->'limits'->'max_expansion'),
+                   c->'limits'->'max_expansion' = '1024'::jsonb
             FROM stannum.capabilities() AS c
             CROSS JOIN pg_proc AS p
             JOIN pg_namespace AS n ON n.oid = p.pronamespace
             WHERE n.nspname = 'stannum' AND p.proname = 'capabilities'
           expect:
             # volatility, parallel, strict, secdef, result, args,
-            # top keys, contract_version, engine keys, name, format, version,
-            # feature keys, bm25f, field_phrases, field_highlights, arity,
-            # tokenizers, stop_word_presets, jieba_ddl, standby_reads,
-            # limit keys, max_expansion
+            # top keys, contract_version typeof + jsonb equality,
+            # engine keys, name, format, version (text),
+            # feature keys, then each boolean as typeof + jsonb true,
+            # arity typeof + jsonb 5, tokenizers typeof + order,
+            # stop_word_presets typeof + order, jieba_ddl and standby_reads,
+            # limit keys, max_expansion typeof + jsonb 1024
             - - i
               - s
               - true
@@ -69,19 +83,29 @@ cases:
               - jsonb
               - ""
               - [contract_version, engine, features, limits]
-              - 1
+              - number
+              - true
               - [format, name, version]
               - stannum
               - STN3
               - "0.5.0"
               - [bm25f, field_highlights, field_phrases, highlight_field_arity, jieba_ddl, standby_reads, stop_word_presets, tokenizers]
+              - boolean
               - true
+              - boolean
               - true
+              - boolean
               - true
-              - 5
+              - number
+              - true
+              - array
               - [unicode, whitespace, jieba]
+              - array
               - ["auto", "auto:zh", "auto:en"]
+              - boolean
               - true
+              - boolean
               - true
               - [max_expansion]
-              - 1024
+              - number
+              - true
