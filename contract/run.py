@@ -335,6 +335,22 @@ def suite_commit():
         return "unknown"
 
 
+def extension_commit():
+    """Last commit that touched postgres/, the extension tree this recording ran.
+    Appends -dirty when those sources differ from HEAD."""
+    repo = SUITE.parent
+    try:
+        commit = subprocess.check_output(
+            ["git", "log", "-1", "--format=%H", "--", "postgres"],
+            cwd=repo, text=True, stderr=subprocess.DEVNULL).strip()
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", "postgres"],
+            cwd=repo, text=True, stderr=subprocess.DEVNULL).strip()
+        return (commit or "unknown") + ("-dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
 # ---------------------------------------------------------------- corpora
 
 
@@ -383,7 +399,10 @@ def column_names(columns_sql):
 
 def row_values(names, row, where):
     if isinstance(row, dict):
-        return tuple(row.get(name) for name in names)
+        missing = [name for name in names if name not in row]
+        if missing:
+            raise CaseError(f"{where}: row missing columns {missing}")
+        return tuple(row[name] for name in names)
     if not isinstance(row, (list, tuple)) or len(row) != len(names):
         raise CaseError(f"{where}: row {row!r} must have {len(names)} values for {names}")
     return tuple(row)
@@ -563,12 +582,24 @@ def snapshot_jieba(connection):
 
 
 def restore_jieba(connection, rows):
-    connection.execute(f"DELETE FROM {JIEBA_WORDS}")
-    if rows:
+    """Replace jieba_words in one transaction so a failure cannot empty it."""
+    previous = connection.autocommit
+    connection.autocommit = False
+    try:
         with connection.cursor() as cursor:
-            cursor.executemany(
-                f"INSERT INTO {JIEBA_WORDS} (word, freq, tag) VALUES (%s, %s, %s)",
-                list(rows))
+            cursor.execute(f"DELETE FROM {JIEBA_WORDS}")
+            if rows:
+                cursor.executemany(
+                    f"INSERT INTO {JIEBA_WORDS} (word, freq, tag) VALUES (%s, %s, %s)",
+                    list(rows))
+        connection.commit()
+    except Exception:
+        if not connection.closed:
+            connection.rollback()
+        raise
+    finally:
+        if not connection.closed:
+            connection.autocommit = previous
 
 
 def run_capture(session, case, capture, values, settings):
@@ -660,10 +691,9 @@ def execute_case(session, engine, case, risky):
 def normalized(capture, value):
     """Apply a declared normalization before comparison.
 
-    `version` replaces a non-empty string with `<version>` so stannum.version()
-    may change without failing the replay (design §7). `explain_parallel`
-    reduces plan text to whether a parallel worker was planned. Volatile page
-    counts and root blocks are omitted from the capture SQL instead.
+    `version` replaces a non-empty string with `<version>`. `explain_parallel`
+    is reduced once, at capture time; an already-reduced object is not
+    re-derived (that regexed the reduced form and was always false).
     """
     mode = capture.get("normalize")
     if mode in (None, "none", "message", "ignore_message"):
@@ -671,20 +701,38 @@ def normalized(capture, value):
     if mode == "version":
         return "<version>" if isinstance(value, str) and value else value
     if mode == "explain_parallel":
-        return {"has_parallel_worker": has_parallel_worker(value)}
+        if isinstance(value, dict) and set(value) == {"has_parallel_worker"}:
+            return value
+        return explain_parallel_result(value if isinstance(value, list) else [value])
     raise CaseError(f"unknown normalize {mode!r}")
 
 
+def explain_line_has_worker(line):
+    """A planned parallel worker, not 'Parallel Aware' or 'Workers Planned: 0'."""
+    text = str(line).strip()
+    if re.search(r"Workers Planned:\s*[1-9]", text):
+        return True
+    node = re.sub(r"^->\s*", "", text)
+    if re.match(r"Gather\b", node):
+        return True
+    if re.match(r"Parallel (?!Aware\b)", node):
+        return True
+    return False
+
+
 def has_parallel_worker(value):
-    text = json.dumps(value)
-    return bool(re.search(r"Parallel|Workers Planned", text))
+    if isinstance(value, dict) and set(value) == {"has_parallel_worker"}:
+        return bool(value["has_parallel_worker"])
+    lines = value if isinstance(value, list) else [value]
+    return any(explain_line_has_worker(line[0] if isinstance(line, (list, tuple)) and line else line)
+               for line in lines)
 
 
 def explain_parallel_result(rows):
     lines = []
-    for row in rows:
+    for row in rows or []:
         lines.append(row[0] if isinstance(row, (list, tuple)) and row else row)
-    return {"has_parallel_worker": has_parallel_worker(lines)}
+    return {"has_parallel_worker": any(explain_line_has_worker(line) for line in lines)}
 
 
 def compare_capture(case, capture, want, got):
@@ -700,14 +748,72 @@ def compare_capture(case, capture, want, got):
     if isinstance(want, dict) and "error" in want and isinstance(got, dict) and "error" in got:
         return compare_errors(capture.get("message_prefix"), want["error"], got["error"],
                               message_mode(capture))
+    if capture.get("identity_set"):
+        return compare_identity_set(capture, want, got)
     want_n, got_n = normalized(capture, want), normalized(capture, got)
     if want_n == got_n:
         return "PASS", ""
-    if message_mode(capture) != "exact" and without_messages(want) == without_messages(got):
+    mode = message_mode(capture)
+    if mode == "ignore" and without_messages(want) == without_messages(got):
         return "PASS", ""
+    if mode == "prefix":
+        if prefix_tree_matches(want, got, capture.get("message_prefix")):
+            return "PASS", ""
+        return "FAIL", f"{capture['as']}: nested ERROR lacks prefix {capture.get('message_prefix')!r}"
     if without_messages(want) == without_messages(got):
         return "FAIL", f"{capture['as']}: same answers and SQLSTATEs, different ERROR messages"
     return "FAIL", f"{capture['as']}: got {brief(got)}, recorded {brief(want)}"
+
+
+def row_list(value):
+    if not isinstance(value, list):
+        return None
+    rows = []
+    for row in value:
+        rows.append(tuple(row) if isinstance(row, list) else (row,))
+    return rows
+
+
+def compare_identity_set(capture, want, got):
+    """Recorded rows must all be present. Extra rows fail, and only a divergence
+    entry's expected.extra may document that addition."""
+    want_rows, got_rows = row_list(want), row_list(got)
+    if want_rows is None or got_rows is None:
+        return "FAIL", f"{capture['as']}: identity_set capture is not a row list"
+    missing = [list(row) for row in want_rows if row not in got_rows]
+    extra = [list(row) for row in got_rows if row not in want_rows]
+    if missing:
+        return "FAIL", f"{capture['as']}: identity set lost rows: {brief(missing)}"
+    if extra:
+        return "FAIL", f"{capture['as']}: identity set gained rows: {brief(extra)}"
+    return "PASS", ""
+
+
+def walk_errors(value):
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "sqlstate" in node and "message" in node:
+                found.append(node)
+            for key, item in node.items():
+                if key != "error":
+                    walk(item)
+            if isinstance(node.get("error"), dict):
+                walk(node["error"])
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return found
+
+
+def prefix_tree_matches(want, got, prefix):
+    if without_messages(want) != without_messages(got):
+        return False
+    needed = prefix or ""
+    return all(str(payload.get("message") or "").startswith(needed) for payload in walk_errors(got))
 
 
 def without_messages(value):
@@ -788,18 +894,20 @@ def compare_case(case, want, got):
             return "FAIL", "recorded engine crashed; answered wrongly: " + ", ".join(
                 f"{name} {brief(got['captures'][name])}, correct {brief(expect[name])}" for name in wrong)
         return "PASS", "recorded engine crashed; answered correctly"
-    statuses, details, compared = [], [], 0
+    case_names = [capture["as"] for capture in case["capture"]]
+    want_names = list((want.get("captures") or {}))
+    got_names = list((got.get("captures") or {}))
+    if set(want_names) != set(case_names) or set(got_names) != set(case_names):
+        return "FAIL", (
+            f"capture set mismatch; case {case_names}; recorded {sorted(want_names)}; "
+            f"live {sorted(got_names)}")
+    statuses, details = [], []
     for capture in case["capture"]:
         name = capture["as"]
-        if name not in (want.get("captures") or {}):
-            continue
-        compared += 1
         status, detail = compare_capture(case, capture, want["captures"][name], got["captures"][name])
         statuses.append(status)
         if detail:
             details.append(detail)
-    if not compared:
-        return "SKIP", "no recorded capture for this case"
     for status in ("FAIL", "DIFF"):
         if status in statuses:
             return status, "; ".join(details)
@@ -819,13 +927,28 @@ def read_divergences(engine, recorded):
         return {}
     chosen = {}
     for entry in (yaml.safe_load(path.read_text()) or {}).get("divergences") or []:
-        if entry.get("kind") not in DIVERGENCE_KINDS:
-            sys.exit(f"{path}: {entry.get('id')}: kind must be one of {', '.join(DIVERGENCE_KINDS)}")
         if not entry.get("captures"):
-            sys.exit(f"{path}: {entry.get('id')}: list the captures that diverge")
+            raise CaseError(f"{path}: {entry.get('id')}: list the captures that diverge")
+        expected = entry.get("expected")
+        if not isinstance(expected, dict) or not expected:
+            raise CaseError(f"{path}: {entry.get('id')}: expected is required and must document the difference")
+        missing = set(entry["captures"]) - set(expected)
+        if missing:
+            raise CaseError(f"{path}: {entry.get('id')}: expected missing captures {sorted(missing)}")
+        if entry.get("kind") not in DIVERGENCE_KINDS:
+            raise CaseError(f"{path}: {entry.get('id')}: kind must be one of {', '.join(DIVERGENCE_KINDS)}")
         if entry.get("against") == recorded:
             chosen[entry["id"]] = entry
     return chosen
+
+
+def identity_delta(want, got):
+    want_rows, got_rows = row_list(want), row_list(got)
+    if want_rows is None or got_rows is None:
+        return [want], [got]
+    missing = [list(row) for row in want_rows if row not in got_rows]
+    extra = [list(row) for row in got_rows if row not in want_rows]
+    return missing, extra
 
 
 def error_payload(value):
@@ -871,10 +994,19 @@ def compare_divergent(case, want, got, entry):
     if differing != listed:
         return "FAIL", ("documented divergence no longer holds for "
                         + ", ".join(sorted(listed - differing)) + "; update divergences/")
-    expected = entry.get("expected") or {}
+    expected = entry["expected"]
     for name in sorted(listed):
-        spec = expected.get(name)
-        if spec is None:
+        spec = expected[name]
+        capture = captures[name]
+        if capture.get("identity_set"):
+            missing, extra = identity_delta(want["captures"][name], got["captures"][name])
+            if missing:
+                return "FAIL", f"{name}: identity set lost rows; a divergence cannot hide that: {brief(missing)}"
+            documented = spec.get("extra")
+            if documented is None:
+                return "FAIL", f"{name}: identity-set divergence must set expected.extra to the added rows"
+            if extra != documented:
+                return "FAIL", f"{name}: gained rows do not match expected.extra: {brief(extra)}"
             continue
         payload = error_payload(got["captures"][name])
         if payload is None:
@@ -1071,8 +1203,11 @@ def main():
     has_recordings = bool(args.check) and expected_dir.is_dir() and any(expected_dir.glob("*.json"))
     if args.check and (cases or has_recordings):
         expected_source, expected = read_expected(args.check)
-        divergences = read_divergences(
-            args.engine, f"{expected_source.get('engine')}-{expected_source.get('extension_version')}")
+        try:
+            divergences = read_divergences(
+                args.engine, f"{expected_source.get('engine')}-{expected_source.get('extension_version')}")
+        except CaseError as error:
+            sys.exit(f"invalid divergence file: {error}")
         print(f"Comparing against {expected_source.get('engine')} {expected_source.get('extension_version')} "
               f"recorded in {args.check}")
         for key in ("postgres", "server_version", "host", "measured", "date", "measured_by", "imported_from"):
@@ -1109,9 +1244,9 @@ def main():
 
         def skip_reason(case):
             if case["id"] in excluded:
-                return f"excluded: {excluded[case['id']]}"
+                return "EXCLUDED", f"excluded: {excluded[case['id']]}"
             if crash_tagged(case, args.engine, version) and args.skip_crash:
-                return f"tagged crashes: {args.engine}-{version}"
+                return "SKIP", f"tagged crashes: {args.engine}-{version}"
             return None
 
         corpus_errors = {}
@@ -1125,7 +1260,7 @@ def main():
             tagged = crash_tagged(case, args.engine, version)
             reason = skip_reason(case)
             if reason:
-                emit("SKIP", case["id"], reason)
+                emit(reason[0], case["id"], reason[1])
                 continue
             if args.check and case["id"] not in expected:
                 emit("FAIL", case["id"], "no expectation recorded")
@@ -1164,7 +1299,12 @@ def main():
                 session.reconnect_after_crash()
             if jieba_baseline is not None:
                 restore_jieba(session.connection, jieba_baseline)
+        except Exception as error:
+            print(f"WARNING: could not restore jieba_words: {error}", file=sys.stderr)
+        try:
             if schema_created:
+                if not session.sentinel_alive() or session.connection.closed:
+                    session.reconnect_after_crash()
                 session.connection.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
                 print(f"Dropped scratch schema {schema}")
         except Exception as error:  # report, but do not mask the run's own failure
@@ -1188,7 +1328,8 @@ def main():
         if expected_source is not None:
             print(f"Compared {args.engine} {version} against {expected_source.get('engine')} "
                   f"{expected_source.get('extension_version')} ({args.check})")
-        failed = counts.get("FAIL", 0) + counts.get("DIFF", 0) + len(unknown) + len(gaps)
+        failed = (counts.get("FAIL", 0) + counts.get("DIFF", 0) + counts.get("SKIP", 0)
+                  + len(unknown) + len(gaps))
         return 1 if failed else 0
     if args.record and cases and version is not None:
         header = {
@@ -1197,6 +1338,7 @@ def main():
             "server_version": server,
             "host": args.host_note,
             "suite_commit": suite_commit(),
+            "extension_commit": extension_commit(),
             "runner_version": RUNNER_VERSION,
         }
         directory = Path(args.record) / f"{args.engine}-{version}"
@@ -1204,7 +1346,8 @@ def main():
                                  merge=bool(args.merge or args.case or args.area))
         for path in written:
             print(f"Recorded {path}")
-    return 1 if gaps else 0
+    record_bad = counts.get("CRASH", 0) + counts.get("ERROR", 0) + counts.get("LOST", 0) + len(gaps)
+    return 1 if record_bad else 0
 
 
 if __name__ == "__main__":

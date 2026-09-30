@@ -23,7 +23,9 @@ An empty case list is a successful run. `--record` and `--check` both report
 0 cases and 0 failures and exit 0, including a missing or empty expected
 directory. A non-empty suite still fails when filters match nothing or when
 `--check` has no recorded answers. In a non-empty suite, check mode FAILs a
-case with no recording and FAILs a recording with no case. Duplicate case
+case with no recording, a recording with no case, and a capture-name set that
+does not match the case. A SKIP in check mode fails the run; an exclusion is
+EXCLUDED and does not. Record mode fails on CRASH, ERROR, or LOST. Duplicate case
 ids fail at load. `contract/exclusions.yaml` lists case ids deliberately not
 recorded (`excluded: [{id, reason}, ...]`); an excluded case skips. The same
 file's `objects` list waives manifest coverage. Every function, reloption,
