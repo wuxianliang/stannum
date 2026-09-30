@@ -7,8 +7,8 @@ cases:
   - id: parallel.custom_dict
     description: >
       A nonempty jieba_words dictionary returns the serial rows and both plans
-      (custom scan on and off) have no parallel worker. Plan text is reduced to
-      that flag so costs and oids are not recorded.
+      (custom scan on and off) have no parallel worker. Plan text is reduced
+      once to that flag so costs and oids are not recorded.
     capture:
       - script:
           steps:
@@ -41,3 +41,39 @@ cases:
             - sql: "EXPLAIN SELECT id FROM par_docs WHERE body ==> 'customtoken'"
               normalize: explain_parallel
             - sql: "SELECT count(*) FROM par_docs WHERE body ==> 'customtoken'"
+  - id: parallel.empty_dict
+    description: >
+      Empty jieba_words keeps parallel eligibility. On this 0.4.0 producer a
+      200-row jieba index with gather-capable settings and enable_custom_scan
+      off plans Gather and Workers Planned: 1. Both explains are recorded as
+      the has_parallel_worker flag, not raw plan text.
+    capture:
+      - script:
+          steps:
+            - sql: "CREATE TABLE empty_docs (id int primary key, body text)"
+              capture: false
+            - sql: "INSERT INTO empty_docs SELECT n, 'customtoken pad ' || n FROM generate_series(1, 200) n"
+              capture: false
+            - sql: "CREATE INDEX empty_idx ON empty_docs USING stannum(body) WITH (tokenizer = jieba)"
+              capture: false
+            - sql: "SET max_parallel_workers_per_gather = 2"
+              capture: false
+            - sql: "SET parallel_setup_cost = 0"
+              capture: false
+            - sql: "SET parallel_tuple_cost = 0"
+              capture: false
+            - sql: "SET min_parallel_table_scan_size = 0"
+              capture: false
+            - sql: "SET min_parallel_index_scan_size = 0"
+              capture: false
+            - sql: "SET enable_seqscan = off"
+              capture: false
+            - sql: "SET stannum.enable_custom_scan = on"
+              capture: false
+            - sql: "EXPLAIN SELECT id FROM empty_docs WHERE body ==> 'customtoken'"
+              normalize: explain_parallel
+            - sql: "SET stannum.enable_custom_scan = off"
+              capture: false
+            - sql: "EXPLAIN SELECT id FROM empty_docs WHERE body ==> 'customtoken'"
+              normalize: explain_parallel
+            - sql: "SELECT count(*) FROM empty_docs WHERE body ==> 'customtoken'"

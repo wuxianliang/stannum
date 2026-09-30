@@ -1051,6 +1051,10 @@
       "owner": "ben",
       "evidence": "Original 0.4.0 contract case for a nonempty custom dictionary forcing serial plans. Expected values are recorded, not hand-written."
     },
+    "contract/cases/stats.yaml": {
+      "owner": "ben",
+      "evidence": "Original 0.4.0 contract case locking index_stats.average_length at 0.0. Expected values are recorded, not hand-written."
+    },
     "contract/cases/segments.yaml": {
       "owner": "ben",
       "evidence": "Original 0.4.0 contract case for a token posted in two segments plus a dead document. Expected values are recorded, not hand-written."

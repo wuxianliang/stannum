@@ -5,7 +5,11 @@
 area: catalog
 cases:
   - id: catalog.functions
-    description: Every stannum function's identity, volatility, parallel safety, strictness, and SUPPORT attachment.
+    description: >
+      0.4.0 function identity set: result type, argument defaults, volatility,
+      parallel safety, strictness, security definer, ACL text (cluster owner
+      rewritten to <owner>), and SUPPORT. Extra functions on a later engine
+      fail unless a divergence entry's expected.extra documents the addition.
     covers:
       - function:amhandler(internal)
       - function:builtin_stop_words(text)
@@ -57,10 +61,12 @@ cases:
       - support:stannum_text_cmpfunc(text,text)->stannum_text_cmpfunc_support
     capture:
       - value:
+          identity_set: true
           sql: >
             SELECT p.proname, pg_get_function_identity_arguments(p.oid),
-                   p.provolatile, p.proparallel, p.proisstrict,
-                   p.proacl IS NULL, s.proname
+                   pg_get_function_arguments(p.oid), pg_get_function_result(p.oid),
+                   p.provolatile, p.proparallel, p.proisstrict, p.prosecdef,
+                   replace(p.proacl::text, current_user, '<owner>'), s.proname
             FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
             LEFT JOIN pg_proc s ON s.oid = p.prosupport
@@ -122,7 +128,11 @@ cases:
               AND p.proname IN ('score_bound', 'score_bound_indexed')
             ORDER BY 1, 2
   - id: catalog.gucs
-    description: Userset GUCs after LOAD, plus the postmaster wal_rmgr_id GUC staying unregistered. SHOW casing is Auto.
+    description: >
+      Userset GUCs after LOAD, plus SHOW casing Auto. wal_rmgr_guc_absent is
+      the non-preloaded cluster: design section 4.1 registers stannum.wal_rmgr_id
+      only while shared_preload_libraries loads the library. This case does not
+      invent a preload recording; that variant is future work for the 0.5.0 replay job.
     covers:
       - guc:stannum.strict_analysis
       - guc:stannum.experimental_vacuum_merge_strategy
