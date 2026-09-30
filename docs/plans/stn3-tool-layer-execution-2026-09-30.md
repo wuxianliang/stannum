@@ -149,7 +149,7 @@ module lands here. This is the largest phase; steps are independently landable.
   - Review focus: `(text, mask)` keys; stop words in `compile_scoring_terms`
     only; `full_score` ignores the list.
 
-- [ ] **2.4 `search` / `search_count` SRFs**
+- [x] **2.4 `search` / `search_count` SRFs** (15d90b3)
   - Scope: full signature (begin_tag/end_tag, snippet modes, k1/b);
     `matching_tids` semantics preserved (no recheck on these paths);
     `accepted_pruned_rows` HOT-underfill logic; multi-column form stubbed to
