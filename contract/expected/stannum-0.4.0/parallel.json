@@ -4,7 +4,7 @@
   "extension_version": "0.4.0",
   "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
   "host": "postgresql 17.11 homebrew aarch64",
-  "suite_commit": "ce1ae6c34252da0f2e6642610599fdd3039611bc",
+  "suite_commit": "d07c135b17a547ee85a890bbd7d9960a675fa164",
   "extension_commit": "32211c25ddc86453e539c4d668d657e3e2f500e9",
   "runner_version": "2"
  },
