@@ -1010,6 +1010,10 @@
     "tools/test_generate_tool_contract.py": {
       "owner": "ben",
       "evidence": "Original unit tests for the tool-contract generator."
+    },
+    "contract/run.py": {
+      "owner": "ben",
+      "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7); engine-agnostic runner structure preserved, case list emptied until the pinned 0.4.0 producer records answers."
     }
   }
 }
