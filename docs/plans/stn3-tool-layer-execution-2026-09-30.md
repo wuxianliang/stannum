@@ -46,7 +46,7 @@ design disagree, **the design wins** and this plan gets a fix.
     is green (build + upstream's own tests, PG 17 and 18).
   - Review focus: no source changes ride along with the branch creation.
 
-- [ ] **0.2 `contract/` skeleton**
+- [x] **0.2 `contract/` skeleton** (1a0a7b0)
   - Goal: the adapted engine-agnostic runner compiles and runs empty.
   - Scope: port `conformance/{run.py,cases,expected,divergences}` structure
     from upstream into `contract/`; empty case list; `--help` works.
@@ -54,7 +54,14 @@ design disagree, **the design wins** and this plan gets a fix.
     0 cases, 0 failures.
   - Review focus: the runner imports nothing from the repo (design §7).
 
-- [ ] **0.3 pgembed early smoke [checkpoint]**
+- [x] **0.3 pgembed early smoke [checkpoint]** (pgembed 3385c3b)
+  - PASS-with-caveat: built during a GitHub outage via a local-repo fetch
+    override and a hand-synced (byte-verified) bundle stamp; the
+    from-scratch wipe+rebuild is re-proven at checkpoint 2.8. Measured
+    ledger for upstream d57ef58: 15/16 reloptions registered (all but
+    field_weights — score_stop_words and the five TIN options ARE
+    upstream), zero stannum.* GUCs, tokenize/ql_parse IMMUTABLE
+    PARALLEL SAFE.
   - Goal: prove the L3 install path on day one, scoped to what stock upstream
     provides.
   - Scope: pgembed `pgbuild/Makefile` pin → `stn3` HEAD; build wheel; install.
