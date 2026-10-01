@@ -246,7 +246,10 @@ decision (design §5.2) — do not silently proceed.
   - Review focus: encoding example `~0~~~0~~foo`; malformed key = query error,
     verify = corruption.
 
-- [ ] **4.2 Semantic smoke — GATE**
+- [x] **4.2 Semantic smoke — GATE** (c8c3b06) — **GREEN**: row1 tie bits 3e113925 both
+  ids + id3-first + ctid order; row2 weighted order/bits; row3 single-column
+  bits via the real SQL path (2.3 pg_test). The fused scorer reproduces the
+  0.4.0 arithmetic bit-for-bit; no STN4 escalation.
   - Scope: the three §5.2 cases (needle tie with `f32::to_bits` + ascending
     ctid; weighted title-vs-body; single-column R-BIT bit-equality).
   - Done when: all three green against 0.4.0 recordings. **Red → stop.**
