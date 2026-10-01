@@ -560,24 +560,59 @@ fn restamp(meta: &Meta, released: &[u32], horizon: u32) -> Option<Meta> {
 
 // --- Tokenizers ---------------------------------------------------------------
 
+type TokenizerCache =
+    HashMap<([u8; crate::options::SPEC_BYTES], u64), Rc<CompiledTokenizerPipeline>>;
+
 thread_local! {
-    static TOKENIZERS: RefCell<HashMap<[u8; crate::options::SPEC_BYTES], Rc<CompiledTokenizerPipeline>>> =
-        RefCell::new(HashMap::new());
+    static TOKENIZERS: RefCell<TokenizerCache> = RefCell::new(HashMap::new());
 }
 
-/// The tokenizer an index was built with, compiled once per backend.
+/// The tokenizer an index was built with, compiled once per backend and
+/// dictionary fingerprint. Jieba generation is deliberately not cache
+/// identity: equal dictionary contents reuse the same compiled pipeline.
 pub fn tokenizer_for(spec: &[u8; crate::options::SPEC_BYTES]) -> Rc<CompiledTokenizerPipeline> {
+    let decoded = crate::options::decode_spec(spec)
+        .unwrap_or_else(|| corrupt("Stannum index meta page: tokenizer settings are unreadable"));
+    let snapshot = if decoded.tokenizer == tokenizer::TokenizerSpec::Jieba {
+        crate::dict::ensure_current();
+        Some(tokenizer::jieba_snapshot())
+    } else {
+        None
+    };
+    let fingerprint = snapshot
+        .as_ref()
+        .map_or(0, tokenizer::JiebaSnapshot::fingerprint);
     TOKENIZERS.with_borrow_mut(|cache| {
         cache
-            .entry(*spec)
+            .entry((*spec, fingerprint))
             .or_insert_with(|| {
-                let spec = crate::options::decode_spec(spec).unwrap_or_else(|| {
-                    corrupt("Stannum index meta page: tokenizer settings are unreadable")
-                });
-                Rc::new(spec.compile().expect("decoded spec validated"))
+                let pipeline = match snapshot {
+                    Some(snapshot) => decoded
+                        .compile_with_snapshot(snapshot)
+                        .expect("decoded spec validated"),
+                    None => decoded.compile().expect("decoded spec validated"),
+                };
+                debug_assert_eq!(pipeline.jieba_fingerprint().unwrap_or(0), fingerprint);
+                Rc::new(pipeline)
             })
             .clone()
     })
+}
+
+/// Drop cached Jieba pipelines from older dictionary identities. Reload calls
+/// this after publishing a snapshot so stale caches do not retain an unbounded
+/// sequence of multi-megabyte dictionaries.
+pub(crate) fn evict_jieba_tokenizers_except(fingerprint: u64) {
+    TOKENIZERS.with_borrow_mut(|cache| {
+        cache.retain(|(spec, cached_fingerprint), _| {
+            crate::options::decode_spec(spec)
+                .map(|spec| {
+                    spec.tokenizer != tokenizer::TokenizerSpec::Jieba
+                        || *cached_fingerprint == fingerprint
+                })
+                .unwrap_or(true)
+        });
+    });
 }
 
 /// # Safety
@@ -601,6 +636,15 @@ pub unsafe fn index_spec(index: pg_sys::Relation) -> [u8; crate::options::SPEC_B
             crate::options::encode_spec(&crate::options::tokenizer_spec(index))
         }
     }
+}
+
+/// Read metadata without enforcing analysis drift policy. The explicit
+/// `index_analysis` diagnostic reports the recorded stamp independently.
+///
+/// # Safety
+/// `index` is a live segmented index relation held open by the caller.
+pub(crate) unsafe fn analysis_meta(index: pg_sys::Relation) -> Meta {
+    unsafe { read_meta(index, false).1 }
 }
 
 thread_local! {
@@ -2711,11 +2755,12 @@ pub unsafe fn build_empty(index: pg_sys::Relation) {
 unsafe fn empty_meta(index: pg_sys::Relation) -> Meta {
     unsafe {
         let spec = crate::options::tokenizer_spec(index);
+        let spec = crate::options::encode_spec(&spec);
         let relnumber = u64::from((*index).rd_locator.relNumber.to_u32());
         let xid = u64::from(pg_sys::ReadNextTransactionId().into_inner());
         Meta {
             identity: (relnumber << 32) | xid,
-            spec: crate::options::encode_spec(&spec),
+            spec,
             buffer: BufferState {
                 version: 0,
                 epoch: 0,
@@ -2728,6 +2773,7 @@ unsafe fn empty_meta(index: pg_sys::Relation) -> Meta {
             next_generation: 1,
             segments: Vec::new(),
             pending: Vec::new(),
+            analysis: crate::dict::stamp(&spec),
         }
     }
 }

@@ -132,6 +132,7 @@ pub extern "C-unwind" fn _PG_init() {
     options::init();
     storage::init();
     storage::wal::init();
+    dict::init();
     operator::init();
     customscan::init();
 }

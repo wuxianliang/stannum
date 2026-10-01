@@ -2,26 +2,129 @@
 //
 // See LICENSE in the repository root for license terms.
 
-//! Empty `jieba_words` table, frozen empty-dictionary fingerprint, and the
-//! unicode/not-applicable `index_analysis` path. Jieba install/load is Phase 3.
-//! The four `jieba_*` SQL entry points stay on the catalog as keep-surface
-//! stubs so a 0.4.0 → 0.5.0 upgrade fingerprints equal to a fresh 0.5.0.
+//! Backend-local dictionary governance. Never do work in an invalidation callback.
 
+use std::cell::Cell;
+use std::ffi::CStr;
 use std::hash::Hasher;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use crate::storage::layout::AnalysisStamp;
 use pgrx::iter::TableIterator;
-use pgrx::{PgRelation, default, name, pg_extern};
+use pgrx::prelude::*;
+use pgrx::{PgRelation, PgTryBuilder};
 use siphasher::sip::SipHasher13;
 
-#[allow(dead_code)] // frozen v1 empty-table identity; unit-tested and Phase 3 load
 const EMPTY_FINGERPRINT: u64 = 0x6855_a073_6155_f3dd;
 
-#[allow(dead_code)] // frozen identity; Phase 3 jieba load consumes these
+static DIRTY: AtomicBool = AtomicBool::new(true);
+static WORDS_OID: AtomicU32 = AtomicU32::new(0);
+thread_local! {
+    static CALLBACKS: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn init() {
+    unsafe {
+        pg_sys::CacheRegisterRelcacheCallback(Some(invalidate), pg_sys::Datum::from(0usize));
+    }
+}
+
+#[pg_guard]
+unsafe extern "C-unwind" fn invalidate(_arg: pg_sys::Datum, oid: pg_sys::Oid) {
+    if oid == pg_sys::InvalidOid || oid.to_u32() == WORDS_OID.load(Ordering::Relaxed) {
+        DIRTY.store(true, Ordering::Relaxed);
+    }
+}
+
+#[pg_guard]
+unsafe extern "C-unwind" fn xact(event: pg_sys::XactEvent::Type, _arg: *mut std::ffi::c_void) {
+    if matches!(
+        event,
+        pg_sys::XactEvent::XACT_EVENT_COMMIT
+            | pg_sys::XactEvent::XACT_EVENT_ABORT
+            | pg_sys::XactEvent::XACT_EVENT_PREPARE
+    ) {
+        DIRTY.store(true, Ordering::Relaxed);
+    }
+}
+
+#[pg_guard]
+unsafe extern "C-unwind" fn subxact(
+    event: pg_sys::SubXactEvent::Type,
+    _subid: pg_sys::SubTransactionId,
+    _parent: pg_sys::SubTransactionId,
+    _arg: *mut std::ffi::c_void,
+) {
+    if event == pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB {
+        DIRTY.store(true, Ordering::Relaxed);
+    }
+}
+
+fn register_xact() {
+    if !CALLBACKS.replace(true) {
+        unsafe {
+            pg_sys::RegisterXactCallback(Some(xact), std::ptr::null_mut());
+            pg_sys::RegisterSubXactCallback(Some(subxact), std::ptr::null_mut());
+        }
+    }
+}
+
+/// Resolve by extension OID, never by search_path. Keep a relation lock across SPI.
+fn words_relation() -> PgRelation {
+    unsafe {
+        let extension = pg_sys::get_extension_oid(c"stannum".as_ptr(), true);
+        if extension == pg_sys::InvalidOid {
+            error!("stannum dictionary unavailable; CREATE EXTENSION stannum or upgrade it");
+        }
+        let schema = pg_sys::get_extension_schema(extension);
+        let oid = pg_sys::get_relname_relid(c"jieba_words".as_ptr(), schema);
+        if oid == pg_sys::InvalidOid {
+            error!("stannum.jieba_words missing; CREATE EXTENSION stannum or upgrade it");
+        }
+        WORDS_OID.store(oid.to_u32(), Ordering::Relaxed);
+        PgRelation::with_lock(oid, pg_sys::AccessShareLock as _)
+    }
+}
+
+fn qualified(relation: &PgRelation) -> String {
+    unsafe {
+        let schema = pg_sys::get_namespace_name((*(*relation.as_ptr()).rd_rel).relnamespace);
+        CStr::from_ptr(pg_sys::quote_qualified_identifier(
+            schema,
+            c"jieba_words".as_ptr(),
+        ))
+        .to_string_lossy()
+        .into_owned()
+    }
+}
+
+/// Only fixed, qualified internal queries run with table-owner access. SQL UDFs
+/// remain invoker-run; writers must pass `require_admin` before entering here.
+/// The owner is restored even on cancellation or PostgreSQL ERROR.
+fn table_access<R>(relation: &PgRelation, work: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
+    unsafe {
+        let mut user = pg_sys::InvalidOid;
+        let mut context = 0;
+        pg_sys::GetUserIdAndSecContext(&mut user, &mut context);
+        let owner = (*(*relation.as_ptr()).rd_rel).relowner;
+        PgTryBuilder::new(|| {
+            pg_sys::SetUserIdAndSecContext(
+                owner,
+                context
+                    | pg_sys::SECURITY_LOCAL_USERID_CHANGE as i32
+                    | pg_sys::SECURITY_RESTRICTED_OPERATION as i32,
+            );
+            work()
+        })
+        .finally(|| pg_sys::SetUserIdAndSecContext(user, context))
+        .execute()
+    }
+}
+
 type Word = (String, i32, Option<String>);
 
 /// Frozen v1 wire identity: SipHash-1-3, fixed keys, raw UTF-8 tuple ordering.
 /// Each row is independently domain separated and length framed (including tag).
-#[allow(dead_code)] // frozen identity; Phase 3 jieba load consumes this
 fn fingerprint(rows: &mut [Word]) -> u64 {
     rows.sort();
     let mut hash = SipHasher13::new_with_keys(0x7374616e6e756d31, 0x6a69656261646963);
@@ -44,6 +147,115 @@ fn fingerprint(rows: &mut [Word]) -> u64 {
     }
 }
 
+pub(crate) fn ensure_current() -> u64 {
+    reload(false)
+}
+
+/// Clear the pending flag before loading so an invalidation delivered during
+/// SPI remains pending for the next use. Failure always restores dirtiness.
+struct ReloadGuard {
+    complete: bool,
+}
+
+impl Drop for ReloadGuard {
+    fn drop(&mut self) {
+        if !self.complete {
+            DIRTY.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+fn reload(force: bool) -> u64 {
+    // Parallel workers and startup cannot safely enter SPI. Step 3.2 will make
+    // the leader decline worker paths for nonempty custom dictionaries.
+    if unsafe { pg_sys::ParallelWorkerNumber >= 0 } {
+        if tokenizer::jieba_current_fingerprint() == 0 {
+            tokenizer::jieba_install_with_fingerprint(&[], EMPTY_FINGERPRINT);
+            crate::storage::evict_jieba_tokenizers_except(EMPTY_FINGERPRINT);
+        }
+        return tokenizer::jieba_current_fingerprint();
+    }
+    if unsafe { !pg_sys::IsTransactionState() } {
+        return tokenizer::jieba_current_fingerprint();
+    }
+    register_xact();
+    if !force && !DIRTY.load(Ordering::Relaxed) {
+        return tokenizer::jieba_current_fingerprint();
+    }
+
+    let mut guard = ReloadGuard { complete: false };
+    DIRTY.store(false, Ordering::Relaxed);
+    let relation = words_relation();
+    let query = format!(
+        "SELECT word, freq, tag FROM {} ORDER BY word",
+        qualified(&relation)
+    );
+    let mut rows = table_access(&relation, || {
+        Spi::connect(|client| {
+            client
+                .select(&query, None, &[])
+                .expect("read jieba_words")
+                .map(|row| {
+                    pgrx::check_for_interrupts!();
+                    (
+                        row["word"].value::<String>().unwrap().unwrap(),
+                        row["freq"].value::<i32>().unwrap().unwrap(),
+                        row["tag"].value::<String>().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    let fingerprint = fingerprint(&mut rows);
+    if force || fingerprint != tokenizer::jieba_current_fingerprint() {
+        let words: Vec<_> = rows
+            .iter()
+            .map(|(word, freq, tag)| {
+                (
+                    word.as_str(),
+                    (*freq > 0).then_some(*freq as usize),
+                    tag.as_deref(),
+                )
+            })
+            .collect();
+        pgrx::check_for_interrupts!();
+        tokenizer::jieba_install_with_fingerprint(&words, fingerprint);
+        crate::storage::evict_jieba_tokenizers_except(fingerprint);
+    }
+    guard.complete = true;
+    fingerprint
+}
+
+fn require_admin() {
+    unsafe {
+        if !pg_sys::superuser()
+            && !pg_sys::has_privs_of_role(
+                pg_sys::GetUserId(),
+                pg_sys::get_role_oid(c"pg_database_owner".as_ptr(), false),
+            )
+        {
+            error!("stannum dictionary changes require superuser or pg_database_owner membership");
+        }
+    }
+}
+
+fn validate_word(word: &str) {
+    if word.trim().is_empty() || word.len() > 256 || word.chars().any(char::is_whitespace) {
+        error!(
+            "dictionary word must be nonempty, at most 256 UTF-8 bytes, and contain no Unicode whitespace"
+        );
+    }
+}
+
+fn changed(oid: pg_sys::Oid) {
+    DIRTY.store(true, Ordering::Relaxed);
+    unsafe {
+        pg_sys::CommandCounterIncrement();
+        pg_sys::CacheInvalidateRelcacheByRelid(oid);
+    }
+    ensure_current();
+}
+
 pgrx::extension_sql!(
     r#"
 CREATE TABLE @extschema@.jieba_words (
@@ -56,36 +268,58 @@ REVOKE ALL ON TABLE @extschema@.jieba_words FROM PUBLIC;
     name = "jieba_words"
 );
 
-/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
 #[pg_extern(volatile, parallel_unsafe)]
 fn jieba_add_word(word: &str, freq: default!(i32, 0), tag: default!(Option<&str>, "NULL")) {
-    let _ = (word, freq, tag);
-    pgrx::error!("stannum.jieba_add_word is not available until jieba lands");
+    require_admin();
+    validate_word(word);
+    if freq < 0 {
+        error!("dictionary frequency must be non-negative");
+    }
+    register_xact();
+    let relation = words_relation();
+    let query = format!(
+        "INSERT INTO {} (word, freq, tag) VALUES ($1, $2, $3) ON CONFLICT (word) DO UPDATE SET freq = EXCLUDED.freq, tag = EXCLUDED.tag",
+        qualified(&relation)
+    );
+    table_access(&relation, || {
+        Spi::connect_mut(|client| {
+            client
+                .update(&query, None, &[word.into(), freq.into(), tag.into()])
+                .expect("update jieba_words");
+        })
+    });
+    changed(relation.oid());
 }
 
-/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
 #[pg_extern(volatile, parallel_unsafe)]
 fn jieba_delete_word(word: &str) {
-    let _ = word;
-    pgrx::error!("stannum.jieba_delete_word is not available until jieba lands");
+    require_admin();
+    validate_word(word);
+    register_xact();
+    let relation = words_relation();
+    let query = format!(
+        "DELETE FROM {} WHERE word OPERATOR(pg_catalog.=) $1",
+        qualified(&relation)
+    );
+    table_access(&relation, || {
+        Spi::connect_mut(|client| {
+            client
+                .update(&query, None, &[word.into()])
+                .expect("delete jieba_words");
+        })
+    });
+    changed(relation.oid());
 }
 
-/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
 #[pg_extern(stable, parallel_unsafe)]
 fn jieba_dict_version() -> i64 {
-    pgrx::error!("stannum.jieba_dict_version is not available until jieba lands");
+    ensure_current() as i64
 }
 
-/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
 #[pg_extern(volatile, parallel_unsafe)]
 fn jieba_reload_dict() {
-    pgrx::error!("stannum.jieba_reload_dict is not available until jieba lands");
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AnalysisStamp {
-    jieba_rs_version: u32,
-    dict_fingerprint: u64,
+    require_admin();
+    reload(true);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -129,9 +363,13 @@ fn status(recorded: Option<AnalysisStamp>, runtime: Option<AnalysisStamp>) -> An
     }
 }
 
-/// Jieba tokenizer is Phase 3; unicode/whitespace indexes have no analysis stamp.
-fn stamp(_spec: &[u8; crate::options::SPEC_BYTES]) -> Option<AnalysisStamp> {
-    None
+pub(crate) fn stamp(spec: &[u8; crate::options::SPEC_BYTES]) -> Option<AnalysisStamp> {
+    crate::options::decode_spec(spec)
+        .is_some_and(|spec| spec.tokenizer == tokenizer::TokenizerSpec::Jieba)
+        .then(|| AnalysisStamp {
+            jieba_rs_version: tokenizer::JIEBA_RS_VERSION,
+            dict_fingerprint: ensure_current(),
+        })
 }
 
 #[allow(clippy::type_complexity)] // the SRF row shape is fixed public SQL surface
@@ -152,8 +390,11 @@ pub(crate) fn index_analysis(
     crate::udfs::require_stannum_index(&index, "index_analysis");
     let spec = unsafe { crate::storage::index_spec(index.as_ptr()) };
     let runtime = stamp(&spec);
-    let recorded = None;
-    let _ = spec;
+    let recorded = if runtime.is_some() && unsafe { crate::storage::present(index.as_ptr()) } {
+        unsafe { crate::storage::analysis_meta(index.as_ptr()) }.analysis
+    } else {
+        None
+    };
     let state = status(recorded, runtime);
     TableIterator::once((
         index.name().to_string(),

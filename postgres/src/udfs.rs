@@ -53,8 +53,9 @@ fn parse_tokenizer(value: &str) -> Result<TokenizerSpec, String> {
     match value {
         "unicode" => Ok(TokenizerSpec::Unicode),
         "whitespace" => Ok(TokenizerSpec::Whitespace),
+        "jieba" => Ok(TokenizerSpec::Jieba),
         _ => Err(format!(
-            "invalid tokenizer value {value:?}; expected unicode or whitespace"
+            "invalid tokenizer value {value:?}; expected unicode, whitespace, or jieba"
         )),
     }
 }
@@ -104,7 +105,12 @@ fn parse_position_gaps(value: &str) -> Result<PositionGapMode, String> {
 fn compile_options(options: TokenizeOptions<'_>) -> tokenizer::CompiledTokenizerPipeline {
     options
         .into_spec()
-        .and_then(|spec| spec.compile().map_err(|e| e.to_string()))
+        .and_then(|spec| {
+            if spec.tokenizer == TokenizerSpec::Jieba {
+                crate::dict::ensure_current();
+            }
+            spec.compile().map_err(|e| e.to_string())
+        })
         .unwrap_or_else(|error| pgrx::error!("{error}"))
 }
 
