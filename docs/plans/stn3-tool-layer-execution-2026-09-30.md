@@ -255,7 +255,7 @@ decision (design §5.2) — do not silently proceed.
   - Done when: all three green against 0.4.0 recordings. **Red → stop.**
   - Review focus: a broken tie is a formula bug, never a float tail.
 
-- [ ] **4.3 STNF trailer + reader delta**
+- [x] **4.3 STNF trailer + reader delta** (a6fac4f)
   - Scope: segment writers (build, insert buffer, merge incl. meta-lock-free)
     emit `norms` (exact u32 rows, u64 totals, CRC-32/ISO-HDLC u32le inside
     norms_len) + `df_agg` section; `Reader::new` `pages_end` rule (stock
