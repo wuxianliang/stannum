@@ -188,6 +188,7 @@ step() {
         cluster)
             run extension-upgrade python3 postgres/tests/extension_upgrade.py
             run search-srf python3 postgres/tests/search_srf.py
+            run stannum-jieba python3 postgres/tests/test_stannum_jieba.py
             run postings-lifecycle python3 postgres/tests/postings_lifecycle.py
             run merge-lifecycle python3 postgres/tests/merge_lifecycle.py
             run ranked-fuzz-smoke python3 postgres/tests/ranked_fuzz.py --smoke
