@@ -73,6 +73,19 @@ fn check(actual: usize, limit: usize, name: &'static str) -> std::result::Result
     }
 }
 
+fn merge_field_count(segments: &[Segment<'_>]) -> Result<u8> {
+    let mut found: Option<u8> = None;
+    for segment in segments {
+        let field_count = segment.trailer().map(|t| t.field_count).unwrap_or(1);
+        match found {
+            None => found = Some(field_count),
+            Some(prev) if prev == field_count => {}
+            Some(_) => return Err(Error::Corrupt("STNF field_count")),
+        }
+    }
+    Ok(found.unwrap_or(1))
+}
+
 /// Apply the same admission and complete input validation used by direct merges.
 /// Alternative executors must additionally reject duplicate live TIDs, enforce
 /// output limits and provide checkpoints while constructing their output.
@@ -169,6 +182,7 @@ fn merge_inner(
         .iter()
         .map(|input| Segment::parse(input.bytes))
         .collect::<Result<Vec<_>>>()?;
+    let field_count = merge_field_count(&segments)?;
     let mut docs = segments
         .iter()
         .map(Segment::documents)
@@ -206,6 +220,14 @@ fn merge_inner(
         }
     }
     drop(docs);
+    let mut sidecar = if field_count >= crate::trailer::MIN_FIELD_COUNT {
+        Some(crate::trailer::Tables::new(
+            field_count,
+            u32::try_from(live_lengths.len()).map_err(|_| MergeError::Limit("document count"))?,
+        )?)
+    } else {
+        None
+    };
     let mut dictionaries = segments
         .iter()
         .map(|s| Ok(s.dictionary()?.iter()))
@@ -225,6 +247,7 @@ fn merge_inner(
     let mut ordinals = Vec::new();
     let mut scores: Vec<(u8, u32)> = Vec::new();
     let mut positions = Vec::new();
+    let mut pos_lens = Vec::new();
     let mut term_inputs = Vec::new();
     let mut cursors = Vec::new();
     let mut postings_heap = BinaryHeap::new();
@@ -272,6 +295,7 @@ fn merge_inner(
         let mut max_bucket = 0;
         ordinals.clear();
         scores.clear();
+        pos_lens.clear();
         while let Some(Reverse((_, c))) = postings_heap.pop() {
             checkpoint()?;
             let (i, cursor, positions_cursor, length) = &mut cursors[c];
@@ -284,6 +308,7 @@ fn merge_inner(
             ordinals.push(ordinal);
             scores.push((bucket, len));
             payload.push(&positions)?;
+            pos_lens.push(positions.len() as u32);
             count = count
                 .checked_add(1)
                 .ok_or(MergeError::Limit("postings count"))?;
@@ -326,6 +351,13 @@ fn merge_inner(
             )?;
             ordinals_area.extend_from_slice(&ordinal_bytes);
             payload_area.extend_from_slice(&payload_bytes);
+            if let Some(tables) = sidecar.as_mut()
+                && let Ok(Some((field, token))) = crate::trailer::inspect_stored_term(&term)
+            {
+                for (&ordinal, &n) in ordinals.iter().zip(&pos_lens) {
+                    tables.add(field, &token, ordinal, n)?;
+                }
+            }
         }
         for &i in &term_inputs {
             if let Some(item) = dictionaries[i].next() {
@@ -348,7 +380,7 @@ fn merge_inner(
     );
     drop(page_documents);
     drop(live_lengths);
-    let out = assemble(
+    let mut out = assemble(
         [
             header,
             dictionary,
@@ -361,6 +393,17 @@ fn merge_inner(
         ],
         limits.max_output_bytes,
     )?;
+    if let Some(tables) = sidecar {
+        let trailer = tables.encode()?;
+        let total = out
+            .len()
+            .checked_add(trailer.len())
+            .ok_or(MergeError::Limit("output bytes"))?;
+        check(total, limits.max_output_bytes, "output bytes")?;
+        out.try_reserve_exact(trailer.len())
+            .map_err(|_| MergeError::Allocation)?;
+        out.extend_from_slice(&trailer);
+    }
     checkpoint()?;
     check(out.len(), limits.max_output_bytes, "output bytes")?;
     Ok(out)
@@ -470,6 +513,17 @@ pub(crate) mod tests {
     /// assembles independently of the streaming merge.
     fn reference(blobs: &[Vec<u8>], dead: &[BTreeSet<Tid>]) -> Result<Vec<u8>> {
         let mut builder = SegmentBuilder::default();
+        let mut field_count = 1u8;
+        for bytes in blobs {
+            if let Some(trailer) = Segment::parse(bytes)?.trailer() {
+                if field_count == 1 {
+                    field_count = trailer.field_count;
+                } else if field_count != trailer.field_count {
+                    return Err(Error::Corrupt("STNF field_count"));
+                }
+            }
+        }
+        builder.set_field_count(field_count)?;
         for (bytes, dead) in blobs.iter().zip(dead) {
             for record in Segment::parse(bytes)?.records(|tid| dead.contains(&tid))? {
                 builder.add_record(&record)?;
@@ -649,5 +703,79 @@ pub(crate) mod tests {
                 reference(&blobs, &dead).unwrap()
             );
         }
+    }
+
+    fn fielded_segment(field_count: u8, docs: &[(Tid, &[&str])]) -> Vec<u8> {
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(field_count).unwrap();
+        for (tid, columns) in docs {
+            let mut tokens = Vec::new();
+            let mut position = 0u32;
+            for (field, text) in columns.iter().enumerate() {
+                for word in text.split_whitespace() {
+                    position += 1;
+                    tokens.push((
+                        crate::trailer::test_fielded_key(field as u8, word),
+                        position,
+                    ));
+                }
+            }
+            builder
+                .add_document(*tid, tokens.iter().map(|(t, p)| (t.as_str(), *p)))
+                .unwrap();
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn merge_recounts_df_agg_from_live_streams_not_input_sidecars() {
+        let tid1 = Tid::new(0, 1).unwrap();
+        let tid2 = Tid::new(0, 2).unwrap();
+        // A: tid1 foo in both fields (live); tid2 foo in field 0 (will be dead).
+        let a = fielded_segment(2, &[(tid1, &["foo", "foo"]), (tid2, &["foo"])]);
+        // B: tid2 foo in field 0, live (dead-CTID reuse is allowed).
+        let b = fielded_segment(2, &[(tid2, &["foo"])]);
+        let a_df = Segment::parse(&a).unwrap().trailer().unwrap().df_agg[0].df;
+        let b_df = Segment::parse(&b).unwrap().trailer().unwrap().df_agg[0].df;
+        assert_eq!(a_df, 2, "input A counts the dead ordinal");
+        assert_eq!(b_df, 1);
+        assert_eq!(a_df + b_df, 3);
+
+        let dead = [BTreeSet::from([tid2]), BTreeSet::new()];
+        let blobs = [a, b];
+        let merged = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
+        assert_eq!(merged, reference(&blobs, &dead).unwrap());
+        let segment = Segment::parse(&merged).unwrap();
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert_eq!(trailer.df_agg.len(), 1);
+        assert_eq!(trailer.df_agg[0].token, "foo");
+        assert_eq!(
+            trailer.df_agg[0].df, 2,
+            "union of live docs, not sum of input df_agg"
+        );
+        assert_ne!(trailer.df_agg[0].df, a_df + b_df);
+        assert_eq!(segment.document_count(), 2);
+        assert_eq!(trailer.rows.len(), 4);
+        assert_eq!(trailer.row(0, 0), Some(1));
+        assert_eq!(trailer.row(0, 1), Some(1));
+        assert_eq!(trailer.row(1, 0), Some(1));
+        assert_eq!(trailer.row(1, 1), Some(0));
+        assert!(crate::verify::verify_segment(&merged).is_clean());
+    }
+
+    #[test]
+    fn merge_all_dead_multi_column_keeps_empty_trailer() {
+        let tid = Tid::new(0, 1).unwrap();
+        let blob = fielded_segment(2, &[(tid, &["keep", "gone"])]);
+        let dead = [BTreeSet::from([tid])];
+        let blobs = [blob];
+        let merged = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
+        let segment = Segment::parse(&merged).unwrap();
+        assert_eq!(segment.document_count(), 0);
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert!(trailer.rows.is_empty());
+        assert!(trailer.df_agg.is_empty());
     }
 }

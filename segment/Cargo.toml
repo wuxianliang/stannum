@@ -11,6 +11,7 @@ license.workspace = true
 description = "Byte codecs for immutable search-index segments: dictionary, document-ordinal streams, document table, positions, forward records"
 
 [dependencies]
+crc32fast = "1.5"
 rustc-hash.workspace = true
 thiserror.workspace = true
 

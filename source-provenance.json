@@ -1063,6 +1063,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
     },
+    "segment/src/trailer.rs": {
+      "owner": "ben",
+      "evidence": "STN3 format delta: STNF trailer codec (design §5.1). No upstream counterpart."
+    },
     "segment/src/varint.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."

@@ -30,6 +30,8 @@
 //! * [`set`]: intersection, union and difference over any cursors.
 //! * [`segment`]: assembles the components above into one immutable segment
 //!   with a document table of lengths, and reads them back.
+//! * [`trailer`]: optional STNF sidecar after the page table: per-field norms
+//!   and union document frequencies for a multi-column segment.
 //! * [`tf_bucket`]: the production-compatible term-frequency quantization.
 //! * [`verify`]: whole-blob consistency checks that list every problem found
 //!   instead of stopping at the first, for an index checker.
@@ -61,6 +63,7 @@ pub mod set;
 pub mod source;
 pub mod tf_bucket;
 pub mod tid;
+pub mod trailer;
 pub mod verify;
 
 pub use error::{Error, Result};

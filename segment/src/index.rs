@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 
 use crate::dictionary::{Extent, TermEntry};
 use crate::docs::{self, DocCursor, DocTable, PageTable};
-use crate::forward::ForwardRecord;
+use crate::forward::{ForwardRecord, ForwardTerm};
 use crate::payload::PayloadBuilder;
 use crate::segment::{AreaFetch, Lengths, Reader, Term};
 use crate::source::Source;
@@ -336,7 +336,6 @@ impl Encoded {
 /// An in-memory inverted index that grows one record at a time. Adding a
 /// record costs work proportional to that record; encoded streams are built
 /// lazily per term on first use and rebuilt only after that term changes.
-#[derive(Default)]
 pub struct MutableIndex {
     documents: RefCell<BTreeMap<Tid, u32>>,
     total_length: RefCell<u64>,
@@ -345,9 +344,96 @@ pub struct MutableIndex {
     /// new term appears.
     sorted: RefCell<Option<Vec<String>>>,
     encoded: RefCell<Encoded>,
+    field_count: u8,
+}
+
+impl Default for MutableIndex {
+    fn default() -> Self {
+        Self {
+            documents: RefCell::new(BTreeMap::new()),
+            total_length: RefCell::new(0),
+            terms: RefCell::new(FxHashMap::default()),
+            sorted: RefCell::new(None),
+            encoded: RefCell::new(Encoded::default()),
+            field_count: 1,
+        }
+    }
 }
 
 impl MutableIndex {
+    /// `1` (default) holds no sidecar; `2..=16` keep the same norms/`df_agg`
+    /// tables a flush would write.
+    pub fn with_field_count(field_count: u8) -> Result<Self> {
+        crate::trailer::check_writer_field_count(field_count)?;
+        Ok(Self {
+            field_count,
+            ..Self::default()
+        })
+    }
+
+    pub fn field_count(&self) -> u8 {
+        self.field_count
+    }
+
+    fn sidecar_tables(&self) -> Result<Option<crate::trailer::Tables>> {
+        if self.field_count < crate::trailer::MIN_FIELD_COUNT {
+            return Ok(None);
+        }
+        let documents: Vec<Tid> = self.documents.borrow().keys().copied().collect();
+        let mut tables = crate::trailer::Tables::new(self.field_count, documents.len() as u32)?;
+        let terms = self.terms.borrow();
+        for (term, data) in terms.iter() {
+            let Ok(Some((field, token))) = crate::trailer::inspect_stored_term(term) else {
+                continue;
+            };
+            for (tid, occurrence) in data.tids.iter().zip(&data.occurrences) {
+                let ordinal = documents
+                    .binary_search(tid)
+                    .expect("every occurrence belongs to a recorded document")
+                    as u32;
+                tables.add(field, &token, ordinal, occurrence.len)?;
+            }
+        }
+        Ok(Some(tables))
+    }
+
+    /// CRC-32/ISO-HDLC over the in-memory row bytes, before any immutable
+    /// section exists.
+    pub fn check_sidecar(&self) -> Result<()> {
+        if let Some(tables) = self.sidecar_tables()? {
+            tables.crc_check()?;
+        }
+        Ok(())
+    }
+
+    /// Emits an immutable blob. Checks the sidecar CRC, then writes the
+    /// trailer through [`crate::segment::SegmentBuilder::finish`].
+    pub fn flush(&self) -> Result<Vec<u8>> {
+        self.check_sidecar()?;
+        let mut builder = crate::segment::SegmentBuilder::default();
+        builder.set_field_count(self.field_count)?;
+        let documents = self.documents.borrow();
+        let terms = self.terms.borrow();
+        for (tid, doc_len) in documents.iter() {
+            let mut rec_terms = Vec::new();
+            for (name, data) in terms.iter() {
+                if let Ok(i) = data.tids.binary_search(tid) {
+                    rec_terms.push(ForwardTerm {
+                        term: name.clone(),
+                        positions: data.positions_of(&data.occurrences[i]).to_vec(),
+                    });
+                }
+            }
+            rec_terms.sort_by(|a, b| a.term.cmp(&b.term));
+            builder.add_record(&ForwardRecord {
+                tid: *tid,
+                doc_len: *doc_len,
+                terms: rec_terms,
+            })?;
+        }
+        Ok(builder.finish())
+    }
+
     /// Adds a document. A token-less record is not recorded, matching the
     /// segment builder. A TID already present is rejected.
     pub fn add_record(&self, record: ForwardRecord) -> Result<()> {
@@ -817,5 +903,47 @@ mod tests {
         assert!(matches!(overflow, Expanded::Overflow));
         let overflow = segment.expand(Window::All, &|_| true, 2).unwrap();
         assert!(matches!(overflow, Expanded::Overflow));
+    }
+
+    fn fielded_record(id: u32, columns: &[&str]) -> ForwardRecord {
+        let mut tokens = Vec::new();
+        let mut position = 0u32;
+        for (field, text) in columns.iter().enumerate() {
+            for word in text.split_whitespace() {
+                position += 1;
+                tokens.push((
+                    crate::trailer::test_fielded_key(field as u8, word),
+                    position,
+                ));
+            }
+        }
+        let refs: Vec<(&str, u32)> = tokens.iter().map(|(t, p)| (t.as_str(), *p)).collect();
+        ForwardRecord::from_tokens(Tid::new(id / 50, (id % 50 + 1) as u16).unwrap(), refs).unwrap()
+    }
+
+    #[test]
+    fn mutable_index_crc_checks_sidecar_before_flush() {
+        let mutable = MutableIndex::with_field_count(2).unwrap();
+        mutable
+            .add_record(fielded_record(1, &["beer wine", "beer"]))
+            .unwrap();
+        mutable.check_sidecar().unwrap();
+        let bytes = mutable.flush().unwrap();
+        let segment = Reader::parse(&bytes).unwrap();
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert_eq!(trailer.row(0, 0), Some(2));
+        assert_eq!(trailer.row(0, 1), Some(1));
+        let beer = trailer.df_agg.iter().find(|e| e.token == "beer").unwrap();
+        assert_eq!(beer.df, 1);
+        let builder_blob = {
+            let mut builder = SegmentBuilder::default();
+            builder.set_field_count(2).unwrap();
+            builder
+                .add_record(&fielded_record(1, &["beer wine", "beer"]))
+                .unwrap();
+            builder.finish()
+        };
+        assert_eq!(bytes, builder_blob);
     }
 }

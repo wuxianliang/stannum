@@ -11,11 +11,13 @@
 //!             dictionary_len varint, ordinals_len varint, payload_len varint,
 //!             pages_len varint,
 //!             dictionary, ordinals_area, payload_area, offsets, lengths,
-//!             classes, pages
+//!             classes, pages [, trailer]
 //! offsets  := u16le per document, in heap order (see [`crate::docs`])
 //! lengths  := u32le per document, in heap order
 //! classes  := u8 per document, in heap order (see [`crate::length_class`])
 //! pages    := (block u32le, first u32le)* per heap block holding a document
+//! trailer  := STNF sidecar (see [`crate::trailer`]); present iff the blob is
+//!             longer than `pages_at + pages_len`
 //! ```
 //!
 //! Documents are numbered in heap order; that ordinal addresses the offsets,
@@ -37,7 +39,7 @@
 //! into bounded ranges.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
@@ -68,10 +70,23 @@ struct Occurrence {
 }
 
 /// Accumulates documents in any TID order.
-#[derive(Default)]
 pub struct SegmentBuilder {
     lengths: BTreeMap<Tid, u32>,
     terms: BTreeMap<String, Vec<Occurrence>>,
+    /// Explicit column count. `1` (default) omits the STNF trailer. Inferring
+    /// from the highest fielded-key ordinal would drop the sidecar for the
+    /// one-field-in-two-column fixture.
+    field_count: u8,
+}
+
+impl Default for SegmentBuilder {
+    fn default() -> Self {
+        Self {
+            lengths: BTreeMap::new(),
+            terms: BTreeMap::new(),
+            field_count: 1,
+        }
+    }
 }
 
 impl SegmentBuilder {
@@ -203,15 +218,47 @@ impl SegmentBuilder {
         self.lengths.len()
     }
 
+    /// `1` omits both sidecar sections; `2..=16` appends STNF after pages.
+    pub fn set_field_count(&mut self, field_count: u8) -> Result<()> {
+        crate::trailer::check_writer_field_count(field_count)?;
+        self.field_count = field_count;
+        Ok(())
+    }
+
+    pub fn field_count(&self) -> u8 {
+        self.field_count
+    }
+
     pub fn finish(self) -> Vec<u8> {
         let mut dictionary = DictionaryBuilder::default();
         let mut ordinals_area = Vec::new();
         let mut payload_area = Vec::new();
         let documents: Vec<Tid> = self.lengths.keys().copied().collect();
+        let mut sidecar = if self.field_count >= crate::trailer::MIN_FIELD_COUNT {
+            Some(
+                crate::trailer::Tables::new(self.field_count, documents.len() as u32)
+                    .expect("writer field_count is 2..=16"),
+            )
+        } else {
+            None
+        };
         let mut ordinals = Vec::new();
         let mut scores = Vec::new();
         for (term, mut occurrences) in self.terms {
             occurrences.sort_unstable_by_key(|occurrence| occurrence.tid);
+            if let Some(tables) = sidecar.as_mut()
+                && let Ok(Some((field, token))) = crate::trailer::inspect_stored_term(&term)
+            {
+                for occurrence in &occurrences {
+                    let ordinal = documents
+                        .binary_search(&occurrence.tid)
+                        .expect("every occurrence belongs to a recorded document")
+                        as u32;
+                    tables
+                        .add(field, &token, ordinal, occurrence.positions.len() as u32)
+                        .expect("sidecar posting fits");
+                }
+            }
             let mut payload = PayloadBuilder::default();
             let mut max_tf_bucket = 0;
             ordinals.clear();
@@ -261,7 +308,7 @@ impl SegmentBuilder {
         }
         let offsets = docs::offsets(documents.iter().copied());
         let pages = docs::page_table(documents.iter().copied());
-        assemble(
+        let mut out = assemble(
             self.lengths.len() as u32,
             total_length,
             &dictionary_bytes,
@@ -271,7 +318,11 @@ impl SegmentBuilder {
             &lengths,
             &classes,
             &pages,
-        )
+        );
+        if let Some(tables) = sidecar {
+            out.extend_from_slice(&tables.encode().expect("sidecar tables encode"));
+        }
+        out
     }
 }
 
@@ -524,6 +575,9 @@ struct Header {
     classes_at: u64,
     pages_at: u64,
     pages_len: usize,
+    /// First byte past the page table. Stock readers stop here; only the
+    /// trailer API reads `pages_end..total`.
+    pages_end: u64,
 }
 
 /// Reads a segment from any [`Source`], fetching only the extents a query
@@ -542,6 +596,8 @@ pub struct Reader<S: Source> {
     /// from it, and a large segment's table has hundreds of thousands of
     /// entries.
     pages: OnceCell<PageTable<'static>>,
+    /// Parsed STNF sidecar, when `source.len() > pages_end`.
+    trailer: OnceCell<crate::trailer::Trailer>,
     /// The length chunk read last, by offset: scoring reads lengths in
     /// document order, so consecutive reads hit the same chunk.
     last_chunk: Cell<Option<(u64, *const [u8])>>,
@@ -617,10 +673,13 @@ impl<S: Source> Reader<S> {
         let lengths_at = offsets_at + u64::from(doc_count) * 2;
         let classes_at = lengths_at + u64::from(doc_count) * 4;
         let pages_at = classes_at + u64::from(doc_count);
-        if pages_at + pages_len as u64 != total || !pages_len.is_multiple_of(docs::PAGE_ENTRY) {
+        let pages_end = pages_at
+            .checked_add(pages_len as u64)
+            .ok_or(Error::Corrupt("segment length"))?;
+        if pages_end > total || !pages_len.is_multiple_of(docs::PAGE_ENTRY) {
             return Err(Error::Corrupt("segment length"));
         }
-        Ok(Self {
+        let reader = Self {
             source,
             header: Header {
                 doc_count,
@@ -636,16 +695,162 @@ impl<S: Source> Reader<S> {
                 classes_at,
                 pages_at,
                 pages_len,
+                pages_end,
             },
             id: crate::cache::reader_id(),
             arena: RefCell::new(Arena::default()),
             arena_bytes: Cell::new(0),
             dictionary: OnceCell::new(),
             pages: OnceCell::new(),
+            trailer: OnceCell::new(),
             last_chunk: Cell::new(None),
             last_classes: RefCell::new(None),
             held: Default::default(),
-        })
+        };
+        if total > pages_end {
+            reader.open_trailer(total)?;
+        } else {
+            reader.reject_fielded_keys_without_trailer()?;
+        }
+        Ok(reader)
+    }
+
+    /// First byte past the stock page table. Equal to the blob length on a
+    /// single-column segment; a trailer occupies `pages_end..source.len()`.
+    pub const fn pages_end(&self) -> u64 {
+        self.header.pages_end
+    }
+
+    /// The STNF sidecar, when the blob continues past [`Self::pages_end`].
+    pub fn trailer(&self) -> Option<&crate::trailer::Trailer> {
+        self.trailer.get()
+    }
+
+    /// Materializes the STNF sidecar once for this reader (the cache-entry
+    /// path). Structural CRC lives in [`crate::trailer::decode`]; the rest of
+    /// the open-time pass — positions, field totals, union df, bounds,
+    /// fielded-key grammar — runs here, not on every lookup.
+    fn open_trailer(&self, total: u64) -> Result<()> {
+        let len = usize::try_from(total - self.header.pages_end)
+            .map_err(|_| Error::Corrupt("STNF trailer"))?;
+        let parsed = {
+            let bytes = self.load(self.header.pages_end, len)?;
+            crate::trailer::decode(bytes, self.header.doc_count)?
+        };
+        self.validate_trailer(&parsed)?;
+        let _ = self.trailer.set(parsed);
+        Ok(())
+    }
+
+    fn reject_fielded_keys_without_trailer(&self) -> Result<()> {
+        let keys: Vec<String> = {
+            let dictionary = self.dictionary()?;
+            dictionary
+                .prefix("~")
+                .map(|item| item.map(|(term, _)| term))
+                .collect::<Result<Vec<_>>>()?
+        };
+        for term in keys {
+            if crate::trailer::inspect_stored_term(&term)?.is_some() {
+                return Err(Error::Corrupt("STNF missing trailer"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_trailer(&self, trailer: &crate::trailer::Trailer) -> Result<()> {
+        let field_count = trailer.field_count;
+        let doc_count = self.header.doc_count;
+        let mut rows = vec![0u32; usize::from(field_count) * doc_count as usize];
+        let mut df: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+        let terms: Vec<(String, TermEntry)> = {
+            let dictionary = self.dictionary()?;
+            dictionary.iter().collect::<Result<Vec<_>>>()?
+        };
+        for (term, entry) in terms {
+            let Some((field, token)) = crate::trailer::inspect_stored_term(&term)? else {
+                return Err(Error::Corrupt("STNF on single-column"));
+            };
+            if field >= field_count {
+                return Err(Error::Corrupt("STNF field_count"));
+            }
+            let resolved = self.resolve(entry)?;
+            let mut cursor = resolved.ordinals()?.cursor()?;
+            let mut payload = resolved.payload()?.cursor();
+            let mut member_ordinals = Vec::with_capacity(entry.df as usize);
+            let mut scores = Vec::with_capacity(entry.df as usize);
+            let set = df.entry(token).or_default();
+            while let Some(ordinal) = cursor.current() {
+                let bucket = cursor.bucket().ok_or(Error::Corrupt("STNF bounds"))?;
+                let n = u32::try_from(payload.next_count()?)
+                    .map_err(|_| Error::Corrupt("STNF positions"))?;
+                let index = (ordinal as usize)
+                    .checked_mul(usize::from(field_count))
+                    .and_then(|i| i.checked_add(usize::from(field)))
+                    .ok_or(Error::Corrupt("STNF norms"))?;
+                let cell = rows
+                    .get_mut(index)
+                    .ok_or(Error::Corrupt("STNF positions"))?;
+                *cell = cell
+                    .checked_add(n)
+                    .ok_or(Error::Corrupt("STNF positions"))?;
+                set.insert(ordinal);
+                member_ordinals.push(ordinal);
+                scores.push((bucket, self.length_at(ordinal)?));
+                cursor.advance()?;
+            }
+            let stream_bytes =
+                self.ordinals_bytes(entry.ordinals.offset, entry.ordinals.len as usize)?;
+            if member_ordinals.len() != scores.len() {
+                return Err(Error::Corrupt("STNF bounds"));
+            }
+            let canonical = crate::ordinals::encode_scored(&member_ordinals, &scores);
+            if canonical.as_slice() != stream_bytes {
+                let same =
+                    crate::ordinals::Ordinals::open(stream_bytes, stream_bytes.len() as u64, true)
+                        .and_then(|found| {
+                            crate::ordinals::Ordinals::open(
+                                canonical.as_slice(),
+                                canonical.len() as u64,
+                                true,
+                            )
+                            .and_then(|wanted| Ok(found.bounds()? == wanted.bounds()?))
+                        })
+                        .unwrap_or(false);
+                if !same {
+                    return Err(Error::Corrupt("STNF bounds"));
+                }
+            }
+        }
+        if rows != trailer.rows {
+            return Err(Error::Corrupt("STNF positions"));
+        }
+        for f in 0..field_count {
+            let mut sum = 0u64;
+            for o in 0..doc_count {
+                let cell = trailer.row(o, f).ok_or(Error::Corrupt("STNF norms"))?;
+                sum = sum
+                    .checked_add(u64::from(cell))
+                    .ok_or(Error::Corrupt("STNF field_total"))?;
+            }
+            if trailer.field_totals.get(usize::from(f)) != Some(&sum) {
+                return Err(Error::Corrupt("STNF field_total"));
+            }
+        }
+        if df.len() != trailer.df_agg.len() {
+            return Err(Error::Corrupt("STNF df_agg"));
+        }
+        for (stored, (token, ords)) in trailer.df_agg.iter().zip(df.iter()) {
+            let recomputed = ords.len() as u64;
+            if stored.token != *token
+                || stored.df != recomputed
+                || stored.df == 0
+                || stored.df > u64::from(doc_count)
+            {
+                return Err(Error::Corrupt("STNF df_agg"));
+            }
+        }
+        Ok(())
     }
 
     /// Bytes held in the arena, for cache budgeting.
@@ -657,6 +862,7 @@ impl<S: Source> Reader<S> {
     fn area_of(&self, offset: u64) -> usize {
         let header = &self.header;
         match offset {
+            _ if offset >= header.pages_end => 8,
             _ if offset >= header.pages_at => 7,
             _ if offset >= header.classes_at => 6,
             _ if offset >= header.lengths_at => 5,
@@ -2056,6 +2262,305 @@ mod tests {
         assert_eq!(
             Segment::parse(b"XXXX").err(),
             Some(Error::Corrupt("segment magic"))
+        );
+    }
+
+    fn stock_one_doc() -> Vec<u8> {
+        let mut builder = SegmentBuilder::default();
+        builder
+            .add_document(tid(0, 1), tokens("beer wine"))
+            .unwrap();
+        builder.finish()
+    }
+
+    fn splice_trailer(mut blob: Vec<u8>, trailer: Vec<u8>) -> Vec<u8> {
+        blob.extend_from_slice(&trailer);
+        blob
+    }
+
+    #[test]
+    fn single_column_opens_with_pages_end_equal_to_total() {
+        let bytes = stock_one_doc();
+        let segment = Segment::parse(&bytes).unwrap();
+        assert_eq!(segment.pages_end(), bytes.len() as u64);
+        assert!(segment.trailer().is_none());
+        assert_eq!(segment.document_count(), 1);
+        assert_eq!(segment.term("beer").unwrap().map(|t| t.df()), Some(1));
+        assert_eq!(segment.cached_bytes(), 0);
+    }
+
+    fn fielded(field: u8, token: &str) -> String {
+        crate::trailer::test_fielded_key(field, token)
+    }
+
+    fn add_columns(builder: &mut SegmentBuilder, tid: Tid, columns: &[&str]) -> Result<()> {
+        let mut tokens = Vec::new();
+        let mut position = 0u32;
+        for (field, text) in columns.iter().enumerate() {
+            for word in text.split_whitespace() {
+                position += 1;
+                tokens.push((fielded(field as u8, word), position));
+            }
+        }
+        builder.add_document(tid, tokens.iter().map(|(t, p)| (t.as_str(), *p)))
+    }
+
+    fn two_column(columns: &[&str]) -> Vec<u8> {
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(2).unwrap();
+        add_columns(&mut builder, tid(0, 1), columns).unwrap();
+        builder.finish()
+    }
+
+    #[test]
+    fn hand_built_trailer_parses_through_the_reader_api() {
+        let blob = two_column(&["beer wine"]);
+        let segment = Segment::parse(&blob).unwrap();
+        let pages_end = segment.pages_end() as usize;
+        assert!(pages_end < blob.len());
+        let trailer = segment.trailer().expect("multi-column blob has a trailer");
+        assert_eq!(trailer.field_count, 2);
+        assert_eq!(trailer.field_totals, [2, 0]);
+        assert_eq!(trailer.row(0, 0), Some(2));
+        assert_eq!(trailer.row(0, 1), Some(0));
+        assert_eq!(trailer.df_agg[0].token, "beer");
+        assert_eq!(trailer.df_agg[1].df, 1);
+        assert_eq!(
+            segment.term(&fielded(0, "beer")).unwrap().map(|t| t.df()),
+            Some(1)
+        );
+        assert!(segment.term("beer").unwrap().is_none());
+    }
+
+    #[test]
+    fn short_long_magic_and_version_reject_at_open() {
+        let stock = stock_one_doc();
+        let good = crate::trailer::encode(&[2, 0], &[2, 0], &[("beer", 1)]).unwrap();
+
+        let mut short = good.clone();
+        short.pop();
+        assert_eq!(
+            Segment::parse(&splice_trailer(stock.clone(), short)).err(),
+            Some(Error::Corrupt("STNF trailer"))
+        );
+
+        let mut long = good.clone();
+        long.push(0);
+        assert_eq!(
+            Segment::parse(&splice_trailer(stock.clone(), long)).err(),
+            Some(Error::Corrupt("STNF trailer"))
+        );
+
+        let mut magic = good.clone();
+        magic[..4].copy_from_slice(b"STN3");
+        assert_eq!(
+            Segment::parse(&splice_trailer(stock.clone(), magic)).err(),
+            Some(Error::Corrupt("STNF magic"))
+        );
+
+        let mut version = good;
+        version[4] = 2;
+        assert_eq!(
+            Segment::parse(&splice_trailer(stock, version)).err(),
+            Some(Error::Corrupt("STNF version"))
+        );
+    }
+
+    #[test]
+    fn paged_reader_charges_trailer_bytes_to_the_arena() {
+        crate::cache::reset_areas();
+        let blob = two_column(&["beer wine"]);
+        let pages_end = Segment::parse(&blob).unwrap().pages_end() as usize;
+        let trailer_len = blob.len() - pages_end;
+        crate::cache::reset_areas();
+        let paged = Reader::new(Paged::new(blob, 32)).unwrap();
+        assert!(paged.cached_bytes() >= trailer_len);
+        assert_eq!(crate::cache::area_bytes()[8], trailer_len as u64);
+        let trailer = paged.trailer().unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert_eq!(
+            paged.term(&fielded(0, "wine")).unwrap().map(|t| t.df()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn multi_column_empty_docs_emit_and_open_trailer() {
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(2).unwrap();
+        let bytes = builder.finish();
+        let segment = Segment::parse(&bytes).unwrap();
+        assert!(segment.pages_end() < bytes.len() as u64);
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert!(trailer.rows.is_empty());
+        assert!(trailer.df_agg.is_empty());
+        assert_eq!(trailer.field_totals, [0, 0]);
+    }
+
+    #[test]
+    fn one_field_in_two_column_index_still_writes_trailer() {
+        let blob = two_column(&["only"]);
+        let segment = Segment::parse(&blob).unwrap();
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert_eq!(trailer.row(0, 0), Some(1));
+        assert_eq!(trailer.row(0, 1), Some(0));
+        assert_eq!(trailer.field_totals, [1, 0]);
+        assert_eq!(trailer.df_agg.len(), 1);
+        assert_eq!(trailer.df_agg[0].token, "only");
+        assert_eq!(trailer.df_agg[0].df, 1);
+    }
+
+    #[test]
+    fn overlap_token_in_both_fields_is_one_union_df_entry() {
+        let blob = two_column(&["needle pad", "needle"]);
+        let segment = Segment::parse(&blob).unwrap();
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.df_agg.len(), 2);
+        let needle = trailer.df_agg.iter().find(|e| e.token == "needle").unwrap();
+        assert_eq!(needle.df, 1, "union df, not sum of per-field dfs");
+        assert_eq!(trailer.row(0, 0), Some(2));
+        assert_eq!(trailer.row(0, 1), Some(1));
+    }
+
+    #[test]
+    fn all_dead_ordinals_remain_in_rows_and_still_open() {
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(2).unwrap();
+        add_columns(&mut builder, tid(0, 1), &["keep", "gone"]).unwrap();
+        add_columns(&mut builder, tid(0, 2), &["also", "dead"]).unwrap();
+        let blob = builder.finish();
+        let segment = Segment::parse(&blob).unwrap();
+        let trailer = segment.trailer().unwrap();
+        let dead = BTreeSet::from([tid(0, 1), tid(0, 2)]);
+        assert_eq!(segment.document_count(), 2);
+        assert_eq!(
+            trailer.rows.len(),
+            4,
+            "dead ordinals stay in rows until rewrite"
+        );
+        assert_eq!(trailer.row(0, 0), Some(1));
+        assert_eq!(trailer.row(0, 1), Some(1));
+        assert_eq!(trailer.row(1, 0), Some(1));
+        assert_eq!(trailer.row(1, 1), Some(1));
+        assert!(crate::verify::verify_segment(&blob).is_clean());
+        let merged = crate::merge::merge(
+            &[crate::merge::MergeInput {
+                bytes: &blob,
+                dead: &dead,
+            }],
+            crate::merge::MergeLimits {
+                max_inputs: 8,
+                max_input_bytes: 1 << 20,
+                max_documents: 16,
+                max_output_bytes: 1 << 20,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        let rewritten = Segment::parse(&merged).unwrap();
+        assert_eq!(rewritten.document_count(), 0);
+        let out = rewritten.trailer().unwrap();
+        assert_eq!(out.field_count, 2);
+        assert!(out.rows.is_empty());
+        assert!(out.df_agg.is_empty());
+    }
+
+    #[test]
+    fn norms_cell_is_position_list_length_not_max_plus_one() {
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(2).unwrap();
+        let key = fielded(0, "gap");
+        builder
+            .add_document(tid(0, 1), [(key.as_str(), 1), (key.as_str(), 3)])
+            .unwrap();
+        let blob = builder.finish();
+        let segment = Segment::parse(&blob).unwrap();
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(
+            trailer.row(0, 0),
+            Some(2),
+            "cell is Σ position-list lengths, not max(pos)+1"
+        );
+        assert_ne!(trailer.row(0, 0), Some(4));
+        assert_eq!(trailer.field_totals, [2, 0]);
+        assert!(crate::verify::verify_segment(&blob).is_clean());
+    }
+
+    fn rewrite_df(blob: &[u8], df: &[(&str, u64)]) -> Vec<u8> {
+        let segment = Segment::parse(blob).unwrap();
+        let trailer = segment.trailer().unwrap();
+        let bytes = crate::trailer::encode(&trailer.field_totals, &trailer.rows, df).unwrap();
+        let mut out = blob[..segment.pages_end() as usize].to_vec();
+        out.extend_from_slice(&bytes);
+        out
+    }
+
+    #[test]
+    fn corruption_rejects_at_open() {
+        let blob = two_column(&["beer wine"]);
+        let segment = Segment::parse(&blob).unwrap();
+        let pages_end = segment.pages_end() as usize;
+        let trailer = segment.trailer().unwrap();
+
+        let mut crc = blob.clone();
+        let norms_len =
+            u32::from_le_bytes(crc[pages_end + 5..pages_end + 9].try_into().unwrap()) as usize;
+        crc[pages_end + crate::trailer::PREFIX_LEN + norms_len - 1] ^= 1;
+        assert_eq!(
+            Segment::parse(&crc).err(),
+            Some(Error::Corrupt("STNF crc32"))
+        );
+
+        let mut totals = blob.clone();
+        totals[pages_end + crate::trailer::PREFIX_LEN + 1] ^= 1;
+        assert_eq!(
+            Segment::parse(&totals).err(),
+            Some(Error::Corrupt("STNF field_total"))
+        );
+
+        let deleted = rewrite_df(&blob, &[("beer", 1)]);
+        assert_eq!(
+            Segment::parse(&deleted).err(),
+            Some(Error::Corrupt("STNF df_agg"))
+        );
+
+        let extra = rewrite_df(&blob, &[("beer", 1), ("wine", 1), ("zzz", 1)]);
+        assert_eq!(
+            Segment::parse(&extra).err(),
+            Some(Error::Corrupt("STNF df_agg"))
+        );
+
+        let spliced = splice_trailer(
+            stock_one_doc(),
+            crate::trailer::encode(
+                &trailer.field_totals,
+                &trailer.rows,
+                &[("beer", 1), ("wine", 1)],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            Segment::parse(&spliced).err(),
+            Some(Error::Corrupt("STNF on single-column"))
+        );
+
+        let truncated = blob[..pages_end].to_vec();
+        assert_eq!(
+            Segment::parse(&truncated).err(),
+            Some(Error::Corrupt("STNF missing trailer"))
+        );
+
+        let mut unpaired = SegmentBuilder::default();
+        unpaired.set_field_count(2).unwrap();
+        let ok = fielded(0, "ok");
+        unpaired
+            .add_document(tid(0, 1), [(ok.as_str(), 1), ("~0~foo~", 2)])
+            .unwrap();
+        assert_eq!(
+            Segment::parse(&unpaired.finish()).err(),
+            Some(Error::Corrupt("STNF unpaired tilde"))
         );
     }
 }

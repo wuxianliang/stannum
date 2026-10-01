@@ -31,6 +31,10 @@
 //! * document lengths: nonzero, summing to `total_length`, equal to the
 //!   number of positions the term payloads hold for that document, and in
 //!   the class the class table records.
+//! * the STNF sidecar, when present: per-field length cells equal the sum of
+//!   that field's position-list lengths (not `max(pos)+1`), and each
+//!   `field_total` equals the checked sum of its column. Open-time validation
+//!   is the reject path; this checker lists the same disagreements.
 //!
 //! Bytes of an area that no extent covers are not examined: no reader reaches
 //! them.
@@ -230,6 +234,8 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
     };
     report.doc_count = Some(segment.document_count());
     report.total_length = Some(segment.total_length());
+    let trailer = segment.trailer().cloned();
+    let mut field_rows = trailer.as_ref().map(|t| vec![0u32; t.rows.len()]);
 
     // The document table and lengths first: every term check refers to them.
     let documents = match segment.doc_table().and_then(|docs| docs.to_vec()) {
@@ -489,6 +495,15 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
                     *counted += position_count as u64;
                     scores.push((bucket, length_of[*ordinal as usize]));
                 }
+                if let (Some(t), Some(rows)) = (trailer.as_ref(), field_rows.as_mut())
+                    && let Ok(Some((field, _))) = crate::trailer::inspect_stored_term(term)
+                    && let Some(cell) = (*ordinal as usize)
+                        .checked_mul(usize::from(t.field_count))
+                        .and_then(|i| i.checked_add(usize::from(field)))
+                        .and_then(|i| rows.get_mut(i))
+                {
+                    *cell = cell.saturating_add(position_count as u32);
+                }
             }
             if !payload_ok {
                 complete = false;
@@ -546,6 +561,41 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
                         length_of[ordinal], positions_of[ordinal]
                     ),
                 );
+            }
+        }
+        if let (Some(t), Some(rows)) = (trailer.as_ref(), field_rows.as_ref()) {
+            if rows != &t.rows {
+                findings.error(
+                    "STNF norms",
+                    "length cells do not match position-list lengths",
+                );
+            }
+            for f in 0..t.field_count {
+                let mut sum = 0u64;
+                let mut overflow = false;
+                for o in 0..segment.document_count() {
+                    let Some(cell) = t.row(o, f) else {
+                        findings.error("STNF norms", format!("missing row {o} field {f}"));
+                        continue;
+                    };
+                    match sum.checked_add(u64::from(cell)) {
+                        Some(s) => sum = s,
+                        None => {
+                            findings.error("STNF field_total", format!("field {f} overflow"));
+                            overflow = true;
+                            break;
+                        }
+                    }
+                }
+                if !overflow && t.field_totals.get(usize::from(f)) != Some(&sum) {
+                    findings.error(
+                        "STNF field_total",
+                        format!(
+                            "field {f} is {:?} but rows sum to {sum}",
+                            t.field_totals.get(usize::from(f))
+                        ),
+                    );
+                }
             }
         }
     }

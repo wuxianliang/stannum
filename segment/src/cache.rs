@@ -62,8 +62,10 @@ thread_local! {
 }
 
 /// Areas of a segment, in blob order, for read accounting.
-pub const AREAS: usize = 8;
-/// Names of [`AREAS`], in order.
+pub const AREAS: usize = 9;
+/// Names of [`AREAS`], in order. Trailer bytes are charged to `"trailer"` when
+/// a reader materializes the sidecar once (`Reader::open_trailer`); lookups
+/// do not re-run that pass.
 pub const AREA_NAMES: [&str; AREAS] = [
     "header",
     "dictionary",
@@ -73,6 +75,7 @@ pub const AREA_NAMES: [&str; AREAS] = [
     "lengths",
     "classes",
     "pages",
+    "trailer",
 ];
 
 thread_local! {
