@@ -223,7 +223,7 @@ reports MERGE CONFLICT informatively — run 36816452727); stn3 CI 6/6, main CI 
   - Review focus: design §6 state machine; `parallel_safe` = false only on
     nonempty dict.
 
-- [ ] **3.3 pgembed checkpoint**
+- [x] **3.3 pgembed checkpoint** (pgembed 68386ec)
   - Pin bump; `test_stannum_jieba.py` green; Chinese-corpus wheel smoke.
 
 ---
