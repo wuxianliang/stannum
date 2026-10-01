@@ -118,3 +118,28 @@ divergences:
   engines:
   - 0.1.0
   - 0.5.0
+- id: catalog.functions
+  against: stannum-0.4.0
+  kind: gap
+  captures:
+  - value
+  summary: 'STN3 exposes capabilities() that 0.4.0 never registered. Design 7.3:
+    0.5.0-only / new-objects. The function has no 0.4.0 recording; its gate is the
+    §4.2 shape, not a replay. The forty-one frozen functions match the recording
+    field for field.'
+  expected:
+    value:
+      extra:
+      - - capabilities
+        - ''
+        - ''
+        - jsonb
+        - i
+        - s
+        - true
+        - false
+        - null
+        - null
+  engines:
+  - 0.1.0
+  - 0.5.0
