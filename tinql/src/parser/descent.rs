@@ -955,6 +955,9 @@ impl<'a> Parser<'a> {
     /// alternatives list are parsed here rather than in rules of their own,
     /// to spend one frame fewer per bracket level.
     fn base(&mut self) -> R {
+        if self.field_expr()? {
+            return Ok(true);
+        }
         match self.byte(self.pos) {
             Some(b'(') => {
                 let mark = self.mark();
@@ -984,6 +987,68 @@ impl<'a> Parser<'a> {
                 || self.contains_expr()?
                 || self.word_primary()?),
         }
+    }
+
+    /// `name:(…)`: first alternative of `base`. The head is compound atomic —
+    /// the name, colon and opening paren must be adjacent.
+    fn field_expr(&mut self) -> R {
+        let mark = self.mark();
+        let Some(name) = self.field_name() else {
+            return Ok(false);
+        };
+        if self.byte(self.pos) != Some(b':') || self.byte(self.pos + 1) != Some(b'(') {
+            self.reset(mark);
+            return Ok(false);
+        }
+        self.pos += 1;
+        self.enter()?;
+        self.skip_ws();
+        let matched = self.or_expr()? && {
+            self.skip_ws();
+            self.eat(b')')
+        };
+        self.nesting -= 1;
+        if !matched {
+            self.reset(mark);
+            return Ok(false);
+        }
+        self.wrap(|inner| Expr::Field { name, inner })?;
+        Ok(true)
+    }
+
+    /// A `bare_ident` or `quoted_ident`. A bare name is ASCII-lowercased; a
+    /// quoted one uses the phrase escape rule and stays byte-exact.
+    fn field_name(&mut self) -> Option<String> {
+        if self.byte(self.pos) == Some(b'"') {
+            let start = self.pos + 1;
+            let mut i = start;
+            while i < self.bytes.len() {
+                match self.bytes[i] {
+                    b'\\' if i + 1 < self.bytes.len() => i += 2,
+                    b'\\' => return None,
+                    b'"' => {
+                        let raw = &self.src[start..i];
+                        self.pos = i + 1;
+                        return Some(unescape_phrase_term(raw));
+                    }
+                    _ => i += 1,
+                }
+            }
+            return None;
+        }
+        let start = self.pos;
+        if !self.byte(start).is_some_and(|b| b.is_ascii_alphabetic()) {
+            return None;
+        }
+        let mut end = start + 1;
+        while self
+            .byte(end)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            end += 1;
+        }
+        self.pos = end;
+        Some(self.src[start..end].to_ascii_lowercase())
     }
 
     /// `[` elements `]`: pushes the elements; returns where the bracket

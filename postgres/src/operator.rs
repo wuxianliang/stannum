@@ -137,8 +137,10 @@ pub(crate) fn raise_query_error(error: &QueryError, message: String) -> ! {
 
 /// Parses `text` with `tokenizer`, or raises the error of an invalid query.
 pub(crate) fn parse_or_raise<T: tokenizer::Tokenizer>(text: &str, tokenizer: &T) -> Query {
-    parse_tinql_to_query(text, tokenizer)
-        .unwrap_or_else(|error| raise_query_error(&error, invalid_query(text, &error)))
+    let query = parse_tinql_to_query(text, tokenizer)
+        .unwrap_or_else(|error| raise_query_error(&error, invalid_query(text, &error)));
+    crate::score::check_query_fields(&query);
+    query
 }
 
 /// An error of `==>`: its SQLSTATE and whole message.
@@ -161,10 +163,10 @@ fn parsed_query(
     if let Some(query) = memoized {
         return Ok(query);
     }
-    let query = Rc::new(
-        parse_tinql_to_query(text, tokenizer)
-            .map_err(|error| (query_error_code(&error), invalid_query(text, &error)))?,
-    );
+    let query = parse_tinql_to_query(text, tokenizer)
+        .map_err(|error| (query_error_code(&error), invalid_query(text, &error)))?;
+    crate::score::check_query_fields(&query);
+    let query = Rc::new(query);
     QUERIES.with_borrow_mut(|memo| {
         let queries = memo.entry(spec).or_default();
         if queries.len() >= QUERY_MEMO_LIMIT {
@@ -607,15 +609,29 @@ pub(crate) unsafe fn bind_to_index(
     }
 }
 
-/// Rejects a `==>` query that scopes a field other than the column the clause
-/// answers. Field syntax is not in this tinql snapshot, and multi-column
-/// indexes are rejected at DDL until Phase 5, so the check is a no-op. The
-/// suitability path calls it so the rejection cannot depend on the chosen plan.
+/// Rejects a `==>` query that uses field syntax on a single-column index.
+/// Multi-column field resolution is Phase 5; the 0.4.0 single-column error
+/// is `field syntax requires a multi-column index`.
 fn check_clause_field_scope(
     _document: *mut pg_sys::Node,
-    _query: *mut pg_sys::Node,
+    query: *mut pg_sys::Node,
     _index: pg_sys::Oid,
 ) {
+    unsafe {
+        if query.is_null() || (*query).type_ != pg_sys::NodeTag::T_Const {
+            return;
+        }
+        let value = &*query.cast::<pg_sys::Const>();
+        if value.constisnull || value.consttype != pg_sys::TEXTOID {
+            return;
+        }
+        let Some(text) = String::from_datum(value.constvalue, false) else {
+            return;
+        };
+        if let Ok(expr) = tinql::parse(&text, tinql::ImplicitOp::And) {
+            crate::score::check_expr_fields(&expr);
+        }
+    }
 }
 
 /// The right operand of the bound form: a bound constant for a constant

@@ -30,6 +30,8 @@ use super::{
 pub enum LowerError {
     #[error("MatchAll (*) is not valid inside a span/positional context")]
     MatchAllInSpanContext,
+    #[error("a field scope is not valid inside a span/positional expression")]
+    FieldInSpanContext,
     #[error("{0}")]
     InvalidRegex(#[from] super::RegexError),
     #[error(
@@ -67,7 +69,7 @@ impl LowerError {
             | Self::ExpansionTooLarge
             | Self::RegexesTooLarge => true,
             Self::InvalidRegex(error) => error.exceeds_limit(),
-            Self::MatchAllInSpanContext => false,
+            Self::MatchAllInSpanContext | Self::FieldInSpanContext => false,
         }
     }
 }
@@ -151,6 +153,10 @@ fn lower_boolean(expr: &crate::Expr, depth: usize) -> Result<Query, LowerError> 
         }
         Expr::Boost { factor, inner } => Ok(Query::Boost {
             factor: factor.0,
+            inner: Box::new(lower_boolean(inner, depth + 1)?),
+        }),
+        Expr::Field { name, inner } => Ok(Query::Field {
+            name: name.clone(),
             inner: Box::new(lower_boolean(inner, depth + 1)?),
         }),
         // A single-term phrase is just a term — no span machinery needed.
@@ -507,6 +513,7 @@ impl SpanBuilder {
                 })
             }
             Expr::Boost { inner, .. } => self.lower_span_expr(inner),
+            Expr::Field { .. } => Err(LowerError::FieldInSpanContext),
             _ => unreachable!("lower_span_node dispatches leaves and chains elsewhere"),
         }
     }

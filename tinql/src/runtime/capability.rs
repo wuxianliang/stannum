@@ -20,6 +20,7 @@ pub enum LoweringIssue {
     EmptyRangeBound,
     SplitLongToken,
     MatchAllInSpanContext,
+    FieldInSpanContext,
     InvalidRegex,
     /// Past a size or nesting limit (see [`crate::limits`]).
     TooLarge,
@@ -63,6 +64,7 @@ impl From<LowerError> for LoweringIssue {
     fn from(value: LowerError) -> Self {
         match value {
             LowerError::MatchAllInSpanContext => Self::MatchAllInSpanContext,
+            LowerError::FieldInSpanContext => Self::FieldInSpanContext,
             LowerError::InvalidRegex(error) if error.exceeds_limit() => Self::TooLarge,
             LowerError::InvalidRegex(_) => Self::InvalidRegex,
             LowerError::NestingTooDeep

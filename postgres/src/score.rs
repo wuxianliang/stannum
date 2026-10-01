@@ -909,7 +909,7 @@ fn span_requires_all(query: &boldi_vigna::SpanQuery) -> bool {
 fn prunable_shape(query: &Query) -> Option<(Combine, Vec<&str>, Option<SpanCheck<'_>>)> {
     fn unboost(query: &Query) -> &Query {
         match query {
-            Query::Boost { inner, .. } => unboost(inner),
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => unboost(inner),
             other => other,
         }
     }
@@ -1017,7 +1017,7 @@ impl<'q> Shape<'q> {
                 .then_some(Self::All(children))
         };
         Some(match query {
-            Query::Boost { inner, .. } => return Self::of(inner),
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => return Self::of(inner),
             Query::Term(term) => Self::Term(term),
             Query::Span {
                 term_slots,
@@ -4668,6 +4668,7 @@ fn build_index_scorer_inner(
         }),
         key.field,
     );
+    check_query_fields(&query);
     let scoring =
         parse_tinql_to_scoring_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
             crate::operator::raise_query_error(
@@ -4876,6 +4877,7 @@ fn build_corpus(
     let query = parse_tinql_to_query(&key.query, &tokenizer).unwrap_or_else(|error| {
         crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
     });
+    check_query_fields(&query);
     let scoring = parse_tinql_to_scoring_query(&key.query, &tokenizer).unwrap_or_else(|error| {
         crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
     });
@@ -5242,6 +5244,7 @@ fn collect_score_terms<'a>(
         Query::Boost { factor, inner } => {
             collect_score_terms(inner, boost * *factor, true, out);
         }
+        Query::Field { inner, .. } => collect_score_terms(inner, boost, explicitly_boosted, out),
     }
 }
 
@@ -5434,6 +5437,107 @@ pub(crate) unsafe fn pick_index(
                 .find(|(candidate, _)| unsafe { crate::storage::spec_by_oid(*candidate) == spec })
         }
         None => candidates.first().copied(),
+    }
+}
+
+/// Field syntax on a fieldless (single-column) index is the 0.4.0 error.
+/// Unknown-field and BM25F keys are Phase 5.
+pub(crate) fn check_query_fields(query: &Query) {
+    walk_query_fields(query);
+}
+
+fn walk_query_fields(query: &Query) {
+    match query {
+        Query::Field { .. } => {
+            pgrx::error!("stannum: field syntax requires a multi-column index");
+        }
+        Query::And(left, right) | Query::Or(left, right) => {
+            walk_query_fields(left);
+            walk_query_fields(right);
+        }
+        Query::Conjunction(children)
+        | Query::Disjunction { children, .. }
+        | Query::AtLeast { children, .. } => {
+            for child in children {
+                walk_query_fields(child);
+            }
+        }
+        Query::Not(inner) | Query::Boost { inner, .. } => walk_query_fields(inner),
+        Query::Term(_)
+        | Query::Span { .. }
+        | Query::SpanExpr { .. }
+        | Query::MatchAll
+        | Query::Regex(_)
+        | Query::Range { .. }
+        | Query::Fuzzy { .. } => {}
+    }
+}
+
+/// Surface-AST form of [`check_query_fields`], used when the planner sees
+/// field syntax before the query is lowered.
+pub(crate) fn check_expr_fields(expr: &tinql::Expr) {
+    walk_expr_fields(expr);
+}
+
+fn walk_expr_fields(expr: &tinql::Expr) {
+    use tinql::Expr;
+    match expr {
+        Expr::Field { .. } => {
+            pgrx::error!("stannum: field syntax requires a multi-column index");
+        }
+        Expr::And(operands)
+        | Expr::Or(operands)
+        | Expr::Alternatives(operands)
+        | Expr::AtLeast {
+            exprs: operands, ..
+        } => {
+            for operand in operands {
+                walk_expr_fields(operand);
+            }
+        }
+        Expr::AndNot {
+            positive: a,
+            negative: b,
+        }
+        | Expr::Then {
+            left: a, right: b, ..
+        }
+        | Expr::Near {
+            left: a, right: b, ..
+        }
+        | Expr::Encloses { big: a, little: b }
+        | Expr::NotEncloses { big: a, little: b }
+        | Expr::EnclosedBy { little: a, big: b }
+        | Expr::NotEnclosedBy { little: a, big: b }
+        | Expr::Overlapping { a, b }
+        | Expr::NotOverlapping { a, b }
+        | Expr::Before { a, b }
+        | Expr::After { a, b } => {
+            walk_expr_fields(a);
+            walk_expr_fields(b);
+        }
+        Expr::First { inner, .. }
+        | Expr::Last { inner, .. }
+        | Expr::Middle { inner, .. }
+        | Expr::Between { inner, .. }
+        | Expr::Within { inner, .. }
+        | Expr::Boost { inner, .. } => walk_expr_fields(inner),
+        Expr::Phrase { elements, .. } => {
+            for element in elements {
+                if let tinql::PhraseElement::Alternatives(exprs) = element {
+                    for inner in exprs {
+                        walk_expr_fields(inner);
+                    }
+                }
+            }
+        }
+        Expr::Term(_)
+        | Expr::MatchAll
+        | Expr::MatchNone
+        | Expr::Fuzzy { .. }
+        | Expr::Wildcard(_)
+        | Expr::Regex(_)
+        | Expr::Range { .. } => {}
     }
 }
 

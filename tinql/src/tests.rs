@@ -1648,6 +1648,92 @@ mod cases {
         );
     }
 
+    // ── Field scope ─────────────────────────────────────────────────────
+
+    fn field(name: &str, inner: Expr) -> Expr {
+        Expr::Field {
+            name: name.into(),
+            inner: Box::new(inner),
+        }
+    }
+
+    #[test]
+    fn field_scope_parses_a_group() {
+        assert_eq!(p("title:(beer)").unwrap(), field("title", term("beer")));
+        assert_eq!(
+            p("title:(beer ale)").unwrap(),
+            field("title", and(term("beer"), term("ale")))
+        );
+        assert_eq!(
+            p("title:(beer OR ale)").unwrap(),
+            field("title", or(term("beer"), term("ale")))
+        );
+    }
+
+    #[test]
+    fn bare_field_names_fold_ascii_case() {
+        assert_eq!(p("TITLE:(beer)").unwrap(), field("title", term("beer")));
+        assert_eq!(p("Title_2:(beer)").unwrap(), field("title_2", term("beer")));
+        assert_eq!(p("\"Title\":(beer)").unwrap(), field("Title", term("beer")));
+        assert_eq!(
+            p("\"my field\":(beer)").unwrap(),
+            field("my field", term("beer"))
+        );
+    }
+
+    #[test]
+    fn quoted_field_names_use_the_phrase_escape_rule() {
+        assert_eq!(
+            p(r#""a\"b\\c":(beer)"#).unwrap(),
+            field(r#"a"b\c"#, term("beer"))
+        );
+    }
+
+    #[test]
+    fn a_space_breaks_the_field_head() {
+        assert_eq!(
+            p("title: (beer)").unwrap(),
+            and(term("title:"), term("beer"))
+        );
+    }
+
+    #[test]
+    fn colon_without_a_paren_stays_one_word() {
+        assert_eq!(p("title:beer").unwrap(), term("title:beer"));
+    }
+
+    #[test]
+    fn field_scope_binds_one_primary() {
+        assert_eq!(
+            p("title:(beer) ale").unwrap(),
+            and(field("title", term("beer")), term("ale"))
+        );
+    }
+
+    #[test]
+    fn field_scope_takes_a_boost() {
+        assert_eq!(
+            p("title:(beer)^2").unwrap(),
+            boost(field("title", term("beer")), 2.0)
+        );
+        assert_eq!(
+            p("title:(beer^2)").unwrap(),
+            field("title", boost(term("beer"), 2.0))
+        );
+    }
+
+    #[test]
+    fn roundtrip_field_scopes() {
+        roundtrip("title:(beer)");
+        roundtrip("title:(beer ale)");
+        roundtrip("title:(beer) ale");
+        roundtrip("title:(beer)^2");
+        roundtrip("TITLE:(beer)");
+        roundtrip(r#""my field":(beer)"#);
+        roundtrip(r#""a\"b":(beer)"#);
+        roundtrip("title:(needle)");
+    }
+
     // ── Display roundtrip ───────────────────────────────────────────────
 
     fn roundtrip(input: &str) {
@@ -2003,5 +2089,46 @@ mod cases {
                 _ => vec![format!("<non-term:{query:?}>")],
             }
         }
+    }
+}
+
+/// Evidence that ordinary tokenize is unchanged and that `title:(needle)` is
+/// not a tokenizer gap: unicode.rs was already byte-identical to main.
+mod tokenizer_evidence {
+    use tokenizer::{Folding, Tokenizer, TokenizerPipelineSpec, TokenizerSpec};
+
+    fn tokens(text: &str, kind: TokenizerSpec) -> Vec<String> {
+        let mut spec = TokenizerPipelineSpec::stannum_default();
+        spec.tokenizer = kind;
+        spec.case_folding = Folding::Fold;
+        spec.accent_folding = Folding::Fold;
+        spec.compile()
+            .unwrap()
+            .tokenize(text)
+            .map(|token| token.text.into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn hello_cafe_matches_the_frozen_unicode_whitespace_case() {
+        assert_eq!(
+            tokens("Hello Café", TokenizerSpec::Unicode),
+            ["hello", "cafe"]
+        );
+        assert_eq!(
+            tokens("Hello Café", TokenizerSpec::Whitespace),
+            ["hello", "cafe"]
+        );
+    }
+
+    #[test]
+    fn title_needle_tokenize_is_not_the_parse_gap() {
+        // `:` is a word character (design §5.1); parens are not. The frozen
+        // case fails on ql_parse display (`title AND needle` vs `title:(needle)`),
+        // not on tokenize(). These tokens are the 0.4.0 unicode split.
+        assert_eq!(
+            tokens("title:(needle)", TokenizerSpec::Unicode),
+            ["title", "needle"]
+        );
     }
 }

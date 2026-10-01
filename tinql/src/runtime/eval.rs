@@ -269,6 +269,7 @@ fn evaluate_searchable(query: &Query, doc: &TokenizedDoc) -> Result<MatchResult,
             }))
         }
         Query::Boost { inner, .. } => evaluate_searchable(inner, doc),
+        Query::Field { inner, .. } => evaluate_searchable(inner, doc),
         Query::AtLeast { min, children } => {
             let mut matched_children = Vec::new();
             for child in children {
@@ -369,7 +370,7 @@ fn collect_highlight_matches(query: &Query, doc: &TokenizedDoc, out: &mut Vec<Hi
         Query::Not(_) => {
             // NOT suppresses matches — nothing to highlight.
         }
-        Query::Boost { inner, .. } => {
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
             collect_highlight_matches(inner, doc, out);
         }
         Query::Span {

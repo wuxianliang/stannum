@@ -144,6 +144,10 @@ fn reduce_unscored_redundancy(query: Query) -> Query {
         Query::Boost { factor, inner } => {
             simplify_boost(factor, reduce_unscored_redundancy(*inner))
         }
+        Query::Field { name, inner } => Query::Field {
+            name,
+            inner: Box::new(reduce_unscored_redundancy(*inner)),
+        },
         Query::AtLeast { min, children } => Query::AtLeast {
             min,
             children: children
@@ -260,7 +264,7 @@ fn can_participate_in_positive_implication(query: &Query) -> bool {
 
 fn positive_root(query: &Query) -> Option<&Query> {
     match query {
-        Query::Boost { inner, .. } => positive_root(inner),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => positive_root(inner),
         Query::Not(_) => None,
         other => Some(other),
     }
@@ -289,7 +293,7 @@ fn implies(lhs: &Query, rhs: &Query) -> bool {
         Query::Disjunction { min: 1, children } => {
             return children.iter().any(|child| implies(lhs, child));
         }
-        Query::Boost { inner, .. } => return implies(lhs, inner),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => return implies(lhs, inner),
         Query::Span {
             term_slots,
             span_query,
@@ -312,7 +316,7 @@ fn implies(lhs: &Query, rhs: &Query) -> bool {
         Query::Conjunction(children) => children.iter().any(|child| implies(child, rhs)),
         Query::Or(left, right) => implies(left, rhs) && implies(right, rhs),
         Query::Disjunction { children, .. } => children.iter().all(|child| implies(child, rhs)),
-        Query::Boost { inner, .. } => implies(inner, rhs),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => implies(inner, rhs),
         _ => false,
     }
 }
@@ -351,7 +355,9 @@ fn query_implies_term(query: &Query, rhs_term: &str) -> bool {
             all_terms_required_span_expr(span_expr)
                 && span_expr_references_term(span_expr, term_slots, rhs_term)
         }
-        Query::Boost { inner, .. } => query_implies_term(inner, rhs_term),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
+            query_implies_term(inner, rhs_term)
+        }
         Query::MatchAll
         | Query::Not(_)
         | Query::Regex(_)
@@ -392,7 +398,7 @@ fn query_implies_span(
         Query::Disjunction { children, .. } => children
             .iter()
             .all(|child| query_implies_span(child, rhs_slots, rhs_span_query, rhs_position_filter)),
-        Query::Boost { inner, .. } => {
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
             query_implies_span(inner, rhs_slots, rhs_span_query, rhs_position_filter)
         }
         _ => false,
@@ -423,7 +429,9 @@ fn query_implies_span_expr(
         Query::Disjunction { children, .. } => children
             .iter()
             .all(|child| query_implies_span_expr(child, rhs_slots, rhs_span_expr)),
-        Query::Boost { inner, .. } => query_implies_span_expr(inner, rhs_slots, rhs_span_expr),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
+            query_implies_span_expr(inner, rhs_slots, rhs_span_expr)
+        }
         _ => false,
     }
 }
@@ -567,6 +575,10 @@ fn normalize_boolean_query(query: Query, profile: SimplificationProfile) -> Quer
         Query::Boost { factor, inner } => {
             simplify_boost(factor, normalize_boolean_query(*inner, profile))
         }
+        Query::Field { name, inner } => Query::Field {
+            name,
+            inner: Box::new(normalize_boolean_query(*inner, profile)),
+        },
         Query::AtLeast { min, children } => Query::AtLeast {
             min,
             children: children

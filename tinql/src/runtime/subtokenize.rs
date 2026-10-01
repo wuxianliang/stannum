@@ -80,7 +80,8 @@ fn count_terms(expr: &Expr) -> usize {
         | Expr::Middle { inner, .. }
         | Expr::Between { inner, .. }
         | Expr::Within { inner, .. }
-        | Expr::Boost { inner, .. } => count_terms(inner),
+        | Expr::Boost { inner, .. }
+        | Expr::Field { inner, .. } => count_terms(inner),
     }
 }
 
@@ -224,7 +225,8 @@ fn rewrite_operands<T: Tokenizer>(expr: &mut Expr, tokenizer: &T) -> Result<(), 
         | Expr::Middle { inner, .. }
         | Expr::Between { inner, .. }
         | Expr::Within { inner, .. }
-        | Expr::Boost { inner, .. } => each(inner),
+        | Expr::Boost { inner, .. }
+        | Expr::Field { inner, .. } => each(inner),
         Expr::Term(_)
         | Expr::MatchAll
         | Expr::MatchNone

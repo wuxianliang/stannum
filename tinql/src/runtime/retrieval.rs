@@ -106,7 +106,7 @@ impl Segment {
                     ids.or(self.candidates(child))
                 })
             }
-            Query::Boost { inner, .. } => self.candidates(inner),
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => self.candidates(inner),
             Query::Span {
                 term_slots,
                 span_query,

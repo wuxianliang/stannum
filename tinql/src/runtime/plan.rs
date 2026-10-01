@@ -100,7 +100,7 @@ pub fn prefers_pages<I: Index + ?Sized>(query: &Query, segment: &I) -> Result<bo
             }
             any
         }
-        Query::Boost { inner, .. } => prefers_pages(inner, segment)?,
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => prefers_pages(inner, segment)?,
         _ => false,
     })
 }
@@ -155,7 +155,7 @@ pub fn estimate_count_disjunction<I: Index + ?Sized>(
                 }
                 pending.extend(children);
             }
-            Query::Boost { inner, .. } => pending.push(inner),
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => pending.push(inner),
             _ => return Ok(estimate),
         }
     }
@@ -246,7 +246,9 @@ pub fn page_plan<'a, I: Index + ?Sized>(
                 exact: true,
             })
         }
-        Query::Boost { inner, .. } => page_plan(inner, segment, limits),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
+            page_plan(inner, segment, limits)
+        }
         _ => scalar(),
     }
 }
@@ -490,7 +492,7 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                 let expansion = self.expand_fuzzy(term, *prefix, *distance)?;
                 self.expansion_plan(expansion)
             }
-            Query::Boost { inner, .. } => self.query(inner),
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => self.query(inner),
             Query::Span {
                 term_slots,
                 span_query,

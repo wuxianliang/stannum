@@ -370,7 +370,7 @@ impl<S: Statistics + ?Sized> Estimator<'_, S> {
                 prefix,
                 distance,
             } => self.fuzzy(term, *prefix, *distance)?,
-            Query::Boost { inner, .. } => self.query(inner)?,
+            Query::Boost { inner, .. } | Query::Field { inner, .. } => self.query(inner)?,
             Query::Span { term_slots, .. } | Query::SpanExpr { term_slots, .. } => {
                 self.span(term_slots)?
             }

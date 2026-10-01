@@ -28,7 +28,7 @@ pub fn supported(query: &Query) -> bool {
         Query::Conjunction(children)
         | Query::Disjunction { min: 1, children }
         | Query::AtLeast { min: 1, children } => children.iter().all(supported),
-        Query::Boost { inner, .. } => supported(inner),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => supported(inner),
         _ => false,
     }
 }
@@ -55,7 +55,7 @@ fn lower<'q>(query: &'q Query, terms: &mut Vec<&'q str>) -> Node {
         Query::Conjunction(children) => {
             Node::And(children.iter().map(|child| lower(child, terms)).collect())
         }
-        Query::Boost { inner, .. } => lower(inner, terms),
+        Query::Boost { inner, .. } | Query::Field { inner, .. } => lower(inner, terms),
         _ => unreachable!("fold::supported admits only Boolean terms"),
     }
 }

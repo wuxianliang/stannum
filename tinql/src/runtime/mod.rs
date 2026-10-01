@@ -79,6 +79,12 @@ pub enum Query {
         factor: f32,
         inner: Box<Query>,
     },
+    /// Field-scoped group: `title:(beer)`. Retrieval of a named field is
+    /// Phase 5; this node is parse/display plus the single-column error path.
+    Field {
+        name: String,
+        inner: Box<Query>,
+    },
     /// Compatibility form kept for older callers. New lowering emits
     /// [`Query::Disjunction`] instead.
     AtLeast {
@@ -128,6 +134,7 @@ impl Query {
             Query::Conjunction(children) => children.iter().any(Query::has_positive),
             Query::Disjunction { children, .. } => children.iter().any(Query::has_positive),
             Query::Boost { inner, .. } => inner.has_positive(),
+            Query::Field { inner, .. } => inner.has_positive(),
             Query::AtLeast { children, .. } => children.iter().any(|c| c.has_positive()),
         }
     }
@@ -202,6 +209,7 @@ impl Query {
                 n * DEFAULT_EXPANSION_SELECTIVITY
             }
             Query::Boost { inner, .. } => inner.estimate_selectivity(n, lookup, total_tuples),
+            Query::Field { inner, .. } => inner.estimate_selectivity(n, lookup, total_tuples),
             Query::AtLeast { children, min, .. } => {
                 let mut estimates: Vec<u64> = children
                     .iter()
@@ -261,6 +269,7 @@ impl Query {
                 }
             }
             Query::Not(inner) | Query::Boost { inner, .. } => inner.collect_terms(out),
+            Query::Field { inner, .. } => inner.collect_terms(out),
             Query::Fuzzy { term, .. } => out.push(term),
             Query::MatchAll | Query::Regex(_) | Query::Range { .. } => {}
         }
