@@ -64,8 +64,29 @@ impl TokenizerPipelineSpec {
     }
 
     pub fn compile(self) -> Result<CompiledTokenizerPipeline, TokenizerPipelineSpecError> {
+        self.compile_with_current_snapshot()
+    }
+
+    /// Compile while taking the current global Jieba snapshot exactly once.
+    /// PostgreSQL uses this entry point so the compiled pipeline owns the
+    /// dictionary used for its entire lifetime; non-Jieba specs are unchanged.
+    pub fn compile_with_current_snapshot(
+        self,
+    ) -> Result<CompiledTokenizerPipeline, TokenizerPipelineSpecError> {
         self.validate()?;
         Ok(CompiledTokenizerPipeline::from_validated_spec(self))
+    }
+
+    /// Compile a Jieba pipeline from an already captured dictionary snapshot.
+    /// This is used by PostgreSQL's cache so the cache key and compiled
+    /// pipeline cannot observe different dictionary generations.
+    pub fn compile_with_snapshot(
+        self,
+        snapshot: crate::JiebaSnapshot,
+    ) -> Result<CompiledTokenizerPipeline, TokenizerPipelineSpecError> {
+        self.validate()?;
+        let jieba = (self.tokenizer == TokenizerSpec::Jieba).then_some(snapshot);
+        Ok(CompiledTokenizerPipeline::from_validated_spec_with_snapshot(self, jieba))
     }
 }
 
@@ -73,6 +94,12 @@ impl TokenizerPipelineSpec {
 pub enum TokenizerSpec {
     Unicode,
     Whitespace,
+    /// Word-level segmentation via the embedded jieba dictionary, for mixed
+    /// Chinese/English corpora. Chinese text is segmented into dictionary
+    /// words; non-Han runs are emitted as jieba segments. Deterministic for a
+    /// pinned jieba-rs version, so index-time and query-time analysis agree
+    /// by construction.
+    Jieba,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

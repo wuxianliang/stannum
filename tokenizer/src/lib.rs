@@ -19,6 +19,48 @@ pub use spec::{
     Folding, GraphemeMode, LongTokenMode, LongTokenSpec, MIN_TOKEN_BYTES, PositionGapMode,
     TokenizerPipelineSpec, TokenizerPipelineSpecError, TokenizerSpec,
 };
+pub use tokenizers::{JIEBA_RS_VERSION, JiebaSnapshot};
+
+pub fn jieba_snapshot() -> JiebaSnapshot {
+    tokenizers::jieba_snapshot()
+}
+
+/// Cut text with the current global Jieba dictionary, returning owned pieces.
+/// This is a convenience API for callers that do not retain a compiled
+/// pipeline snapshot.
+pub fn jieba_cut_owned(text: &str) -> Vec<String> {
+    let snapshot = tokenizers::jieba_snapshot().dictionary;
+    snapshot
+        .cut(text, true)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Install a fresh Jieba dictionary for non-PostgreSQL callers.
+pub fn jieba_install(words: &[(&str, Option<usize>, Option<&str>)]) {
+    tokenizers::jieba_install(words);
+}
+
+/// Install a dictionary and associate the extension-defined fingerprint with
+/// the resulting snapshot. PostgreSQL dictionary governance uses this form;
+/// the hash itself is computed by the extension's row loader.
+pub fn jieba_install_with_fingerprint(
+    words: &[(&str, Option<usize>, Option<&str>)],
+    fingerprint: u64,
+) {
+    tokenizers::jieba_install_with_fingerprint(words, fingerprint);
+}
+
+/// Generation of the current process-local Jieba dictionary snapshot.
+pub fn jieba_current_generation() -> u64 {
+    tokenizers::jieba_current_generation()
+}
+
+/// Extension-defined identity associated with the current Jieba snapshot.
+pub fn jieba_current_fingerprint() -> u64 {
+    tokenizers::jieba_current_fingerprint()
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
