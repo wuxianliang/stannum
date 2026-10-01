@@ -12,6 +12,7 @@ cluster step runs this file as a script.
 """
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -102,6 +103,42 @@ class JiebaTokenizerTests(unittest.TestCase):
             f"SELECT string_agg(id::text, ',' ORDER BY id) FROM docs"
             f" WHERE {column} ==> '{query}';"
         )
+
+    def explain_has_parallel_worker(self, plan):
+        """Match contract/run.py: planned workers, not Parallel Aware or 0."""
+        for line in plan.splitlines():
+            text = line.strip()
+            if re.search(r"Workers Planned:\s*[1-9]", text):
+                return True
+            node = re.sub(r"^->\s*", "", text)
+            if re.match(r"Gather\b", node):
+                return True
+            if re.match(r"Parallel (?!Aware\b)", node):
+                return True
+        return False
+
+    def explain_serial_on_and_off(self, sql):
+        # Each psql invocation is a new session; gather GUCs must share it.
+        plans = []
+        for custom in ("on", "off"):
+            bitmap = "off" if custom == "on" else "on"
+            plan = self.sql(f"""
+                SET max_parallel_workers_per_gather = 2;
+                SET parallel_setup_cost = 0;
+                SET parallel_tuple_cost = 0;
+                SET min_parallel_table_scan_size = 0;
+                SET min_parallel_index_scan_size = 0;
+                SET enable_seqscan = off;
+                SET enable_bitmapscan = {bitmap};
+                SET stannum.enable_custom_scan = {custom};
+                EXPLAIN {sql}
+            """)
+            plans.append(plan)
+            self.assertFalse(
+                self.explain_has_parallel_worker(plan),
+                f"enable_custom_scan={custom} still parallel:\n{plan}",
+            )
+        return plans
 
     def test_tokenize_udf_accepts_jieba(self):
         self.assertEqual(
@@ -307,6 +344,58 @@ class JiebaTokenizerTests(unittest.TestCase):
         self.assertIn("星河数据库协议", token_set)
         self.assertIn("开源", token_set)
         self.assertIn("数据库", token_set)
+
+    def test_count_star_nonempty_dict_declines_parallel_on_and_off(self):
+        self.sql("""
+            DROP TABLE IF EXISTS count_par CASCADE;
+            SELECT stannum.jieba_add_word('customtoken', 10, 'n');
+            CREATE TABLE count_par (id int PRIMARY KEY, body text);
+            INSERT INTO count_par SELECT n, 'customtoken pad ' || n
+              FROM generate_series(1, 200) n;
+            CREATE INDEX count_par_idx ON count_par USING stannum (body)
+              WITH (tokenizer = 'jieba');
+            ANALYZE count_par;
+        """)
+        on_plan, off_plan = self.explain_serial_on_and_off(
+            "SELECT count(*) FROM count_par WHERE body ==> 'customtoken'"
+        )
+        self.assertEqual(
+            self.sql("SELECT count(*) FROM count_par WHERE body ==> 'customtoken'"),
+            "200",
+        )
+        self.assertIn("Custom Scan", on_plan)
+        self.assertNotIn("Custom Scan", off_plan)
+        self.assertIn("Bitmap", off_plan, off_plan)
+
+    def test_two_indexes_unicode_first_jieba_nonempty_stays_serial(self):
+        self.sql("""
+            DROP TABLE IF EXISTS two_idx CASCADE;
+            SELECT stannum.jieba_add_word('customtoken', 10, 'n');
+            CREATE TABLE two_idx (id int PRIMARY KEY, body text);
+            INSERT INTO two_idx SELECT n, 'customtoken pad ' || n
+              FROM generate_series(1, 200) n;
+            CREATE INDEX two_unicode ON two_idx USING stannum (body);
+            CREATE INDEX two_jieba ON two_idx USING stannum (body)
+              WITH (tokenizer = 'jieba');
+            ANALYZE two_idx;
+        """)
+        self.assertEqual(
+            self.sql("""
+                SELECT (SELECT oid FROM pg_class WHERE relname = 'two_unicode')
+                     < (SELECT oid FROM pg_class WHERE relname = 'two_jieba')
+            """),
+            "t",
+        )
+        on_plan, off_plan = self.explain_serial_on_and_off(
+            "SELECT id FROM two_idx WHERE body ==> 'customtoken'"
+        )
+        self.assertEqual(
+            self.sql("SELECT count(*) FROM two_idx WHERE body ==> 'customtoken'"),
+            "200",
+        )
+        self.assertIn("Custom Scan", on_plan)
+        self.assertNotIn("Custom Scan", off_plan)
+        self.assertIn("Bitmap", off_plan, off_plan)
 
 
 if __name__ == "__main__":

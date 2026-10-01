@@ -597,6 +597,18 @@ impl Private {
     }
 }
 
+/// Clears parallel eligibility on `rel` so bitmap, heap, and later upper
+/// stages cannot re-enable workers after a nonempty dictionary.
+unsafe fn decline_rel_parallel(rel: *mut pg_sys::RelOptInfo) {
+    unsafe {
+        (*rel).consider_parallel = false;
+        (*rel).partial_pathlist = std::ptr::null_mut();
+        for candidate in PgList::<pg_sys::Path>::from_pg((*rel).pathlist).iter_ptr() {
+            (*candidate).parallel_safe = false;
+        }
+    }
+}
+
 /// Worker dictionary policy also covers competing core paths for this relation.
 unsafe fn dictionary_parallel_policy(
     root: *mut pg_sys::PlannerInfo,
@@ -606,10 +618,88 @@ unsafe fn dictionary_parallel_policy(
     unsafe {
         let safe = crate::dict::parallel_safe(index, root);
         if !safe {
-            (*rel).consider_parallel = false;
-            (*rel).partial_pathlist = std::ptr::null_mut();
-            for candidate in PgList::<pg_sys::Path>::from_pg((*rel).pathlist).iter_ptr() {
-                (*candidate).parallel_safe = false;
+            decline_rel_parallel(rel);
+        }
+        safe
+    }
+}
+
+fn dictionary_relopt(rel: *mut pg_sys::RelOptInfo) -> bool {
+    unsafe {
+        let kind = (*rel).reloptkind;
+        kind == pg_sys::RelOptKind::RELOPT_BASEREL
+            || kind == pg_sys::RelOptKind::RELOPT_OTHER_MEMBER_REL
+    }
+}
+
+/// Heap RTE the dictionary policy may walk: ordinary tables and partitioned
+/// parents, including partition members (`RELOPT_OTHER_MEMBER_REL`) so a
+/// Parallel Append cannot run a nonempty-dict jieba index in a worker.
+unsafe fn dictionary_relation(
+    rel: *mut pg_sys::RelOptInfo,
+    rte: *mut pg_sys::RangeTblEntry,
+) -> bool {
+    unsafe {
+        if (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+            return false;
+        }
+        let kind = byte((*rte).relkind);
+        (kind == b'r' || kind == b'p') && dictionary_relopt(rel)
+    }
+}
+
+/// Every stannum index the planner attached to `rel`, plus every index that
+/// could answer a `==>` restriction. `pick_index` is not used: a unicode
+/// index matching first must not hide a nonempty jieba sibling.
+unsafe fn relevant_stannum_indexes(
+    rel: *mut pg_sys::RelOptInfo,
+    rte: *mut pg_sys::RangeTblEntry,
+) -> Vec<pg_sys::Oid> {
+    unsafe {
+        let stannum_name = CString::new("stannum").expect("static access method name is valid");
+        let stannum_am = pg_sys::get_index_am_oid(stannum_name.as_ptr(), false);
+        let mut seen = FxHashSet::default();
+        let mut indexes = Vec::new();
+        let mut push = |oid: pg_sys::Oid| {
+            if seen.insert(oid.to_u32()) {
+                indexes.push(oid);
+            }
+        };
+        for info in PgList::<pg_sys::IndexOptInfo>::from_pg((*rel).indexlist).iter_ptr() {
+            if (*info).relam == stannum_am {
+                push((*info).indexoid);
+            }
+        }
+        for info in PgList::<pg_sys::RestrictInfo>::from_pg((*rel).baserestrictinfo).iter_ptr() {
+            let Some(search) = crate::operator::search_clause((*info).clause.cast()) else {
+                continue;
+            };
+            for (index_oid, _) in crate::score::matching_stannum_indexes(
+                (*rte).relid,
+                (*rel).relid as i32,
+                search.document,
+            ) {
+                if predicate_proven(rel, index_oid) {
+                    push(index_oid);
+                }
+            }
+        }
+        indexes
+    }
+}
+
+/// ANY nonempty-dict stannum index on the relation declines parallel for
+/// the whole relation (custom scan, bitmap, and heap paths).
+unsafe fn dictionary_parallel_for_relation(
+    root: *mut pg_sys::PlannerInfo,
+    rel: *mut pg_sys::RelOptInfo,
+    rte: *mut pg_sys::RangeTblEntry,
+) -> bool {
+    unsafe {
+        let mut safe = true;
+        for index in relevant_stannum_indexes(rel, rte) {
+            if !dictionary_parallel_policy(root, rel, index) {
+                safe = false;
             }
         }
         safe
@@ -627,22 +717,23 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         if let Some(previous) = PREVIOUS_REL_HOOK {
             previous(root, rel, rti, rte);
         }
-        if (*rel).reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
-            || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION
+        if !(*rel).lateral_relids.is_null() || !dictionary_relation(rel, rte) {
+            return;
+        }
+        // Apply even when custom scans are disabled, the rel is a partition
+        // member, or no custom path will be built: bitmap / heap / Parallel
+        // Append alternatives analyze too. Walk every relevant index, not
+        // only find_match's first pick.
+        let dictionary_parallel_safe = dictionary_parallel_for_relation(root, rel, rte);
+        if !ENABLE.get()
+            || (*rel).reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
             || byte((*rte).relkind) != b'r'
-            || !(*rel).lateral_relids.is_null()
         {
             return;
         }
         let Some(mut found) = find_match(rel, rte, true) else {
             return;
         };
-        // Apply even when custom scans are disabled or the parameterized
-        // clause cannot make a custom path: bitmap alternatives analyze too.
-        let mut dictionary_parallel_safe = dictionary_parallel_policy(root, rel, found.index_oid);
-        if !ENABLE.get() {
-            return;
-        }
         let mut ordering = find_ordering(root, rel, &found);
         // A parameter that cannot supply this ordering must not hide an
         // existing constant-clause path in a query with multiple restrictions.
@@ -650,10 +741,6 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
             let Some(constant) = find_match(rel, rte, false) else {
                 return;
             };
-            if found.index_oid != constant.index_oid {
-                dictionary_parallel_safe =
-                    dictionary_parallel_policy(root, rel, constant.index_oid);
-            }
             found = constant;
             ordering = find_ordering(root, rel, &found);
         }
@@ -870,10 +957,26 @@ unsafe extern "C-unwind" fn upper_paths_hook(
         if let Some(previous) = PREVIOUS_UPPER_HOOK {
             previous(root, stage, input_rel, output_rel, extra);
         }
-        if !ENABLE.get() || stage != pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG {
+        if stage != pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG {
             return;
         }
         let parse = (*root).parse;
+        // Decline relation-wide even when the count custom path is not
+        // installed, so a later aggregate stage cannot re-enable workers.
+        let mut dictionary_parallel_safe = true;
+        if !input_rel.is_null() && dictionary_relopt(input_rel) {
+            let rte = pg_sys::list_nth((*parse).rtable, (*input_rel).relid as i32 - 1)
+                .cast::<pg_sys::RangeTblEntry>();
+            if dictionary_relation(input_rel, rte) {
+                dictionary_parallel_safe = dictionary_parallel_for_relation(root, input_rel, rte);
+                if !dictionary_parallel_safe {
+                    decline_rel_parallel(output_rel);
+                }
+            }
+        }
+        if !ENABLE.get() {
+            return;
+        }
         if !(*parse).hasAggs
             || !(*parse).groupClause.is_null()
             || !(*parse).havingQual.is_null()
@@ -924,8 +1027,7 @@ unsafe extern "C-unwind" fn upper_paths_hook(
         path.path.parent = output_rel;
         path.path.pathtarget = (*output_rel).reltarget;
         path.path.param_info = std::ptr::null_mut();
-        path.path.parallel_safe =
-            (*output_rel).consider_parallel && crate::dict::parallel_safe(found.index_oid, root);
+        path.path.parallel_safe = (*output_rel).consider_parallel && dictionary_parallel_safe;
         path.path.parallel_aware = false;
         path.path.parallel_workers = 0;
         path.path.rows = 1.0;
