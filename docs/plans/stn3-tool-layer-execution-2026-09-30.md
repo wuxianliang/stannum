@@ -191,7 +191,7 @@ capabilities() per §7.3); 19 remaining FAILs are all multi-column/jieba (P3–P
 upstream-dry-run job live (monthly + dispatch; dispatch vs real upstream bd95c7e
 reports MERGE CONFLICT informatively — run 36816452727); stn3 CI 6/6, main CI 8/8.
 
-- [ ] **2.8 pgembed checkpoint — wheel green (single-column)**
+- [x] **2.8 pgembed checkpoint — wheel green (single-column)** (pgembed ebc2bbe)
   - Pin bump; wheel builds on PG18; `test_pgembed_stannum.py` green for
     single-column paths (create/drop/search/search_count/analysis/
     check_health/hybrid single-col); record the multi-column failures as
