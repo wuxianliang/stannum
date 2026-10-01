@@ -174,7 +174,7 @@ module lands here. This is the largest phase; steps are independently landable.
   - Done when: diagnostics assertion-kind cases green (normalization rules).
   - Review focus: option/GUC defaults/domains byte-match the manifest.
 
-- [ ] **2.7 Upgrade script + fingerprint gate**
+- [x] **2.7 Upgrade script + fingerprint gate** (d46c2ce)
   - Scope: `stannum--0.4.0--0.5.0.sql` (catalog objects only; every new
     `#[pg_extern]` byte-identical; `SECURITY DEFINER` forbidden); port
     `extension_upgrade.py` with the LSG-still-answers assertion retired for
