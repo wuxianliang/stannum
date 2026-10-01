@@ -92,6 +92,11 @@ def main():
                           p.amproclefttype::regtype::text, p.amprocrighttype::regtype::text)
                         FROM pg_amproc p WHERE p.amprocfamily=c.opcfamily))::text
                      FROM pg_opclass c WHERE c.oid=d.objid)
+                  WHEN d.classid='pg_class'::regclass THEN
+                    (SELECT COALESCE(c.relacl::text, 'DEFAULT') || '|' ||
+                            COALESCE(c.reloptions::text, '{}') || '|' ||
+                            CASE WHEN c.relkind = 'v' THEN pg_get_viewdef(c.oid) ELSE '' END
+                     FROM pg_class c WHERE c.oid=d.objid)
                   ELSE '' END
                 FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid
                 WHERE d.refclassid='pg_extension'::regclass AND e.extname='stannum'
