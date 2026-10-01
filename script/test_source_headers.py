@@ -54,6 +54,39 @@ class SourceHeadersTest(unittest.TestCase):
             self.assertTrue(any("no reviewed provenance" in error for error in errors))
             self.assertTrue(any("no tracked file" in error for error in errors))
 
+    def test_withheld_notice_allowed_for_released_sql_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = "postgres/sql/stannum--0.4.0.sql"
+            (root / path).parent.mkdir(parents=True)
+            (root / path).write_text("/* generated */\nSELECT 1;\n")
+            entries = {
+                path: {
+                    "owner": "mixed",
+                    "upstream_path": "postgres/src",
+                    "notice": "withheld",
+                    "evidence": "line numbers pinned",
+                }
+            }
+            self.assertEqual(check(root, [path], entries), [])
+
+    def test_withheld_notice_rejected_outside_released_sql(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lib.rs").write_text("fn main() {}\n")
+            entries = {
+                "lib.rs": {
+                    "owner": "ben",
+                    "notice": "withheld",
+                    "evidence": "must not skip the header",
+                }
+            }
+            errors = check(root, ["lib.rs"], entries)
+            self.assertTrue(any(
+                "withheld notice is only valid for released SQL snapshots" in error
+                for error in errors
+            ))
+
     def test_write_then_check(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

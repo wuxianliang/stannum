@@ -73,6 +73,12 @@ def rewrite(path, content, owner):
     return prefix + notice(path, owner) + body
 
 
+def released_sql_snapshot(path):
+    file = Path(path)
+    return (file.parent.as_posix() == "postgres/sql" and file.name.startswith("stannum--")
+            and file.suffix == ".sql")
+
+
 def tracked_files(root):
     output = subprocess.check_output(["git", "ls-files", "-z"], cwd=root)
     return [name.decode() for name in output.split(b"\0") if name]
@@ -102,6 +108,12 @@ def check(root, files, entries, write=False):
             continue
         if owner in {"planetscale", "mixed"} and not entry.get("upstream_path"):
             errors.append(f"{path}: missing upstream source path")
+            continue
+        # Only released SQL snapshots may withhold a notice: their leading bytes
+        # are pinned (predecessor 0.4.0 copy, recorded contract line numbers).
+        if entry.get("notice") == "withheld":
+            if not released_sql_snapshot(path):
+                errors.append(f"{path}: withheld notice is only valid for released SQL snapshots")
             continue
         try:
             expected = rewrite(path, content, owner)

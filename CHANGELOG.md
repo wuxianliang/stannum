@@ -8,8 +8,12 @@ result is listed.
 
 ## [Unreleased]
 
-The first Stannum release baseline, `0.1.0-dev` (`stannum.version()` returns
-`0.1.0`), versioned independently of Lead.
+## [0.5.0] - 2026-10-01
+
+The first Stannum 0.5.0 cut (`stannum.version()` returns `0.5.0`), versioned
+independently of Lead. Catalog upgrade from 0.4.0 is SQL-only: it adds
+`stannum.capabilities()` and keeps the four `jieba_*` dictionary functions as
+surface stubs until jieba lands.
 
 ### Added
 

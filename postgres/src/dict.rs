@@ -3,13 +3,14 @@
 // See LICENSE in the repository root for license terms.
 
 //! Empty `jieba_words` table, frozen empty-dictionary fingerprint, and the
-//! unicode/not-applicable `index_analysis` path. Jieba install/load and the
-//! `jieba_*` UDFs are Phase 3.
+//! unicode/not-applicable `index_analysis` path. Jieba install/load is Phase 3.
+//! The four `jieba_*` SQL entry points stay on the catalog as keep-surface
+//! stubs so a 0.4.0 → 0.5.0 upgrade fingerprints equal to a fresh 0.5.0.
 
 use std::hash::Hasher;
 
 use pgrx::iter::TableIterator;
-use pgrx::{PgRelation, name};
+use pgrx::{PgRelation, default, name, pg_extern};
 use siphasher::sip::SipHasher13;
 
 #[allow(dead_code)] // frozen v1 empty-table identity; unit-tested and Phase 3 load
@@ -54,6 +55,32 @@ REVOKE ALL ON TABLE @extschema@.jieba_words FROM PUBLIC;
 "#,
     name = "jieba_words"
 );
+
+/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
+#[pg_extern(volatile, parallel_unsafe)]
+fn jieba_add_word(word: &str, freq: default!(i32, 0), tag: default!(Option<&str>, "NULL")) {
+    let _ = (word, freq, tag);
+    pgrx::error!("stannum.jieba_add_word is not available until jieba lands");
+}
+
+/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
+#[pg_extern(volatile, parallel_unsafe)]
+fn jieba_delete_word(word: &str) {
+    let _ = word;
+    pgrx::error!("stannum.jieba_delete_word is not available until jieba lands");
+}
+
+/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
+#[pg_extern(stable, parallel_unsafe)]
+fn jieba_dict_version() -> i64 {
+    pgrx::error!("stannum.jieba_dict_version is not available until jieba lands");
+}
+
+/// Keep-surface stub. SQL must stay byte-identical to 0.4.0 until Phase 3.
+#[pg_extern(volatile, parallel_unsafe)]
+fn jieba_reload_dict() {
+    pgrx::error!("stannum.jieba_reload_dict is not available until jieba lands");
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AnalysisStamp {

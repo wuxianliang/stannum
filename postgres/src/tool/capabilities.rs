@@ -4,8 +4,8 @@
 
 //! `stannum.capabilities()` — the closed §4.2 document.
 //!
-//! `version` is the frozen 0.5.0 contract target, not `CARGO_PKG_VERSION`
-//! (this tree's extension version stays 0.1.0 until that bump).
+//! `version` is the frozen 0.5.0 contract target (`CONTRACT_VERSION`), not
+//! read from `CARGO_PKG_VERSION` (they currently agree).
 //! `limits.max_expansion` is the value `Limits::default` enforces in
 //! `tinql/src/runtime/plan.rs` (1024 on this tree), not a sketch.
 

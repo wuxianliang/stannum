@@ -664,7 +664,18 @@
       "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
       "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
     },
-    "postgres/sql/stannum--0.1.0.sql": {
+    "postgres/sql/stannum--0.4.0--0.5.0.sql": {
+      "owner": "mixed",
+      "upstream_path": "postgres/src",
+      "evidence": "Upgrade SQL adding capabilities(); jieba_* keep-surface stubs already match 0.4.0. Credits PlanetScale because it extends a snapshot generated from inherited Lead and original Stannum Rust definitions."
+    },
+    "postgres/sql/stannum--0.4.0.sql": {
+      "owner": "mixed",
+      "upstream_path": "postgres/src",
+      "notice": "withheld",
+      "evidence": "Byte-identical copy of main's released 0.4.0 snapshot (predecessor for ALTER EXTENSION). Notice withheld so the copy stays unmodified."
+    },
+    "postgres/sql/stannum--0.5.0.sql": {
       "owner": "mixed",
       "upstream_path": "postgres/src/lib.rs",
       "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
@@ -676,6 +687,7 @@
         "postgres/src/highlight_udfs.rs",
         "postgres/src/tool/highlight.rs",
         "postgres/src/tool/diagnostics.rs",
+        "postgres/src/tool/capabilities.rs",
         "postgres/src/udfs.rs",
         "postgres/src/dict.rs",
         "postgres/src/stopwords.rs",
@@ -701,7 +713,7 @@
     },
     "postgres/src/dict.rs": {
       "owner": "ben",
-      "evidence": "Original Stannum empty jieba_words table, frozen empty-dictionary fingerprint, and unicode/not-applicable index_analysis. Ported from the main-line dict.rs without jieba install/load or jieba_* UDFs."
+      "evidence": "Original Stannum empty jieba_words table, frozen empty-dictionary fingerprint, unicode/not-applicable index_analysis, and keep-surface jieba_* stubs until Phase 3. Ported from the main-line dict.rs without jieba install/load."
     },
     "postgres/src/fields/mod.rs": {
       "owner": "ben",
