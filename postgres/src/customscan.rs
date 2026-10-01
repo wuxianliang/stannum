@@ -229,8 +229,11 @@ unsafe extern "C-unwind" fn executor_start_hook(
     query_desc: *mut pg_sys::QueryDesc,
     eflags: std::ffi::c_int,
 ) {
-    crate::score::note_executor_start();
-    crate::selectivity::note_executor_start();
+    if !crate::dict::internal_spi() {
+        crate::score::note_executor_start();
+        crate::dict::note_executor_start();
+        crate::selectivity::note_executor_start();
+    }
     unsafe {
         match PREVIOUS_EXECUTOR_START {
             Some(previous) => previous(query_desc, eflags),
@@ -594,6 +597,25 @@ impl Private {
     }
 }
 
+/// Worker dictionary policy also covers competing core paths for this relation.
+unsafe fn dictionary_parallel_policy(
+    root: *mut pg_sys::PlannerInfo,
+    rel: *mut pg_sys::RelOptInfo,
+    index: pg_sys::Oid,
+) -> bool {
+    unsafe {
+        let safe = crate::dict::parallel_safe(index, root);
+        if !safe {
+            (*rel).consider_parallel = false;
+            (*rel).partial_pathlist = std::ptr::null_mut();
+            for candidate in PgList::<pg_sys::Path>::from_pg((*rel).pathlist).iter_ptr() {
+                (*candidate).parallel_safe = false;
+            }
+        }
+        safe
+    }
+}
+
 #[pg_guard]
 unsafe extern "C-unwind" fn rel_pathlist_hook(
     root: *mut pg_sys::PlannerInfo,
@@ -605,8 +627,7 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         if let Some(previous) = PREVIOUS_REL_HOOK {
             previous(root, rel, rti, rte);
         }
-        if !ENABLE.get()
-            || (*rel).reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
+        if (*rel).reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
             || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION
             || byte((*rte).relkind) != b'r'
             || !(*rel).lateral_relids.is_null()
@@ -616,6 +637,12 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         let Some(mut found) = find_match(rel, rte, true) else {
             return;
         };
+        // Apply even when custom scans are disabled or the parameterized
+        // clause cannot make a custom path: bitmap alternatives analyze too.
+        let mut dictionary_parallel_safe = dictionary_parallel_policy(root, rel, found.index_oid);
+        if !ENABLE.get() {
+            return;
+        }
         let mut ordering = find_ordering(root, rel, &found);
         // A parameter that cannot supply this ordering must not hide an
         // existing constant-clause path in a query with multiple restrictions.
@@ -623,6 +650,10 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
             let Some(constant) = find_match(rel, rte, false) else {
                 return;
             };
+            if found.index_oid != constant.index_oid {
+                dictionary_parallel_safe =
+                    dictionary_parallel_policy(root, rel, constant.index_oid);
+            }
             found = constant;
             ordering = find_ordering(root, rel, &found);
         }
@@ -642,7 +673,8 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         // An unordered scan keeps no state outside its own process, so a
         // worker may run it (as a join's inner side). An ordered scan
         // publishes scorer state to the score calls of its own backend.
-        path.path.parallel_safe = (*rel).consider_parallel && private.ordering.is_none();
+        path.path.parallel_safe =
+            (*rel).consider_parallel && private.ordering.is_none() && dictionary_parallel_safe;
         // This is a complete, worker-local path, never a partial path: giving
         // each worker a full candidate list would duplicate rows/counts. A DSM
         // cursor and partial aggregate protocol are required before changing it.
@@ -892,7 +924,8 @@ unsafe extern "C-unwind" fn upper_paths_hook(
         path.path.parent = output_rel;
         path.path.pathtarget = (*output_rel).reltarget;
         path.path.param_info = std::ptr::null_mut();
-        path.path.parallel_safe = (*output_rel).consider_parallel;
+        path.path.parallel_safe =
+            (*output_rel).consider_parallel && crate::dict::parallel_safe(found.index_oid, root);
         path.path.parallel_aware = false;
         path.path.parallel_workers = 0;
         path.path.rows = 1.0;
