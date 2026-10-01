@@ -235,7 +235,7 @@ Fix the implementation; the formula never moves. If the representation
 cannot supply df_agg/exact norms/sound bounds → escalate for the STN4
 decision (design §5.2) — do not silently proceed.
 
-- [ ] **4.1 Codec + fused scorer skeleton (`postgres/src/fields/`)**
+- [x] **4.1 Codec + fused scorer skeleton (`postgres/src/fields/`)** (be40629)
   - Scope: `~{hex}~` key codec (one lowercase nibble header, `~~` escape,
     round-trip fixtures incl. all 16 ordinals); `FieldTerm`/`LogicalTerm`/
     `Lookup`/`LogicalPostingCursor` per design §5.1 (union candidates,
