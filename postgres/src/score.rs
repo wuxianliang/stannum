@@ -267,7 +267,7 @@ pub(crate) fn note_executor_start() {
     STATEMENT.with(|s| s.set(s.get().wrapping_add(1)));
 }
 
-fn current_statement() -> u64 {
+pub(crate) fn current_statement() -> u64 {
     STATEMENT.with(Cell::get)
 }
 
@@ -4742,6 +4742,9 @@ fn build_index_scorer_inner(
         .iter()
         .map(|(index, _)| unsafe { SourceReader::new(&**index, &scorers) })
         .collect();
+    crate::dict::check_analysis(index.oid(), &unsafe {
+        crate::storage::analysis_meta(index.as_ptr())
+    });
     IndexScorer {
         key,
         sources,

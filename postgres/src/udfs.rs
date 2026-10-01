@@ -327,7 +327,11 @@ pub(crate) fn index_stats(
     let immutable_segments =
         rows.len() - usize::from(rows.last().is_some_and(|row| row.kind == "mutable"));
     let mutable_segments = rows.len() - immutable_segments;
-    let (analysis_matches, analysis_detail) = (None, None);
+    let meta = unsafe { crate::storage::analysis_meta(index.as_ptr()) };
+    let (analysis_matches, analysis_detail) = crate::dict::analysis_summary(&meta)
+        .map_or((None, None), |(matches, detail)| {
+            (Some(matches), Some(detail))
+        });
     TableIterator::new(vec![(
         documents,
         dead_documents,

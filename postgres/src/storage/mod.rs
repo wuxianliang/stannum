@@ -3348,10 +3348,17 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
     unsafe {
         let relation = PgRelation::with_lock(index_oid, pg_sys::AccessShareLock as _);
         let index = relation.as_ptr();
+        // Refresh before holding a meta buffer lock across any internal SPI.
+        crate::dict::stamp(&index_spec(index));
         let recovery = pg_sys::RecoveryInProgress();
+        let mut checked_analysis = false;
         let mut stale_reads = 0;
         loop {
             let (meta_buffer, meta) = read_meta(index, false);
+            if !checked_analysis {
+                crate::dict::check_analysis(index_oid, &meta);
+                checked_analysis = true;
+            }
             if recovery && !standby_reads_allowed(&meta_buffer) {
                 pgrx::error!(
                     "Stannum segmented reads are unavailable during recovery for this index: \

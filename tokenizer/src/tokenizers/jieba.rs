@@ -30,8 +30,10 @@ use std::sync::{Arc, LazyLock, RwLock};
 /// The exact jieba-rs version used by this crate, packed as major/minor/patch.
 ///
 /// Keep this in lockstep with the exact dependency pin in `Cargo.toml`; the
-/// unit test below also checks the workspace lockfile.
-pub const JIEBA_RS_VERSION: u32 = (7 << 8) | 4;
+/// unit test below also checks the workspace lockfile. Major is packed even
+/// when it is currently zero so a 1.x bump cannot silently drop the field.
+#[allow(clippy::identity_op)]
+pub const JIEBA_RS_VERSION: u32 = (0 << 16) | (7 << 8) | 4;
 
 /// Identity of the embedded dictionary before PostgreSQL governance loads it.
 /// Computed dictionary fingerprints (including the empty table) must never
@@ -287,6 +289,21 @@ mod tests {
     }
 
     #[test]
+    fn holder_swap_preserves_an_in_flight_borrowed_iteration() {
+        let holder = JiebaHolder::new();
+        let before = holder.snapshot().dictionary;
+        let mut iter = JiebaIter::new_borrowed("深度学习方法", &before);
+        let first = iter.next().expect("first token");
+
+        let generation = holder.install(&[("深度学习", Some(1_000_000), None)], Some(42));
+        assert_eq!(generation, 1);
+
+        let remaining: Vec<String> = iter.map(|token| token.text.into_owned()).collect();
+        assert_eq!(first.text, "深度");
+        assert_eq!(remaining, vec!["学习", "方法"]);
+    }
+
+    #[test]
     fn compiled_pipeline_keeps_its_captured_dictionary_generation() {
         let holder = JiebaHolder::new();
         let spec = crate::TokenizerPipelineSpec {
@@ -318,6 +335,10 @@ mod tests {
             .collect();
         assert_eq!(first_words, vec!["深度", "学习", "方法"]);
         assert_eq!(second_words, vec!["深度学习", "方法"]);
+        assert_eq!(first.jieba_generation(), Some(0));
+        assert_eq!(first.jieba_fingerprint(), Some(0));
+        assert_eq!(second.jieba_generation(), Some(1));
+        assert_eq!(second.jieba_fingerprint(), Some(7));
     }
 
     #[test]
