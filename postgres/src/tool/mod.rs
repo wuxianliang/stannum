@@ -9,9 +9,9 @@
 //! `IndexScorer`, not `storage::View`, and not segment-crate internals.
 //!
 //! It may depend on `pgrx` and `serde_json`, and, only where a UDF genuinely
-//! needs the field model, on the `fields` layer (L1). `fields` is declared
-//! but has no items yet, and this module does not import it, so L2 stays
-//! self-contained. Score-family `#[pg_extern]` bodies remain the owned shim
+//! needs the field model, on the `fields` layer (L1). This module does not
+//! import `fields`; L2 stays self-contained until a UDF needs that seam.
+//! Score-family `#[pg_extern]` bodies remain the owned shim
 //! in `crate::score`. `search`/`search_count` `#[pg_extern]` wrappers live
 //! here and delegate to `crate::search`. The 5-arg `highlight` wrappers
 //! delegate to `crate::highlight_udfs`. Diagnostics (`tokenize`, `ql_parse`,

@@ -715,9 +715,37 @@
       "owner": "ben",
       "evidence": "Original Stannum jieba_words table and SipHash-1-3 v1 fingerprint, with table+snapshot load/add/delete/reload/version from the 0.4.0 dict.rs port. 3.2 governance (SEEN/NONEMPTY/WARNED/INTERNAL_SPI, check_analysis, analysis_summary, parallel_safe) ported from 0.4.0; nonempty custom dictionaries decline parallel paths via customscan.rs."
     },
+    "postgres/src/fields/codec.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 fielded-term key codec (~ hex nibble header, doubled-tilde escape, round-trip decode). Not copied from Lead."
+    },
+    "postgres/src/fields/cursor.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 LogicalPostingCursor over fielded Term streams (union candidates, equal-ordinal coalescing, next_bound_interval hook). Not copied from Lead."
+    },
+    "postgres/src/fields/df.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 df_agg union-count over term-stream ordinals (both-fields-once trap; query-time sum of per-segment values). Not copied from Lead."
+    },
+    "postgres/src/fields/error.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 fielded-key defects with distinct query-error versus verify-corruption report kinds. Not copied from Lead."
+    },
+    "postgres/src/fields/expand.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 multi-column expansion adapter (Index::term / Window / expand, two-stage limit, scope mask). Not copied from Lead."
+    },
     "postgres/src/fields/mod.rs": {
       "owner": "ben",
-      "evidence": "Original Stannum L1 field-model module. Empty; states the design section 3 contract (codec, fused scorer, norms and aggregate-df readers; does not absorb the owned shims). Not copied from Lead."
+      "evidence": "Original Stannum L1 field-model module. Reexports the 4.1 codec, LogicalPostingCursor, expansion adapter, fused BM25F arithmetic, and df_agg union-count. States the design section 3 contract (does not absorb the owned shims). Not copied from Lead."
+    },
+    "postgres/src/fields/score.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 fused BM25F arithmetic (tf*/len*/avgdl*/idf-cast-then-boost saturate) and all_fields_mask. Not copied from Lead."
+    },
+    "postgres/src/fields/types.rs": {
+      "owner": "ben",
+      "evidence": "Original Stannum L1 FieldTerm / LogicalTerm / Lookup type shapes wrapping segment::segment::Term streams. Not copied from Lead."
     },
     "postgres/src/fold.rs": {
       "owner": "ben",
