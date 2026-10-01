@@ -184,7 +184,12 @@ module lands here. This is the largest phase; steps are independently landable.
   - Review focus: design §8 step list; ACLs on `jieba_words`/`score_bound*`.
 
 **Phase gate P2:** full contract suite green on `stn3` for every
-single-column case; monthly upstream dry-run job enabled.
+single-column case; monthly upstream dry-run job enabled. — **MET** @ bfdf466:
+single-column set all green (18 PASS incl. tokenizer.unicode_whitespace after the
+tinql field_expr port 57c86f3; 2 GAP = documented divergences: 12 upstream GUCs +
+capabilities() per §7.3); 19 remaining FAILs are all multi-column/jieba (P3–P5);
+upstream-dry-run job live (monthly + dispatch; dispatch vs real upstream bd95c7e
+reports MERGE CONFLICT informatively — run 36816452727); stn3 CI 6/6, main CI 8/8.
 
 - [ ] **2.8 pgembed checkpoint — wheel green (single-column)**
   - Pin bump; wheel builds on PG18; `test_pgembed_stannum.py` green for
