@@ -211,7 +211,7 @@ reports MERGE CONFLICT informatively — run 36816452727); stn3 CI 6/6, main CI 
   - Review focus: design §6 snapshot contract; generation vs fingerprint
     cache identity.
 
-- [ ] **3.2 Governance**
+- [x] **3.2 Governance** (18a3892)
   - Scope: `jieba_words` DDL lifecycle (add/delete/reload/version),
     `AnalysisStamp` on the STNM record (arrives fully in Phase 4.5 — here the
     stamp lives in the current meta mechanism on stn3), `strict_analysis`,
