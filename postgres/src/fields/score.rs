@@ -7,6 +7,8 @@
 use crate::bm25::{Bm25Params, bm25_idf};
 use crate::tf_bucket::TfBucket;
 
+use super::cursor::FieldHit;
+
 /// Unscoped mask: every field. `field_count == 16` is `u16::MAX` because
 /// `1u16 << 16` does not fit.
 #[must_use]
@@ -22,6 +24,8 @@ pub(crate) fn all_fields_mask(field_count: u8) -> u16 {
 /// left-to-right f32. One dequantize per field; never re-quantized; never raw tf.
 #[must_use]
 pub(crate) fn fused_tf(mask: u16, weights: &[f32], raw_tf: &[Option<u32>]) -> f32 {
+    debug_assert_eq!(weights.len(), raw_tf.len());
+    debug_assert!(weights.len() <= 16);
     let mut tf_star = 0.0_f32;
     let n = weights.len().min(raw_tf.len()).min(16);
     for field in 0..n {
@@ -37,12 +41,31 @@ pub(crate) fn fused_tf(mask: u16, weights: &[f32], raw_tf: &[Option<u32>]) -> f3
     tf_star
 }
 
+/// Per-field raw-tf slots from posting position counts.
+///
+/// Never the stored tf bucket: `fused_tf` re-quantizes through
+/// `TfBucket::from_count`, and a bucket id is not a raw count.
+#[must_use]
+pub(crate) fn raw_tf_from_hits(hits: &[FieldHit], field_count: u8) -> Vec<Option<u32>> {
+    let n = usize::from(field_count.min(16));
+    let mut slots = vec![None; n];
+    for hit in hits {
+        let field = usize::from(hit.field);
+        if field < n {
+            slots[field] = Some(hit.positions.len() as u32);
+        }
+    }
+    slots
+}
+
 /// `len*` = Σ_{all index fields} w_f · length_f, exact u32, left-to-right f32.
 /// The mask does not apply.
 #[must_use]
 pub(crate) fn fused_len(weights: &[f32], lengths: &[u32]) -> f32 {
+    debug_assert_eq!(weights.len(), lengths.len());
+    debug_assert!(weights.len() <= 16);
     let mut len_star = 0.0_f32;
-    let n = weights.len().min(lengths.len());
+    let n = weights.len().min(lengths.len()).min(16);
     for field in 0..n {
         len_star += weights[field] * (lengths[field] as f32);
     }
@@ -51,13 +74,18 @@ pub(crate) fn fused_len(weights: &[f32], lengths: &[u32]) -> f32 {
 
 /// `avgdl*` = (Σ w_f · field_total_f as f32) / (N as f32), left-to-right f32.
 /// `N = 0` yields `1.0`.
+///
+/// `total_docs` includes dead ordinals until rewrite. Field totals are the
+/// matching corpus token counts (also covering dead rows still stored).
 #[must_use]
 pub(crate) fn fused_avgdl(weights: &[f32], field_totals: &[u64], total_docs: u64) -> f32 {
+    debug_assert_eq!(weights.len(), field_totals.len());
+    debug_assert!(weights.len() <= 16);
     if total_docs == 0 {
         return 1.0;
     }
     let mut sum = 0.0_f32;
-    let n = weights.len().min(field_totals.len());
+    let n = weights.len().min(field_totals.len()).min(16);
     for field in 0..n {
         sum += weights[field] * (field_totals[field] as f32);
     }
@@ -65,6 +93,9 @@ pub(crate) fn fused_avgdl(weights: &[f32], field_totals: &[u64], total_docs: u64
 }
 
 /// `bm25_idf` as f64, then cast to f32 — before any boost multiply.
+///
+/// `total_docs` includes dead ordinals until rewrite; `df_agg` is the matching
+/// union cardinality (also including dead until rewrite).
 #[must_use]
 pub(crate) fn fused_idf(total_docs: u64, df_agg: u64) -> f32 {
     bm25_idf(total_docs, df_agg) as f32
@@ -103,6 +134,10 @@ pub(crate) fn fused_score(
     boost: f32,
     params: Bm25Params,
 ) -> f32 {
+    debug_assert_eq!(weights.len(), raw_tf.len());
+    debug_assert_eq!(weights.len(), lengths.len());
+    debug_assert_eq!(weights.len(), field_totals.len());
+    debug_assert!(weights.len() <= 16);
     let tf_star = fused_tf(mask, weights, raw_tf);
     let len_star = fused_len(weights, lengths);
     let avgdl_star = fused_avgdl(weights, field_totals, total_docs);
@@ -118,8 +153,16 @@ pub(crate) fn fused_score(
 
 #[cfg(test)]
 mod tests {
+    use segment::Tid;
+    use segment::forward::ForwardRecord;
+    use segment::index::MutableIndex;
+
     use super::*;
     use crate::bm25::{TermScorer, bm25_idf};
+    use crate::fields::codec::fielded_key;
+    use crate::fields::df::{union_df_agg, union_df_agg_from_streams};
+    use crate::fields::expand::lookup;
+    use crate::fields::types::Lookup;
 
     #[test]
     fn all_fields_mask_uses_u16_max_at_sixteen() {
@@ -284,5 +327,256 @@ mod tests {
         assert_eq!(score.to_bits(), expected.to_bits());
         assert_eq!(fused_idf(n, df).to_bits(), 0x3fca_4c33);
         assert_eq!(score.to_bits(), 0x4004_01ff);
+    }
+
+    #[test]
+    fn fused_tf_reads_position_count_not_the_stored_bucket() {
+        let positions = vec![10_u32, 20, 30, 40];
+        assert_eq!(positions.len(), 4);
+        let hit = FieldHit {
+            field: 0,
+            bucket: TfBucket::from_count(1).value(),
+            positions,
+        };
+        assert_ne!(
+            u32::from(hit.bucket),
+            hit.positions.len() as u32,
+            "the stored bucket must disagree with using it as raw tf"
+        );
+        let slots = raw_tf_from_hits(std::slice::from_ref(&hit), 2);
+        assert_eq!(slots, vec![Some(4), None]);
+        assert_ne!(slots[0], Some(u32::from(hit.bucket)));
+        let from_positions = fused_tf(0b1, &[1.0, 1.0], &slots);
+        let from_bucket_as_raw = fused_tf(0b1, &[1.0, 1.0], &[Some(u32::from(hit.bucket)), None]);
+        assert_eq!(from_positions.to_bits(), 3.0_f32.to_bits());
+        assert_ne!(from_positions.to_bits(), from_bucket_as_raw.to_bits());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn fused_score_rejects_unequal_slice_lengths() {
+        let _ = fused_score(
+            0b1,
+            &[1.0, 1.0],
+            &[Some(1)],
+            &[1, 1],
+            &[1, 1],
+            1,
+            1,
+            1.0,
+            Bm25Params::default(),
+        );
+    }
+
+    #[test]
+    fn single_column_matches_term_scorer_bits_at_tf_four_and_len_not_one() {
+        let params = Bm25Params::default();
+        let n = 100_u64;
+        let df = 10_u64;
+        let boost = 0.7_f32;
+        let avgdl = 80.0_f32;
+        let tf = 4_u32;
+        let len = 17_u32;
+        let scorer = TermScorer::from_statistics(n, df, boost, params, avgdl).unwrap();
+        let fused = fused_score(
+            0b1,
+            &[1.0],
+            &[Some(tf)],
+            &[len],
+            &[8000],
+            n,
+            df,
+            boost,
+            params,
+        );
+        assert_eq!(fused.to_bits(), scorer.score_count(tf, len).to_bits());
+        assert_ne!(
+            fused.to_bits(),
+            0x402a_277c,
+            "tf=4,len=17 must diverge from the tf=1,len=1 R-BIT pin"
+        );
+        assert_eq!(
+            fused.to_bits(),
+            scorer.score_count(tf, len).to_bits(),
+            "computed {:08x} vs TermScorer {:08x}",
+            fused.to_bits(),
+            scorer.score_count(tf, len).to_bits()
+        );
+        assert_eq!(
+            fused.to_bits(),
+            0x403f_b873,
+            "computed {:08x} vs recorded {:08x}",
+            fused.to_bits(),
+            0x403f_b873u32
+        );
+    }
+
+    fn add_columns(index: &MutableIndex, id: u32, columns: &[&str], field_count: u8) {
+        let mut keys = Vec::new();
+        for (field, text) in columns.iter().enumerate() {
+            for token in text.split_whitespace() {
+                keys.push(fielded_key(field as u8, token, field_count).unwrap());
+            }
+        }
+        let tokens: Vec<(&str, u32)> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.as_str(), i as u32))
+            .collect();
+        index
+            .add_record(ForwardRecord::from_tokens(Tid::new(id, 1).unwrap(), tokens).unwrap())
+            .unwrap();
+    }
+
+    fn stream_ordinals(term: &crate::fields::types::LogicalTerm<'_>) -> Vec<(u8, Vec<u32>)> {
+        term.streams
+            .iter()
+            .map(|stream| {
+                (
+                    stream.field,
+                    stream.term.ordinals().unwrap().to_vec().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn rank_fused(
+        term: &crate::fields::types::LogicalTerm<'_>,
+        weights: &[f32],
+        lengths_by_ordinal: &[Vec<u32>],
+        field_totals: &[u64],
+        total_docs: u64,
+        ids_by_ordinal: &[u32],
+    ) -> Vec<(u32, u32)> {
+        let field_count = weights.len() as u8;
+        let mut cursor = term.cursor().unwrap();
+        let mut ranked = Vec::new();
+        while let Some(ordinal) = cursor.current_ordinal() {
+            let hits = cursor.field_hits().unwrap();
+            let raw = raw_tf_from_hits(&hits, field_count);
+            let score = fused_score(
+                term.mask,
+                weights,
+                &raw,
+                &lengths_by_ordinal[ordinal as usize],
+                field_totals,
+                total_docs,
+                term.df_agg,
+                1.0,
+                Bm25Params::default(),
+            );
+            ranked.push((ids_by_ordinal[ordinal as usize], score.to_bits(), score));
+            cursor.advance(ordinal.saturating_add(1)).unwrap();
+        }
+        ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+        ranked.into_iter().map(|(id, bits, _)| (id, bits)).collect()
+    }
+
+    fn bits_table(rows: &[(u32, u32)]) -> String {
+        rows.iter()
+            .map(|(id, bits)| format!("({id}, {bits:08x})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn print_bit_pairs(case: &str, computed: &[(u32, u32)], recorded: &[(u32, u32)]) {
+        eprintln!("{case} computed vs recorded:");
+        for (row, recorded_row) in computed.iter().zip(recorded) {
+            let (id, bits) = row;
+            let (rid, rbits) = recorded_row;
+            eprintln!(
+                "  id {id}: computed {bits:08x}  recorded {rbits:08x}  match={}",
+                id == rid && bits == rbits
+            );
+        }
+    }
+
+    #[test]
+    fn arithmetic_row1_unweighted_tie_bits_match_0_4_0() {
+        const FIELDS: u8 = 2;
+        let index = MutableIndex::default();
+        add_columns(&index, 1, &["needle", "pad"], FIELDS);
+        add_columns(&index, 2, &["pad", "needle"], FIELDS);
+        add_columns(&index, 3, &["needle needle", "pad"], FIELDS);
+
+        let mask = all_fields_mask(FIELDS);
+        let Lookup::Term(term) = lookup(&index, "needle", mask, FIELDS).unwrap() else {
+            panic!("needle");
+        };
+        let by_field = stream_ordinals(&term);
+        let title = by_field
+            .iter()
+            .find(|(field, _)| *field == 0)
+            .map(|(_, o)| o.as_slice())
+            .unwrap_or(&[]);
+        let body = by_field
+            .iter()
+            .find(|(field, _)| *field == 1)
+            .map(|(_, o)| o.as_slice())
+            .unwrap_or(&[]);
+        let union = union_df_agg([title, body]);
+        assert_eq!(title, [0_u32, 2], "title needle ordinals (ids 1, 3)");
+        assert_eq!(body, [1_u32], "body needle ordinals (id 2)");
+        assert_eq!(union, 3, "title ∪ body ordinals");
+        assert_eq!(term.df_agg, union);
+        assert_eq!(
+            term.df_agg,
+            union_df_agg_from_streams(&term.streams).unwrap()
+        );
+        assert_ne!(term.df_agg, 0);
+
+        let lengths = [vec![1_u32, 1], vec![1, 1], vec![2, 1]];
+        let totals = [4_u64, 3];
+        let ids = [1_u32, 2, 3];
+        let computed = rank_fused(&term, &[1.0, 1.0], &lengths, &totals, 3, &ids);
+        let recorded = [(3_u32, 0x3e2e_071f), (1, 0x3e11_3925), (2, 0x3e11_3925)];
+        print_bit_pairs("arithmetic.row1_unweighted_tie", &computed, &recorded);
+        eprintln!(
+            "  df_agg={} (union title{title:?} ∪ body{body:?})",
+            term.df_agg
+        );
+        assert_eq!(
+            computed,
+            recorded,
+            "computed [{}] vs recorded [{}]; df_agg={} title={title:?} body={body:?}",
+            bits_table(&computed),
+            bits_table(&recorded),
+            term.df_agg
+        );
+        assert_eq!(
+            computed[1].1, computed[2].1,
+            "tie identity is identical bits"
+        );
+    }
+
+    #[test]
+    fn arithmetic_row2_field_weights_bits_match_0_4_0() {
+        const FIELDS: u8 = 2;
+        let index = MutableIndex::default();
+        add_columns(&index, 1, &["needle", "pad"], FIELDS);
+        add_columns(&index, 2, &["pad", "needle needle needle"], FIELDS);
+
+        let mask = all_fields_mask(FIELDS);
+        let Lookup::Term(term) = lookup(&index, "needle", mask, FIELDS).unwrap() else {
+            panic!("needle");
+        };
+        let union = union_df_agg_from_streams(&term.streams).unwrap();
+        assert_eq!(term.df_agg, union);
+        assert_eq!(term.df_agg, 2);
+
+        let lengths = [vec![1_u32, 1], vec![1, 3]];
+        let totals = [2_u64, 4];
+        let ids = [1_u32, 2];
+        let computed = rank_fused(&term, &[3.0, 1.0], &lengths, &totals, 2, &ids);
+        let recorded = [(1_u32, 0x3e99_424c), (2, 0x3e8c_a98f)];
+        print_bit_pairs("arithmetic.row2_field_weights", &computed, &recorded);
+        assert_eq!(
+            computed,
+            recorded,
+            "computed [{}] vs recorded [{}]",
+            bits_table(&computed),
+            bits_table(&recorded)
+        );
     }
 }

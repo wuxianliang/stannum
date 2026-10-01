@@ -78,4 +78,29 @@ mod tests {
             ]
         );
     }
+
+    /// arithmetic.row3 bits via `stannum.search`, matching
+    /// `contract/cases/arithmetic.yaml` (`encode(float4send(s.score::real),'hex')`,
+    /// ORDER BY score DESC, ctid). `full_score` is pinned in `tool/score.rs`.
+    #[pg_test]
+    fn arithmetic_row3_search_bits_match_0_4_0() {
+        Spi::run(
+            "CREATE TABLE row3_search (id int PRIMARY KEY, body text);
+             INSERT INTO row3_search VALUES (1, 'needle'), (2, 'needle needle'), (3, 'pad');
+             CREATE INDEX row3_search_idx ON row3_search USING stannum (body)",
+        )
+        .unwrap();
+        let ranked = Spi::get_one::<String>(
+            r#"SELECT coalesce(json_agg(json_build_array(d.id, encode(float4send(s.score::real), 'hex'))
+                 ORDER BY s.score DESC, d.ctid), '[]')::text
+               FROM row3_search d
+               JOIN stannum.search('row3_search_idx'::regclass, 'needle', "limit" => 10, snippet => 'none') s
+                 ON d.ctid = s.ctid"#,
+        )
+        .unwrap()
+        .unwrap();
+        let recorded = r#"[[2, "3f110b5e"], [1, "3f060744"]]"#;
+        eprintln!("arithmetic.row3_single_column computed {ranked} vs recorded {recorded}");
+        assert_eq!(ranked, recorded, "computed {ranked} vs recorded {recorded}");
+    }
 }

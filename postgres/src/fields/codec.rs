@@ -7,9 +7,31 @@
 use super::error::KeyDefect;
 
 /// `~` + one lowercase hex nibble + `~`. Never decimal, never `{:02x}`.
+/// Only `0..=15`: `header(16)` is `~10~`, which sorts *before* `~f~`.
 #[must_use]
 pub(crate) fn header(ordinal: u8) -> String {
+    assert!(
+        ordinal <= 15,
+        "header is one lowercase hex nibble; field 15's exclusive bound is upper_fence, not header(16)"
+    );
     format!("~{ordinal:x}~")
+}
+
+/// Exclusive dictionary fence past `ordinal`'s keys.
+///
+/// For a non-last field this is [`header`] of the next ordinal, used as the
+/// inclusive `Window::Range` upper bound (`~1~` is not a payload key). Field
+/// 15 — and any last field — returns `None`: the prefix end, **not**
+/// `header(16)` (`~10~` sorts before `~f~`).
+#[must_use]
+pub(crate) fn upper_fence(ordinal: u8, field_count: u8) -> Option<String> {
+    debug_assert!(ordinal <= 15 && ordinal < field_count);
+    let next = ordinal.checked_add(1)?;
+    if next > 15 || next >= field_count {
+        None
+    } else {
+        Some(header(next))
+    }
 }
 
 fn check_ordinal(ordinal: u8, field_count: u8) -> Result<(), KeyDefect> {
@@ -183,5 +205,19 @@ mod tests {
                 field_count: 2
             })
         );
+    }
+
+    #[test]
+    fn header_sixteen_sorts_before_field_fifteen_so_upper_fence_is_prefix_end() {
+        assert_eq!(header(15), "~f~");
+        assert!(
+            "~10~" < "~f~",
+            "header(16) would be ~10~, which is not an exclusive bound past ~f~"
+        );
+        assert_eq!(upper_fence(15, 16), None);
+        assert_eq!(upper_fence(14, 16).as_deref(), Some("~f~"));
+        assert_eq!(upper_fence(0, 2).as_deref(), Some("~1~"));
+        assert_eq!(upper_fence(1, 2), None);
+        assert_eq!(upper_fence(15, 16), upper_fence(1, 2));
     }
 }

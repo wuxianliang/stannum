@@ -59,7 +59,17 @@ impl<'a> LogicalPostingCursor<'a> {
 
     /// Step every stream to the first ordinal at or after `target`. Equal
     /// ordinals coalesce into one candidate.
+    ///
+    /// Published `current` and every stream `successor` are cleared before
+    /// any seek. `current` is published only after every seek (and successor
+    /// peek) succeeds, so a mid-loop error cannot leave a stale ordinal
+    /// together with already-moved streams.
     pub(crate) fn advance(&mut self, target: u32) -> segment::Result<()> {
+        self.current = None;
+        for stream in &mut self.fields {
+            stream.successor = None;
+        }
+
         let mut min = None;
         for stream in &mut self.fields {
             stream.ordinals.rewind()?;
@@ -68,20 +78,22 @@ impl<'a> LogicalPostingCursor<'a> {
                 min = Some(min.map_or(at, |seen: u32| seen.min(at)));
             }
         }
-        self.current = min;
-        if let Some(here) = min {
-            for stream in &mut self.fields {
-                stream.successor = match stream.ordinals.current() {
-                    Some(at) if at == here => peek_successor(&mut stream.ordinals)?,
-                    Some(at) => Some(at),
-                    None => None,
-                };
-            }
-        } else {
-            for stream in &mut self.fields {
-                stream.successor = None;
-            }
+        let Some(here) = min else {
+            return Ok(());
+        };
+
+        let mut successors = Vec::with_capacity(self.fields.len());
+        for stream in &mut self.fields {
+            successors.push(match stream.ordinals.current() {
+                Some(at) if at == here => peek_successor(&mut stream.ordinals)?,
+                Some(at) => Some(at),
+                None => None,
+            });
         }
+        for (stream, successor) in self.fields.iter_mut().zip(successors) {
+            stream.successor = successor;
+        }
+        self.current = Some(here);
         Ok(())
     }
 
@@ -111,8 +123,16 @@ impl<'a> LogicalPostingCursor<'a> {
     }
 
     /// Exclusive end of the fused bound interval covering `current_ordinal`.
-    /// Skeleton for the 4.4 truncation rule: earlier of covering-stream
-    /// successors and not-yet-covering streams' current ordinals.
+    ///
+    /// Design §5.1 intersecting-blocks truncation: the fused interval ends at
+    /// the earlier of (1) the end of the blocks that currently cover the
+    /// pivot and (2) the start of the next block, chunk, or sub-block of any
+    /// mask-internal stream, including a stream that does not yet cover the
+    /// pivot. Witness: a title block covering 0..1000 with a body block that
+    /// starts at 500 must truncate at 500 — a body posting there raises
+    /// `tf*`, and holding the title-only bound across that start breaks
+    /// `exact_score ≤ fused_bound`. Plan 4.4 implements that rule; this hook
+    /// currently returns the earliest stream successor.
     #[must_use]
     pub(crate) fn next_bound_interval(&self) -> Option<u32> {
         self.fields
@@ -219,6 +239,10 @@ mod tests {
             panic!("direct lookup returns Lookup::Term");
         };
         assert_eq!(
+            one.mask, MASK,
+            "collapsed mask is the query scope, not the body-only hit-set"
+        );
+        assert_eq!(
             one.streams.iter().map(|s| s.field).collect::<Vec<_>>(),
             vec![1]
         );
@@ -248,5 +272,49 @@ mod tests {
         let empty: &[FieldTerm<'_>] = &[];
         let cursor = LogicalPostingCursor::open(empty).unwrap();
         assert_eq!(cursor.current_ordinal(), None);
+    }
+
+    #[test]
+    fn body_only_cursor_mask_is_query_scope_not_the_hit_set() {
+        let index = fixture();
+        let Lookup::Term(bar) = lookup(&index, "bar", MASK, FIELDS).unwrap() else {
+            panic!("body-only lookup");
+        };
+        assert_eq!(bar.mask, MASK);
+        assert_ne!(bar.mask, 1u16 << 1);
+        assert_eq!(
+            bar.streams.iter().map(|s| s.field).collect::<Vec<_>>(),
+            vec![1]
+        );
+        let walked = collect(&mut bar.cursor().unwrap());
+        assert_eq!(walked, vec![(2, vec![1])]);
+    }
+
+    #[test]
+    fn advance_clears_current_and_successors_before_seek_and_publishes_after() {
+        let index = fixture();
+        let Lookup::Term(both) = lookup(&index, "foo", MASK, FIELDS).unwrap() else {
+            panic!("foo");
+        };
+        let mut cursor = both.cursor().unwrap();
+        assert_eq!(cursor.current_ordinal(), Some(0));
+        assert_eq!(cursor.next_bound_interval(), Some(1));
+
+        cursor.advance(u32::MAX).unwrap();
+        assert_eq!(cursor.current_ordinal(), None);
+        assert_eq!(cursor.next_bound_interval(), None);
+
+        cursor.advance(0).unwrap();
+        assert_eq!(cursor.current_ordinal(), Some(0));
+        assert_eq!(cursor.next_bound_interval(), Some(1));
+        assert_eq!(
+            cursor
+                .field_hits()
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.field)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 }

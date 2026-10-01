@@ -12,7 +12,13 @@
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
 
+use super::types::FieldTerm;
+
 /// Distinct document ordinals across field streams of one token, one segment.
+///
+/// Dead ordinals the segment still stores are members of this union. Query-time
+/// `total_docs` includes dead until rewrite; this cardinality is the matching
+/// `df_agg` until the STNF sidecar (plan 4.3) persists it.
 #[must_use]
 pub(crate) fn union_df_agg<I, S>(field_ordinals: I) -> u64
 where
@@ -27,6 +33,19 @@ where
         }
     }
     seen.len() as u64
+}
+
+/// [`union_df_agg`] over the ordinal streams of a logical term.
+///
+/// Interim 4.2 bridge: lookup/expand fill `LogicalTerm.df_agg` from this, not
+/// a stored sidecar value and not a silent `0`. Dead ordinals count until
+/// rewrite, the same rule as [`union_df_agg`].
+pub(crate) fn union_df_agg_from_streams(streams: &[FieldTerm<'_>]) -> segment::Result<u64> {
+    let mut field_ordinals = Vec::with_capacity(streams.len());
+    for stream in streams {
+        field_ordinals.push(stream.term.ordinals()?.to_vec()?);
+    }
+    Ok(union_df_agg(field_ordinals))
 }
 
 /// Query-time `total_df` = Σ per-segment `df_agg`. Ordinals are disjoint
