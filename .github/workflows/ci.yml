@@ -8,7 +8,26 @@ name: CI
 on:
   push:
   pull_request:
+  # Monthly dry-run of live planetscale/lead into the stn3 tip. Existing jobs
+  # must not run on this event (see job-level if: below).
+  schedule:
+    - cron: "0 6 1 * *"
   workflow_dispatch:
+    inputs:
+      job:
+        description: >
+          ci = lint, build-and-test, and reference-oracle (today's push/PR
+          set). upstream-dry-run = merge live Lead and replay the
+          single-column contract subset only.
+        type: choice
+        options:
+          - ci
+          - upstream-dry-run
+        default: ci
+      upstream_ref:
+        description: PlanetScale Lead git ref to merge (branch, tag, or SHA). Ignored unless job is upstream-dry-run.
+        type: string
+        default: main
 
 permissions:
   contents: read
@@ -24,6 +43,7 @@ jobs:
   # docs/testing.md name the same commands.
   lint:
     name: Format and harness tests
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.job == 'ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -48,6 +68,7 @@ jobs:
   # AArch64, and both PostgreSQL majors have caught API differences.
   build-and-test:
     name: ${{ matrix.arch.name }} / PostgreSQL ${{ matrix.postgres }}
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.job == 'ci')
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -186,6 +207,7 @@ jobs:
   # docs/compatibility.md#reference-oracle-against-lead for the two known deviations).
   reference-oracle:
     name: Reference oracle against upstream Lead
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.job == 'ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -251,3 +273,131 @@ jobs:
           name: reference-oracle
           path: ${{ runner.temp }}/reference-oracle
           if-no-files-found: ignore
+
+  # Design §9 / §7: upstream merges are gated by the contract suite, including
+  # a dry-run of live planetscale/lead (not the old pin d57ef58). Conflicts in
+  # §3 shim files are expected: this job must go red on conflict with a
+  # distinct report, not look like a later compile or contract failure.
+  # Never on push/PR; schedule + dedicated workflow_dispatch only.
+  upstream-dry-run:
+    name: Upstream Lead dry-run (PostgreSQL 18)
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.job == 'upstream-dry-run')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PG_MAJOR: "18"
+      LEAD_REPOSITORY: planetscale/lead
+      UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: "UPSTREAM DRY-RUN: test-merge live Lead"
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          git config user.email "ci@stannum.invalid"
+          git config user.name "stannum-ci"
+          git checkout -B upstream-dry-run-scratch HEAD
+          git fetch --no-tags "https://github.com/${LEAD_REPOSITORY}.git" "$UPSTREAM_REF"
+          ours=$(git rev-parse HEAD)
+          theirs=$(git rev-parse FETCH_HEAD)
+          echo "Ours     $ours ($(git log -1 --oneline HEAD))"
+          echo "Upstream $theirs ($LEAD_REPOSITORY $UPSTREAM_REF)"
+          echo "UPSTREAM DRY-RUN: merging $LEAD_REPOSITORY@$UPSTREAM_REF ($theirs) into $ours"
+          if git merge --no-commit --no-ff FETCH_HEAD; then
+            echo "UPSTREAM DRY-RUN: MERGE CLEAN"
+            echo "UPSTREAM DRY-RUN: MERGE CLEAN" >> "$GITHUB_STEP_SUMMARY"
+            echo "Merged $LEAD_REPOSITORY@$UPSTREAM_REF ($theirs) into $ours with no conflicts." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          conflicts=$(git diff --name-only --diff-filter=U)
+          if [ -z "$conflicts" ]; then
+            echo "UPSTREAM DRY-RUN: MERGE FAILED"
+            git status --short
+            echo "::error::UPSTREAM DRY-RUN: MERGE FAILED (no unmerged paths)"
+            exit 1
+          fi
+          echo "============================================================"
+          echo "UPSTREAM DRY-RUN: MERGE CONFLICT"
+          echo "============================================================"
+          echo "Conflicting paths:"
+          echo "$conflicts"
+          echo
+          git status --short
+          {
+            echo "## UPSTREAM DRY-RUN: MERGE CONFLICT"
+            echo
+            echo "Merging \`$LEAD_REPOSITORY@$UPSTREAM_REF\` (\`$theirs\`) into \`$ours\` conflicted."
+            echo
+            echo "Conflicting paths:"
+            echo
+            echo '```'
+            echo "$conflicts"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::UPSTREAM DRY-RUN: MERGE CONFLICT"
+          exit 1
+
+      - name: Install PostgreSQL 18 from PGDG
+        run: |
+          sudo apt-get install --yes --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install --yes --no-install-recommends \
+            "postgresql-${PG_MAJOR}" "postgresql-server-dev-${PG_MAJOR}" \
+            libclang-dev pkg-config libssl-dev python3-venv
+          sudo systemctl stop postgresql || true
+          sudo chown -R "$USER" "/usr/lib/postgresql/${PG_MAJOR}" "/usr/share/postgresql/${PG_MAJOR}"
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: upstream-dry-run-pg18
+
+      - name: Cache cargo-pgrx
+        id: pgrx-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-pgrx
+          key: cargo-pgrx-${{ env.PGRX_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install cargo-pgrx
+        if: steps.pgrx-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-pgrx --version "$PGRX_VERSION" --locked
+
+      - name: Point pgrx at the installed server
+        run: |
+          echo "PGRX_HOME=$RUNNER_TEMP/pgrx" >> "$GITHUB_ENV"
+          PGRX_HOME="$RUNNER_TEMP/pgrx" cargo pgrx init "--pg${PG_MAJOR}=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
+
+      - name: Build and install release
+        run: cargo pgrx install --release --package stannum --no-default-features --features "pg${PG_MAJOR}"
+
+      - name: Single-column contract subset
+        env:
+          CONFORMANCE_DSN: host=localhost port=55432 dbname=postgres
+        run: |
+          initdb -D "$RUNNER_TEMP/contract-data" -U "$USER" -A trust --no-locale --encoding=UTF8
+          pg_ctl -D "$RUNNER_TEMP/contract-data" \
+            -o "-p 55432 -c listen_addresses=localhost -c unix_socket_directories=$RUNNER_TEMP" \
+            -l "$RUNNER_TEMP/contract.log" -w start || { cat "$RUNNER_TEMP/contract.log"; exit 1; }
+          psql -h localhost -p 55432 -d postgres -v ON_ERROR_STOP=1 -c "CREATE EXTENSION stannum;"
+          python3 -m venv "$RUNNER_TEMP/contract-venv"
+          "$RUNNER_TEMP/contract-venv/bin/pip" install 'psycopg[binary]' pyyaml
+          "$RUNNER_TEMP/contract-venv/bin/python" contract/run.py --engine stannum \
+            --check contract/expected/stannum-0.4.0 \
+            --case 'arithmetic.row3*' \
+            --case 'calls.search*' \
+            --case calls.search_count \
+            --case calls.verify_index \
+            --case calls.stop_words \
+            --case calls.tokenize_named \
+            --case 'stats.*' \
+            --case ddl.tin_ignored \
+            --case catalog.gucs \
+            --case 'capabilities.*' \
+            --case tokenizer.unicode_whitespace
+
