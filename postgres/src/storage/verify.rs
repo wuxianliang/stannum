@@ -503,7 +503,11 @@ impl Checker {
         }
         let meta = match Meta::decode(&page.data) {
             Ok(meta) => meta,
-            Err(message) => {
+            Err(layout::MetaError::PreStn3) => {
+                self.error("meta page", segment::Error::PreStn3);
+                return None;
+            }
+            Err(layout::MetaError::Invalid(message)) => {
                 self.error("meta page", message);
                 return None;
             }

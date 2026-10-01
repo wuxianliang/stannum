@@ -65,6 +65,14 @@ const SPECIAL: usize = offset_of!(pg_sys::PageHeaderData, pd_special);
 
 pub type Result<T> = std::result::Result<T, &'static str>;
 
+/// Why [`Meta::decode`] rejected a payload. `PreStn3` is a migration signal,
+/// not a corrupt page; callers must not wrap it as `invalid Stannum meta page`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetaError {
+    Invalid(&'static str),
+    PreStn3,
+}
+
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
 }
@@ -196,6 +204,11 @@ pub struct SegmentEntry {
 
 const RUN_BYTES: usize = 16;
 const ENTRY_BYTES: usize = RUN_BYTES * 3 + 4 + 4 + 8 + 4;
+/// 0.4.0 directory sizes: `Run` was 12 bytes (no `last`) and a segment
+/// entry had no `dead_stamp`. `52s + 16p` equals `68s + 20p` only at
+/// `s = 0, p = 0`, which stays on the current empty-directory path.
+const LEGACY_ENTRY_BYTES: usize = 52;
+const LEGACY_PENDING_BYTES: usize = 16;
 
 /// A run waiting until every scan that could still read it has finished.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -291,9 +304,9 @@ impl Meta {
         Ok(out)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
+    pub fn decode(bytes: &[u8]) -> std::result::Result<Self, MetaError> {
         if bytes.len() < META_HEADER {
-            return Err("truncated Stannum meta page");
+            return Err(MetaError::Invalid("truncated Stannum meta page"));
         }
         let identity = u64_at(bytes, 0);
         let mut spec = [0u8; crate::options::SPEC_BYTES];
@@ -313,11 +326,17 @@ impl Meta {
         let segment_count = u32_at(bytes, at + 4) as usize;
         let pending_count = u32_at(bytes, at + 8) as usize;
         at += 12;
-        if segment_count > MAX_SEGMENTS
-            || pending_count > MAX_PENDING
-            || bytes.len() != at + segment_count * ENTRY_BYTES + pending_count * PENDING_BYTES
-        {
-            return Err("invalid Stannum meta page");
+        if segment_count > MAX_SEGMENTS || pending_count > MAX_PENDING {
+            return Err(MetaError::Invalid("invalid Stannum meta page"));
+        }
+        let current_len = at + segment_count * ENTRY_BYTES + pending_count * PENDING_BYTES;
+        let legacy_len =
+            at + segment_count * LEGACY_ENTRY_BYTES + pending_count * LEGACY_PENDING_BYTES;
+        if bytes.len() != current_len {
+            if bytes.len() == legacy_len && (segment_count > 0 || pending_count > 0) {
+                return Err(MetaError::PreStn3);
+            }
+            return Err(MetaError::Invalid("invalid Stannum meta page"));
         }
         let mut segments = Vec::with_capacity(segment_count);
         for _ in 0..segment_count {
@@ -331,7 +350,7 @@ impl Meta {
                 generation: u32_at(bytes, at + 3 * RUN_BYTES + 16),
             };
             if entry.run.is_empty() || entry.run.blocks == 0 {
-                return Err("invalid Stannum segment entry");
+                return Err(MetaError::Invalid("invalid Stannum segment entry"));
             }
             segments.push(entry);
             at += ENTRY_BYTES;
@@ -441,6 +460,33 @@ mod tests {
         let bytes = full.encode().unwrap();
         assert!(bytes.len() <= CAPACITY);
         assert_eq!(Meta::decode(&bytes).unwrap(), full);
+    }
+
+    fn header_with_counts(segment_count: u32, pending_count: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; META_HEADER];
+        bytes[META_HEADER - 8..META_HEADER - 4].copy_from_slice(&segment_count.to_le_bytes());
+        bytes[META_HEADER - 4..META_HEADER].copy_from_slice(&pending_count.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn meta_decode_classifies_legacy_directory_as_pre_stn3() {
+        let mut legacy = header_with_counts(1, 0);
+        legacy.extend(vec![0u8; LEGACY_ENTRY_BYTES]);
+        assert_eq!(Meta::decode(&legacy), Err(MetaError::PreStn3));
+
+        let meta = sample_meta();
+        assert_eq!(Meta::decode(&meta.encode().unwrap()).unwrap(), meta);
+
+        let empty = Meta::decode(&header_with_counts(0, 0)).unwrap();
+        assert!(empty.segments.is_empty() && empty.pending.is_empty());
+
+        let mut garbage = header_with_counts(1, 0);
+        garbage.extend(vec![0u8; 40]);
+        assert_eq!(
+            Meta::decode(&garbage),
+            Err(MetaError::Invalid("invalid Stannum meta page"))
+        );
     }
 
     #[test]

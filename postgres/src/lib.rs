@@ -4220,6 +4220,18 @@ mod tests {
         Spi::get_one::<i64>("SELECT count(*) FROM c_read WHERE body ==> 'needle'").unwrap();
     }
 
+    /// LSG4 is the 0.4.0 multi-column magic. Opening it is the migration
+    /// error, not generic `segment magic` corruption. (`XXXX` is still
+    /// corruption, covered by the test above.)
+    #[pg_test(error = "stannum: index requires REINDEX to 0.5.0 (pre-STN3 segment)")]
+    fn lsg4_segment_requires_reindex_not_corruption() {
+        let root = corruptible("c_lsg");
+        // LSG4
+        corrupt("c_lsg_idx", root, DATA_AT, "4c534734");
+        Spi::run("SET LOCAL enable_seqscan = off").unwrap();
+        Spi::get_one::<i64>("SELECT count(*) FROM c_lsg WHERE body ==> 'needle'").unwrap();
+    }
+
     // --- Tokenizer settings agree across plans ----------------------------------
 
     /// Plan modes for a `==>` query: the sequential scan evaluating the

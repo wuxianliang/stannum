@@ -245,14 +245,23 @@ fn checked<T>(result: Result<T, &'static str>) -> T {
     result.unwrap_or_else(|message| corrupt(format!("Stannum index: {message}")))
 }
 
+/// Reports a segment codec failure. LSG1–LSG4 is a migration error, not
+/// index corruption, and is not wrapped in the usual "Stannum ..." prefix.
+fn fail_codec(error: segment::Error, what: &str) -> ! {
+    match error {
+        segment::Error::PreStn3 => pgrx::error!("{error}"),
+        error => corrupt(format!("Stannum {what}: {error}")),
+    }
+}
+
 /// Codec results from a source the caller cannot name more precisely.
 fn codec<T>(result: segment::Result<T>) -> T {
-    result.unwrap_or_else(|error| corrupt(format!("Stannum index data: {error}")))
+    result.unwrap_or_else(|error| fail_codec(error, "index data"))
 }
 
 /// Codec results from a named source, such as `segment generation 7`.
 pub(crate) fn codec_in<T>(result: segment::Result<T>, what: &str) -> T {
-    result.unwrap_or_else(|error| corrupt(format!("Stannum {what}: {error}")))
+    result.unwrap_or_else(|error| fail_codec(error, what))
 }
 
 /// A directory entry's name in messages.
@@ -455,8 +464,15 @@ unsafe fn read_meta(index: pg_sys::Relation, exclusive: bool) -> (Buffer, Meta) 
                 "Stannum index page 0 has kind {kind} instead of a meta page (unsupported format?)"
             ));
         }
-        let meta = Meta::decode(layout::payload(buffer.page()))
-            .unwrap_or_else(|message| corrupt(format!("Stannum index meta page: {message}")));
+        let meta = match Meta::decode(layout::payload(buffer.page())) {
+            Ok(meta) => meta,
+            Err(layout::MetaError::PreStn3) => {
+                fail_codec(segment::Error::PreStn3, "index meta page")
+            }
+            Err(layout::MetaError::Invalid(message)) => {
+                corrupt(format!("Stannum index meta page: {message}"))
+            }
+        };
         (buffer, meta)
     }
 }

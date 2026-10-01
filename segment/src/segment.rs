@@ -28,9 +28,9 @@
 //! the largest frequency bucket are in the entry, so the dictionary alone
 //! answers selectivity and score-bound questions.
 //!
-//! Only this signature is read. Earlier formats (`LSG1` to `LSG5`, `STN1`)
-//! stored the document set twice or the bucket beside the positions;
-//! indexes in them are rebuilt with `REINDEX`.
+//! Only this signature is read. `LSG1`–`LSG4` (the 0.4.0 lineage) open as
+//! a migration error. Other earlier signatures (`LSG5`, `STN1`) stay
+//! unknown magic. Indexes in them are rebuilt with `REINDEX`.
 //!
 //! The builder holds the segment in memory. That matches the intended use,
 //! folding a bounded write buffer, and an index build that partitions the heap
@@ -55,6 +55,11 @@ use crate::{Error, Result, Tid, varint};
 
 /// The signature that opens a segment blob.
 pub const MAGIC: &[u8; 4] = b"STN3";
+
+/// Immutable-segment magics written by 0.4.0 and earlier (`LSG1`–`LSG4`).
+fn pre_stn3_magic(magic: &[u8]) -> bool {
+    matches!(magic, b"LSG1" | b"LSG2" | b"LSG3" | b"LSG4")
+}
 
 struct Occurrence {
     tid: Tid,
@@ -592,7 +597,11 @@ impl<S: Source> Reader<S> {
         let total = source.len();
         let head = source.read(0, (total.min(64)) as usize)?;
         let mut reader = crate::reader::Reader::new(&head);
-        if reader.take(4)? != MAGIC {
+        let magic = reader.take(4)?;
+        if pre_stn3_magic(magic) {
+            return Err(Error::PreStn3);
+        }
+        if magic != MAGIC {
             return Err(Error::Corrupt("segment magic"));
         }
         let doc_count = reader.varint_u32()?;
@@ -1985,8 +1994,8 @@ mod tests {
         assert_eq!(segment.documents().unwrap().current(), None);
         assert!(Segment::parse(&bytes[..bytes.len() - 1]).is_err());
         assert_eq!(&bytes[..4], MAGIC);
-        // Earlier and unknown signatures are rejected outright.
-        for magic in [b"LSG1", b"LSG5", b"STN2", b"STN4"] {
+        // Unknown signatures stay corruption; the LSG lineage is migration.
+        for magic in [b"LSG5", b"STN2", b"STN4"] {
             let mut other = bytes.clone();
             other[..4].copy_from_slice(magic);
             assert_eq!(
@@ -2023,6 +2032,30 @@ mod tests {
         assert_eq!(
             Segment::parse(&bytes).err(),
             Some(Error::Corrupt("segment length"))
+        );
+    }
+
+    #[test]
+    fn lsg_magic_is_pre_stn3_not_corruption() {
+        const MESSAGE: &str = "stannum: index requires REINDEX to 0.5.0 (pre-STN3 segment)";
+        for magic in [b"LSG1", b"LSG2", b"LSG3", b"LSG4"] {
+            let err = Segment::parse(magic.as_slice()).err().unwrap();
+            assert_eq!(err, Error::PreStn3, "{magic:?}");
+            assert_eq!(err.to_string(), MESSAGE);
+        }
+        let mut bytes = SegmentBuilder::default().finish();
+        bytes[..4].copy_from_slice(b"LSG4");
+        let err = Segment::parse(&bytes).err().unwrap();
+        assert_eq!(err, Error::PreStn3);
+        assert_eq!(err.to_string(), MESSAGE);
+        bytes[..4].copy_from_slice(b"XXXX");
+        assert_eq!(
+            Segment::parse(&bytes).err(),
+            Some(Error::Corrupt("segment magic"))
+        );
+        assert_eq!(
+            Segment::parse(b"XXXX").err(),
+            Some(Error::Corrupt("segment magic"))
         );
     }
 }
