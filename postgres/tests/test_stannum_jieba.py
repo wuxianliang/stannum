@@ -210,6 +210,104 @@ class JiebaTokenizerTests(unittest.TestCase):
         self.sql("SELECT stannum.jieba_delete_word('星河数据库协议');")
         self.assertEqual(self.sql("SELECT stannum.jieba_dict_version();"), before)
 
+    def test_abort_and_savepoint_discard_uncommitted_dictionary_on_next_use(self):
+        baseline = self.sql("""
+            SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+        """)
+        self.assertNotEqual(baseline, "星河数据库协议")
+        abort = [
+            line for line in self.sql("""
+                BEGIN;
+                SELECT stannum.jieba_add_word('星河数据库协议', 1000000, 'n');
+                SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                    '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+                ROLLBACK;
+                SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                    '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+            """).splitlines()
+            if line
+        ]
+        self.assertEqual(abort, ["星河数据库协议", baseline])
+        savepoint = [
+            line for line in self.sql("""
+                BEGIN;
+                SELECT stannum.jieba_add_word('星河数据库协议', 1000000, 'n');
+                SAVEPOINT d;
+                SELECT stannum.jieba_delete_word('星河数据库协议');
+                SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                    '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+                ROLLBACK TO SAVEPOINT d;
+                SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                    '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+                COMMIT;
+            """).splitlines()
+            if line
+        ]
+        self.assertEqual(savepoint, [baseline, "星河数据库协议"])
+        self.assertEqual(
+            self.sql("""
+                SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                    '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+            """),
+            "星河数据库协议",
+        )
+        self.sql("SELECT stannum.jieba_reload_dict();")
+        self.assertEqual(
+            self.sql("""
+                SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                    '星河数据库协议', tokenizer => 'jieba') AS t(tok);
+            """),
+            "星河数据库协议",
+        )
+
+    def test_jieba_udf_sql_identities_match_recordings(self):
+        self.assertEqual(
+            self.sql("""
+                SELECT string_agg(format('%s|%s|%s|%s|%s',
+                       p.proname,
+                       pg_get_function_identity_arguments(p.oid),
+                       p.provolatile,
+                       p.proparallel,
+                       p.proisstrict::text), E'\\n' ORDER BY p.proname)
+                FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'stannum'
+                  AND p.proname IN (
+                      'jieba_add_word',
+                      'jieba_delete_word',
+                      'jieba_dict_version',
+                      'jieba_reload_dict'
+                  );
+            """),
+            "\n".join([
+                "jieba_add_word|word text, freq integer, tag text|v|u|false",
+                "jieba_delete_word|word text|v|u|true",
+                "jieba_dict_version||s|u|true",
+                "jieba_reload_dict||v|u|true",
+            ]),
+        )
+
+    def test_span_symmetry_after_dictionary_add(self):
+        text = "星河数据库协议与开源数据库"
+        self.sql("SELECT stannum.jieba_add_word('星河数据库协议', 1000000, 'n');")
+        tokens = self.sql(f"""
+            SELECT string_agg(tok, '/') FROM stannum.tokenize(
+                '{text}', tokenizer => 'jieba') AS t(tok);
+        """)
+        self.assertTrue(tokens.startswith("星河数据库协议/"), tokens)
+        highlighted = self.sql(f"""
+            INSERT INTO docs VALUES (99, '{text}', '{text}');
+            SELECT stannum.highlight(body_jieba, '<m>', '</m>',
+                                     query => '星河数据库协议')
+            FROM docs WHERE id = 99;
+        """)
+        self.assertIn("<m>星河数据库协议</m>", highlighted)
+        token_set = tokens.split("/")
+        self.assertIn("星河数据库协议", token_set)
+        self.assertIn("开源", token_set)
+        self.assertIn("数据库", token_set)
+
 
 if __name__ == "__main__":
     unittest.main()
