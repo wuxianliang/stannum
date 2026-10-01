@@ -202,7 +202,7 @@ reports MERGE CONFLICT informatively — run 36816452727); stn3 CI 6/6, main CI 
 
 ## Phase 3 — jieba (WS2): tokenizer parity
 
-- [ ] **3.1 Port onto the #92 API**
+- [x] **3.1 Port onto the #92 API** (ed2783c)
   - Scope: both `JiebaIter` constructors + `source_spans` port site; snapshot
     via `compile_with_snapshot`; the `cut()` buffer exception to #92 explicit;
     cancellation expectation documented (not interruptible mid-`cut`).
