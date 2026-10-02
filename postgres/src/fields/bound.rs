@@ -14,7 +14,7 @@
 //! Exact `fused_tf` still uses `from_count` on raw position counts.
 
 use segment::bound::BlockBound;
-use segment::ordinals::{ChunkBound, Ordinals, CHUNK, SUB, SUBS};
+use segment::ordinals::{CHUNK, ChunkBound, Ordinals, SUB, SUBS};
 use segment::tf_bucket::TfBucket;
 
 use super::score::saturate;
@@ -357,7 +357,7 @@ pub(crate) fn fused_interval_bound(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use segment::ordinals::{encode_scored, LIST_MAX};
+    use segment::ordinals::{LIST_MAX, encode_scored};
     use segment::tf_bucket::TfBucket;
 
     use super::*;
