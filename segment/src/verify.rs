@@ -33,12 +33,17 @@
 //!   the class the class table records.
 //! * the STNF sidecar, when present: per-field length cells equal the sum of
 //!   that field's position-list lengths (not `max(pos)+1`), and each
-//!   `field_total` equals the checked sum of its column. Open-time validation
-//!   is the reject path; this checker lists the same disagreements.
+//!   `field_total` equals the checked sum of its column. A multi-column term
+//!   is unpacked with [`crate::segment::Term::channels`] first; a missing
+//!   `FCH1` directory is corruption, and each present field is then checked
+//!   as a stock stream. Single-column terms use only the stock decoders.
+//!   Open-time validation is the reject path; this checker lists the same
+//!   disagreements.
 //!
 //! Bytes of an area that no extent covers are not examined: no reader reaches
 //! them.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::docs::{PAGE_ENTRY, page_table};
@@ -407,146 +412,223 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
             if entry.df == 0 {
                 findings.error(location(), "term has no documents");
             }
+            let parent_entry = entry;
+            // `field_count` selects the codec. Single-column stays on the stock
+            // decoders and does not inspect an FCH1 prefix.
+            let multi = trailer.is_some();
+            let channels = if let Some(t) = trailer.as_ref() {
+                match resolved.channels(t.field_count) {
+                    Ok(channels) => channels,
+                    Err(error) => {
+                        findings.error(location(), error);
+                        complete = false;
+                        continue;
+                    }
+                }
+            } else {
+                vec![(0, resolved)]
+            };
 
-            // Ordinals: well formed, df members, all in the document table.
-            let stream_bytes =
-                match segment.ordinals_bytes(entry.ordinals.offset, entry.ordinals.len as usize) {
+            let mut union = BTreeSet::new();
+            let mut parent_max = 0u8;
+            let mut channel_failed = false;
+            for (field, child) in &channels {
+                let entry = child.entry;
+                // Ordinals: well formed, df members, all in the document table.
+                let stream_bytes = match segment
+                    .ordinals_bytes(entry.ordinals.offset, entry.ordinals.len as usize)
+                {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         findings.error(location(), format!("ordinals: {error}"));
-                        complete = false;
-                        continue;
-                    }
-                };
-            let members =
-                match ordinals::validate(stream_bytes, entry.df, segment.document_count(), true)
-                    .and_then(|()| Ordinals::open(stream_bytes, stream_bytes.len() as u64, true))
-                    .and_then(|stream| {
-                        let mut cursor = stream.cursor()?;
-                        let mut members = Vec::with_capacity(entry.df as usize);
-                        while let Some(ordinal) = cursor.current() {
-                            let bucket = cursor
-                                .bucket()
-                                .ok_or(Error::Corrupt("member without a bucket"))?;
-                            members.push((ordinal, bucket));
-                            cursor.advance()?;
-                        }
-                        Ok(members)
-                    }) {
-                    Ok(members) => members,
-                    Err(error) => {
-                        findings.error(location(), format!("ordinals: {error}"));
-                        complete = false;
-                        continue;
-                    }
-                };
-
-            // Payload: one entry per member, buckets matching positions.
-            let payload = match resolved.payload() {
-                Ok(payload) => payload,
-                Err(error) => {
-                    findings.error(location(), format!("payload header: {error}"));
-                    complete = false;
-                    continue;
-                }
-            };
-            if payload.count() != entry.df {
-                findings.error(
-                    location(),
-                    format!(
-                        "payload holds {} entries for {} documents",
-                        payload.count(),
-                        entry.df
-                    ),
-                );
-            }
-            let mut cursor = payload.cursor();
-            scores.clear();
-            scores.reserve(members.len());
-            let mut max_bucket = 0u8;
-            let mut payload_ok = true;
-            for (index, (ordinal, bucket)) in members.iter().enumerate() {
-                if index as u32 >= payload.count() {
-                    break;
-                }
-                let bucket = *bucket;
-                let position_count = match cursor.next_count() {
-                    Ok(counted) => counted,
-                    Err(error) => {
-                        findings.error(
-                            location(),
-                            format!("payload entry {index} for ordinal {ordinal}: {error}"),
-                        );
-                        payload_ok = false;
+                        channel_failed = true;
                         break;
                     }
                 };
-                let expected = TfBucket::from_count(position_count as u32).value();
-                if bucket != expected {
+                let members = match ordinals::validate(
+                    stream_bytes,
+                    entry.df,
+                    segment.document_count(),
+                    true,
+                )
+                .and_then(|()| Ordinals::open(stream_bytes, stream_bytes.len() as u64, true))
+                .and_then(|stream| {
+                    let mut cursor = stream.cursor()?;
+                    let mut members = Vec::with_capacity(entry.df as usize);
+                    while let Some(ordinal) = cursor.current() {
+                        let bucket = cursor
+                            .bucket()
+                            .ok_or(Error::Corrupt("member without a bucket"))?;
+                        members.push((ordinal, bucket));
+                        cursor.advance()?;
+                    }
+                    Ok(members)
+                }) {
+                    Ok(members) => members,
+                    Err(error) => {
+                        findings.error(location(), format!("ordinals: {error}"));
+                        channel_failed = true;
+                        break;
+                    }
+                };
+
+                // Payload: one entry per member, buckets matching positions.
+                let payload = match child.payload() {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        findings.error(location(), format!("payload header: {error}"));
+                        channel_failed = true;
+                        break;
+                    }
+                };
+                if payload.count() != entry.df {
                     findings.error(
                         location(),
                         format!(
-                            "member {index} (ordinal {ordinal}) has bucket {bucket} but its {position_count} positions imply {expected}"
+                            "payload holds {} entries for {} documents",
+                            payload.count(),
+                            entry.df
                         ),
                     );
                 }
-                max_bucket = max_bucket.max(bucket);
-                if let Some(counted) = positions_of.get_mut(*ordinal as usize) {
-                    *counted += position_count as u64;
-                    scores.push((bucket, length_of[*ordinal as usize]));
+                let mut cursor = payload.cursor();
+                scores.clear();
+                scores.reserve(members.len());
+                let mut max_bucket = 0u8;
+                let mut payload_ok = true;
+                for (index, (ordinal, bucket)) in members.iter().enumerate() {
+                    if index as u32 >= payload.count() {
+                        break;
+                    }
+                    let bucket = *bucket;
+                    let position_count = match cursor.next_count() {
+                        Ok(counted) => counted,
+                        Err(error) => {
+                            findings.error(
+                                location(),
+                                format!("payload entry {index} for ordinal {ordinal}: {error}"),
+                            );
+                            payload_ok = false;
+                            break;
+                        }
+                    };
+                    let expected = TfBucket::from_count(position_count as u32).value();
+                    if bucket != expected {
+                        findings.error(
+                            location(),
+                            format!(
+                                "member {index} (ordinal {ordinal}) has bucket {bucket} but its {position_count} positions imply {expected}"
+                            ),
+                        );
+                    }
+                    max_bucket = max_bucket.max(bucket);
+                    if let Some(counted) = positions_of.get_mut(*ordinal as usize) {
+                        *counted += position_count as u64;
+                        let doc_len = if multi {
+                            trailer
+                                .as_ref()
+                                .and_then(|t| t.row(*ordinal, *field))
+                                .unwrap_or(length_of[*ordinal as usize])
+                        } else {
+                            length_of[*ordinal as usize]
+                        };
+                        scores.push((bucket, doc_len));
+                    }
+                    if multi
+                        && let (Some(t), Some(rows)) = (trailer.as_ref(), field_rows.as_mut())
+                        && let Some(cell) = (*ordinal as usize)
+                            .checked_mul(usize::from(t.field_count))
+                            .and_then(|i| i.checked_add(usize::from(*field)))
+                            .and_then(|i| rows.get_mut(i))
+                    {
+                        *cell = cell.saturating_add(position_count as u32);
+                    }
                 }
-                if let (Some(t), Some(rows)) = (trailer.as_ref(), field_rows.as_mut())
-                    && let Ok(Some((field, _))) = crate::trailer::inspect_stored_term(term)
-                    && let Some(cell) = (*ordinal as usize)
-                        .checked_mul(usize::from(t.field_count))
-                        .and_then(|i| i.checked_add(usize::from(field)))
-                        .and_then(|i| rows.get_mut(i))
-                {
-                    *cell = cell.saturating_add(position_count as u32);
+                if !payload_ok {
+                    channel_failed = true;
+                    break;
+                }
+                if !members.is_empty() && max_bucket != entry.max_tf_bucket {
+                    findings.error(
+                        location(),
+                        format!(
+                            "dictionary max_tf_bucket is {} but the largest payload bucket is {max_bucket}",
+                            entry.max_tf_bucket
+                        ),
+                    );
+                }
+                if multi {
+                    for (ordinal, _) in &members {
+                        union.insert(*ordinal);
+                    }
+                    parent_max = parent_max.max(max_bucket);
+                }
+
+                // Bounds: what the payload buckets and lengths imply. The encoding
+                // is canonical, so the stream the writer would produce is the one
+                // that passes; comparing with it first spares a sound term, the
+                // common case, a second decoding.
+                if scores.len() != members.len() || payload.count() != entry.df {
+                    continue;
+                }
+                let member_ordinals: Vec<u32> =
+                    members.iter().map(|(ordinal, _)| *ordinal).collect();
+                let canonical = ordinals::encode_scored(&member_ordinals, &scores);
+                if canonical == stream_bytes {
+                    continue;
+                }
+                let same_bounds = Ordinals::open(stream_bytes, stream_bytes.len() as u64, true)
+                    .and_then(|found| {
+                        Ordinals::open(&canonical[..], canonical.len() as u64, true)
+                            .and_then(|wanted| Ok(found.bounds()? == wanted.bounds()?))
+                    })
+                    .unwrap_or(false);
+                if same_bounds {
+                    findings.warning(
+                        location(),
+                        "ordinals: the stream names its documents but is not encoded as the writer would",
+                    );
+                } else {
+                    findings.error(
+                        location(),
+                        "ordinal chunk bounds disagree with the payload buckets and document lengths",
+                    );
                 }
             }
-            if !payload_ok {
+            if channel_failed {
                 complete = false;
                 continue;
             }
-            if !members.is_empty() && max_bucket != entry.max_tf_bucket {
-                findings.error(
-                    location(),
-                    format!(
-                        "dictionary max_tf_bucket is {} but the largest payload bucket is {max_bucket}",
-                        entry.max_tf_bucket
-                    ),
-                );
-            }
-
-            // Bounds: what the payload buckets and lengths imply. The encoding
-            // is canonical, so the stream the writer would produce is the one
-            // that passes; comparing with it first spares a sound term, the
-            // common case, a second decoding.
-            if scores.len() != members.len() || payload.count() != entry.df {
-                continue;
-            }
-            let member_ordinals: Vec<u32> = members.iter().map(|(ordinal, _)| *ordinal).collect();
-            let canonical = ordinals::encode_scored(&member_ordinals, &scores);
-            if canonical == stream_bytes {
-                continue;
-            }
-            let same_bounds = Ordinals::open(stream_bytes, stream_bytes.len() as u64, true)
-                .and_then(|found| {
-                    Ordinals::open(&canonical[..], canonical.len() as u64, true)
-                        .and_then(|wanted| Ok(found.bounds()? == wanted.bounds()?))
-                })
-                .unwrap_or(false);
-            if same_bounds {
-                findings.warning(
-                    location(),
-                    "ordinals: the stream names its documents but is not encoded as the writer would",
-                );
-            } else {
-                findings.error(
-                    location(),
-                    "ordinal chunk bounds disagree with the payload buckets and document lengths",
-                );
+            if let Some(t) = trailer.as_ref() {
+                if union.len() as u32 != parent_entry.df {
+                    findings.error(
+                        location(),
+                        format!(
+                            "dictionary df is {} but the channels cover {} documents",
+                            parent_entry.df,
+                            union.len()
+                        ),
+                    );
+                }
+                if !union.is_empty() && parent_max != parent_entry.max_tf_bucket {
+                    findings.error(
+                        location(),
+                        format!(
+                            "dictionary max_tf_bucket is {} but the largest channel bucket is {parent_max}",
+                            parent_entry.max_tf_bucket
+                        ),
+                    );
+                }
+                // A listed channel has documents. Every other field is omitted
+                // from both directories: absence is the zero-posting form.
+                for f in 0..t.field_count {
+                    if let Some((_, child)) = channels.iter().find(|(field, _)| *field == f)
+                        && child.df() == 0
+                    {
+                        findings
+                            .error(location(), format!("field {f} is listed with no documents"));
+                    }
+                }
             }
         }
     }
@@ -752,6 +834,20 @@ mod tests {
         out
     }
 
+    /// The bytes of `term`'s payload stream within `bytes`.
+    fn payload_stream(bytes: &[u8], term: &str) -> std::ops::Range<usize> {
+        let entry = Segment::parse(bytes)
+            .unwrap()
+            .term(term)
+            .unwrap()
+            .unwrap()
+            .entry;
+        let sections = Segment::parse(bytes).unwrap().sections();
+        let payload_at = sections.header + sections.dictionary + sections.ordinals;
+        let at = payload_at + entry.payload.offset as usize;
+        at..at + entry.payload.len as usize
+    }
+
     /// The bytes of `term`'s ordinal stream within `bytes`.
     fn ordinal_stream(bytes: &[u8], term: &str) -> std::ops::Range<usize> {
         let entry = Segment::parse(bytes)
@@ -787,6 +883,37 @@ mod tests {
         assert!(report.is_clean(), "{}", messages(&report.findings));
         assert_eq!(report.doc_count, Some(450));
         assert_eq!(report.documents.len(), 450);
+    }
+
+    #[test]
+    fn single_column_accepts_stock_payload_prefixed_with_fch1() {
+        // count = 70 is the one-byte varint 0x46. The first skip slot is the
+        // data offset of entry 32. Thirty-one lists of 100_927 consecutive
+        // positions and one of 100_930 encode to 3_229_763 = 0x00314843 bytes
+        // (43 48 31 00). The stream therefore begins 46 43 48 31, which is
+        // FCH1, and the stock decoder accepts it. Single-column verify must
+        // too: it does not sniff that prefix.
+        let mut builder = SegmentBuilder::default();
+        for i in 0..70u32 {
+            let positions = if i < 31 {
+                100_927u32
+            } else if i == 31 {
+                100_930
+            } else {
+                1
+            };
+            builder
+                .add_document(
+                    tid(i / 7, (i % 7) as u16 + 1),
+                    (0..positions).map(|position| ("hit", position)),
+                )
+                .unwrap();
+        }
+        let bytes = builder.finish();
+        let range = payload_stream(&bytes, "hit");
+        assert_eq!(&bytes[range.start..range.start + 4], b"FCH1");
+        let report = verify_segment(&bytes);
+        assert!(report.is_clean(), "{}", messages(&report.findings));
     }
 
     #[test]

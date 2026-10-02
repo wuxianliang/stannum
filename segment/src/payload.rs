@@ -528,6 +528,16 @@ impl PayloadCursor<'_> {
         self.next_ordinal
     }
 
+    /// Byte offset a sequential walk has reached in a stream held whole.
+    /// `None` for a ranged stream, whose span is not the whole extent.
+    pub(crate) fn whole_position(&self) -> Option<usize> {
+        if self.ranged() {
+            None
+        } else {
+            Some(self.reader.position())
+        }
+    }
+
     /// Makes the reader cover the entry at `next_ordinal`: nothing to do for
     /// a whole stream; a ranged one fetches the span of skip slots holding it.
     fn load(&mut self) -> Result<()> {

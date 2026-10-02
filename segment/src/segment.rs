@@ -437,6 +437,46 @@ impl<'a> Term<'a> {
         }
         Payload::parse(self.areas.payload_bytes(self.entry.payload)?)
     }
+
+    /// Stock streams for each field that has postings, in field order.
+    ///
+    /// `field_count` is checked here: anything outside `2..=16` is corruption,
+    /// including `1`. A single-column term is [`Term::ordinals`] /
+    /// [`Term::payload`] / [`Term::df`] and must not call this. There is no
+    /// stock fallback when the `FCH1` directory is missing.
+    pub fn channels(&self, field_count: u8) -> Result<Vec<(u8, Term<'a>)>> {
+        if !(crate::trailer::MIN_FIELD_COUNT..=crate::trailer::MAX_FIELD_COUNT)
+            .contains(&field_count)
+        {
+            return Err(Error::Corrupt("channel field_count"));
+        }
+        let ordinals = self.entry.ordinals;
+        let payload = self.entry.payload;
+        let ordinal_bytes = self
+            .areas
+            .ordinals_bytes(ordinals.offset, ordinals.len as usize)
+            .map_err(|_| Error::Corrupt("channel ordinals"))?;
+        let payload_bytes = if self.areas.ranged_payloads() {
+            self.areas
+                .payload_range(payload.offset, payload.len as usize)
+                .map_err(|_| Error::Corrupt("channel payload"))?
+        } else {
+            self.areas
+                .payload_bytes(payload)
+                .map_err(|_| Error::Corrupt("channel payload"))?
+        };
+        let children = crate::channels::open_channels(
+            field_count,
+            ordinals,
+            ordinal_bytes,
+            payload,
+            payload_bytes,
+        )?;
+        Ok(children
+            .into_iter()
+            .map(|(field, entry)| (field, Term::new(entry, self.areas)))
+            .collect())
+    }
 }
 
 /// One term's stream within the ordinals area, fetched a range at a time.
@@ -2444,8 +2484,19 @@ mod tests {
         assert_eq!(trailer.row(0, 1), Some(1));
         assert_eq!(trailer.row(1, 0), Some(1));
         assert_eq!(trailer.row(1, 1), Some(1));
-        assert!(crate::verify::verify_segment(&blob).is_clean());
-        let merged = crate::merge::merge(
+        // Fielded-key extents have no FCH1 directory. Multi-column verify
+        // reports that; merge refuses the same input. Rewriting the trailer
+        // after a channel-aware merge is A.2.
+        let report = crate::verify::verify_segment(&blob);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("channel magic")),
+            "{:?}",
+            report.findings
+        );
+        let rejected = crate::merge::merge(
             &[crate::merge::MergeInput {
                 bytes: &blob,
                 dead: &dead,
@@ -2458,13 +2509,8 @@ mod tests {
             },
             || Ok(()),
         )
-        .unwrap();
-        let rewritten = Segment::parse(&merged).unwrap();
-        assert_eq!(rewritten.document_count(), 0);
-        let out = rewritten.trailer().unwrap();
-        assert_eq!(out.field_count, 2);
-        assert!(out.rows.is_empty());
-        assert!(out.df_agg.is_empty());
+        .unwrap_err();
+        assert!(rejected.to_string().contains("channel magic"), "{rejected}");
     }
 
     #[test]
@@ -2485,7 +2531,15 @@ mod tests {
         );
         assert_ne!(trailer.row(0, 0), Some(4));
         assert_eq!(trailer.field_totals, [2, 0]);
-        assert!(crate::verify::verify_segment(&blob).is_clean());
+        let report = crate::verify::verify_segment(&blob);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("channel magic")),
+            "{:?}",
+            report.findings
+        );
     }
 
     fn rewrite_df(blob: &[u8], df: &[(&str, u64)]) -> Vec<u8> {

@@ -743,25 +743,11 @@ pub(crate) mod tests {
 
         let dead = [BTreeSet::from([tid2]), BTreeSet::new()];
         let blobs = [a, b];
-        let merged = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
-        assert_eq!(merged, reference(&blobs, &dead).unwrap());
-        let segment = Segment::parse(&merged).unwrap();
-        let trailer = segment.trailer().unwrap();
-        assert_eq!(trailer.field_count, 2);
-        assert_eq!(trailer.df_agg.len(), 1);
-        assert_eq!(trailer.df_agg[0].token, "foo");
-        assert_eq!(
-            trailer.df_agg[0].df, 2,
-            "union of live docs, not sum of input df_agg"
-        );
-        assert_ne!(trailer.df_agg[0].df, a_df + b_df);
-        assert_eq!(segment.document_count(), 2);
-        assert_eq!(trailer.rows.len(), 4);
-        assert_eq!(trailer.row(0, 0), Some(1));
-        assert_eq!(trailer.row(0, 1), Some(1));
-        assert_eq!(trailer.row(1, 0), Some(1));
-        assert_eq!(trailer.row(1, 1), Some(0));
-        assert!(crate::verify::verify_segment(&merged).is_clean());
+        // The inputs are still fielded-key stock extents. Multi-column verify
+        // requires FCH1, so merge rejects them. Recounting the union on a
+        // channel directory is A.2.
+        let rejected = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap_err();
+        assert!(rejected.to_string().contains("channel magic"), "{rejected}");
     }
 
     #[test]
@@ -770,12 +756,7 @@ pub(crate) mod tests {
         let blob = fielded_segment(2, &[(tid, &["keep", "gone"])]);
         let dead = [BTreeSet::from([tid])];
         let blobs = [blob];
-        let merged = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
-        let segment = Segment::parse(&merged).unwrap();
-        assert_eq!(segment.document_count(), 0);
-        let trailer = segment.trailer().unwrap();
-        assert_eq!(trailer.field_count, 2);
-        assert!(trailer.rows.is_empty());
-        assert!(trailer.df_agg.is_empty());
+        let rejected = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap_err();
+        assert!(rejected.to_string().contains("channel magic"), "{rejected}");
     }
 }

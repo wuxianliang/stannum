@@ -495,6 +495,45 @@ impl<'a> Ordinals<'a> {
         self.count
     }
 
+    /// A chunked body must end at the stream length. Lists are checked in
+    /// [`Ordinals::open`]. A short chunk or bytes after the last one are
+    /// corruption, not a longer stream.
+    pub(crate) fn ensure_exact(&self) -> Result<()> {
+        let Body::Chunked {
+            directory,
+            chunks_at,
+            ..
+        } = &self.body
+        else {
+            return Ok(());
+        };
+        let mut expected = 0u64;
+        for entry in directory.chunks_exact(ENTRY) {
+            let (cardinality, at, size, _) = entry_chunk(entry);
+            if at != expected {
+                return Err(Error::Corrupt("ordinal stream length"));
+            }
+            let total = size + nibbles_len(cardinality, self.scored);
+            let start = chunks_at
+                .checked_add(at)
+                .ok_or(Error::Corrupt("ordinal stream length"))?;
+            self.source.fetch(start, total).map_err(|err| match err {
+                Error::Corrupt(msg) => Error::Corrupt(msg),
+                _ => Error::Corrupt("ordinal stream length"),
+            })?;
+            expected = expected
+                .checked_add(total as u64)
+                .ok_or(Error::Corrupt("ordinal stream length"))?;
+        }
+        let end = chunks_at
+            .checked_add(expected)
+            .ok_or(Error::Corrupt("ordinal stream length"))?;
+        if end != self.len {
+            return Err(Error::Corrupt("ordinal stream length"));
+        }
+        Ok(())
+    }
+
     /// Adds the chunk keys the stream occupies.
     fn keys(&self, into: &mut BTreeSet<u16>) {
         match &self.body {

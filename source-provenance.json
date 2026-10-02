@@ -993,6 +993,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7372fc6fb8f0bbf469f1b6b3340dbe8af787bcdf."
     },
+    "segment/src/channels.rs": {
+      "owner": "ben",
+      "evidence": "STN4 format delta: FCH1 per-field channel directory inside a term extent (design §1.2). No upstream counterpart."
+    },
     "segment/src/dead.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation: dead lists decoded as a bitmap over segment ordinals, written for Stannum."

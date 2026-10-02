@@ -25,6 +25,9 @@
 //! * [`payload`]: per-document term-frequency bucket and token positions, in
 //!   the same order as the term's ordinals, with a skip table addressed by
 //!   rank so Boolean queries never decode it.
+//! * [`channels`]: on a multi-column segment, the `FCH1` directory that
+//!   multiplexes one stock ordinal stream and one stock payload stream per
+//!   present field inside a single term extent.
 //! * [`forward`]: one document's tokens as a single record for a mutable write
 //!   buffer, so an insert is one append rather than one per term.
 //! * [`set`]: intersection, union and difference over any cursors.
@@ -46,6 +49,7 @@ mod varint;
 
 pub mod bound;
 pub mod cache;
+pub mod channels;
 pub mod dead;
 pub mod dictionary;
 pub mod docs;
