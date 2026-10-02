@@ -89,9 +89,15 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
   or expose that repo; skip without blocking other steps.
 - **New source files** need a `source-provenance.json` entry in the same
   commit (STN3 loop rule).
-- **Do not** call `Index::expand` for `field_count` in `2..=16`. Do not sniff
-  `FCH1` on single-column extents. Do not score or bound a multi-column term
-  from the parent nibble alone.
+- **Do not** call `Index::expand` for `field_count` in `2..=16` — but
+  during Phase A (before B.1), the LEGACY fielded-terms adapter still
+  exists and may serve LEGACY indexes only; STN4 multi-column query paths
+  MUST fail with a known unsupported error rather than route through the
+  legacy adapter (silent empty/wrong results are a bug). A.5's expected
+  multi-column census reds are unsupported-path failures, not silent
+  empties. B.1 is the first step that enables multi-column STN4 expansion.
+  Do not sniff `FCH1` on single-column extents. Do not score or bound a
+  multi-column term from the parent nibble alone.
 
 ---
 
@@ -434,14 +440,20 @@ D.\* after C.2. E.1 may already have started after A.4.
     - Ranked p50 per corpus: `advisory_p50_gate.pass == true` **or** that
       corpus's `advisory_p50_gate.waiver` names the workload, the ratio, and
       why staying is cheaper than another cut. **No waiver, no pass.** A
-      follow-up ticket is not a waiver. p99 labeled, not a gate.
+      follow-up ticket is not a waiver. **Both corpora's result objects
+      contain labeled p99 fields** (informational, not a gate).
     - A mandatory miss **stops and escalates** (design §9 next fallback:
       recorded divergence + `contract_version` bump). Do not start D.\*.
     - `python3 -m unittest discover -s benchmarks -p 'test_*fielded_poc.py'`
       (harness unit tests) green.
   - Review focus: design §5, §8 C.2; 4.6 JSON as the comparison artifact.
 
-- [ ] **C.3 Dead codec**
+- [ ] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
+  exports and fixtures, **AND the STNF-v1 df-sidecar query reader +
+  query-facing `DfEntry` APIs**; retain only the isolated STNF-v1 trailer
+  parser needed for `ValidV1`/`StaleFielded` classification. Done when:
+  `query_total_df` sums parent `TermEntry.df`; `grep -r 'df_agg.*section'
+  postgres/src/fields/` finds no query-path reader; workspace builds clean.
   - Goal: delete the fielded-terms codec after C.2 proves the representation.
     **Timing:** after C.2 green; may overlap D.\*; must not start before C.1
     (B.1 still compiles tests against the file). Generation stays the buffer
@@ -586,7 +598,13 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     kind-5+LSG → `Corrupt` not the §8 string; kind-1+LSG → `PreStn3`;
     untagged zero-term restart+INSERT → `StaleFielded`/`MixedFielded`, no
     write; tagged zero-term INSERT/flush/restart → `Current`).
-  - Done when: job green in CI. Exact rebuild strings pinned.
+  - Done when: the `two-artifact-migration` job (`.github/workflows/ci.yml`,
+    `workflow_dispatch` + scheduled) is green in CI, and the job's log shows
+    machine-checkable assertions for every design §6.3 fixture row:
+    `PreStn3`, `StaleFielded`, `MixedFielded`, `Corrupt` (incl. kind-5+LSG);
+    exact rebuild/migration strings; no-page-dirty on rejected writes;
+    tagged/untagged zero-term behavior; kind-1 vs kind-5 precedence. The
+    job must fail if any classification or string mismatches.
   - Review focus: design §6.1, §6.3 fixture table, §8 E.1; parent §8
     procedure steps 1–6.
 
@@ -651,7 +669,7 @@ here.**
 ```
 A.1 ── A.2 ── A.2.1 ── A.3 ── A.4 ── A.4.1 ── A.5
               │                         │
-              └─ B.1 ── B.2 ── B.3      │
+              └─ B.1 ── B.2 ── B.3      │   (B.1 from A.2, NOT from A.2.1)
                                         │
               A.4 ──────────────────────┴── C.1(GATE) ◄── B.2
                                               │
