@@ -267,7 +267,7 @@ decision (design §5.2) — do not silently proceed.
     merged); every corruption class rejects at open.
   - Review focus: design §5.1 wire grammar; verifier vs open-time split.
 
-- [ ] **4.4 Fused WAND bound + property tests**
+- [x] **4.4 Fused WAND bound + property tests** (2233d78)
   - Scope: bound = `saturate(max_tf*, min_len*)` with min-floor; interval
     truncation at the earlier of covering-block ends and any mask-internal
     stream's next block/chunk/sub-block start; per-field stream indexed with
