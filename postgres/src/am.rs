@@ -27,7 +27,7 @@ pub(crate) fn amhandler(_fcinfo: pg_sys::FunctionCallInfo) -> PgBox<pg_sys::Inde
         unsafe { PgBox::<pg_sys::IndexAmRoutine>::alloc_node(pg_sys::NodeTag::T_IndexAmRoutine) };
     routine.amstrategies = BOUND_STRATEGY;
     routine.amsupport = 0;
-    routine.amcanmulticol = false;
+    routine.amcanmulticol = true;
     routine.amsearcharray = false;
     routine.amkeytype = pg_sys::InvalidOid;
     routine.amvalidate = Some(amvalidate);
@@ -172,6 +172,7 @@ unsafe extern "C-unwind" fn ambeginscan(
 ) -> pg_sys::IndexScanDesc {
     let scan = unsafe { pg_sys::RelationGetIndexScan(index, nkeys, norderbys) };
     unsafe {
+        let _ = crate::storage::present(index);
         (*scan).opaque = new_scan_state().cast();
     }
     scan

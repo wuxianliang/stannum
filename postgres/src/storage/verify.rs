@@ -40,7 +40,8 @@ use segment::Tid;
 use segment::verify::{Finding, Findings, verify_dead_list, verify_forward_stream, verify_segment};
 
 use super::layout::{
-    self, BufferState, CHAIN_CAPACITY, KIND_BUFFER, KIND_FREE, KIND_META, KIND_RUN, Meta, NONE, Run,
+    self, BufferState, CHAIN_CAPACITY, KIND_BUFFER, KIND_ENVELOPE, KIND_FREE, KIND_META, KIND_RUN,
+    Meta, MetaPageClass, NONE, Run,
 };
 use super::{Buffer, blocks, decode_page_table, tid_of, tokenizer_for, tokens_of};
 
@@ -67,6 +68,7 @@ fn kind_name(kind: u8) -> String {
         KIND_BUFFER => "buffer".to_owned(),
         KIND_RUN => "run".to_owned(),
         KIND_FREE => "FREE".to_owned(),
+        KIND_ENVELOPE => "envelope".to_owned(),
         other => format!("unknown kind {other}"),
     }
 }
@@ -153,9 +155,12 @@ impl Checker {
             );
             return None;
         }
-        if kind == KIND_META {
+        if kind == KIND_META || kind == KIND_ENVELOPE {
             if block != 0 {
-                self.error(owner.to_owned(), format!("page {block} is a meta page"));
+                self.error(
+                    owner.to_owned(),
+                    format!("page {block} is a {} page", kind_name(kind)),
+                );
                 return None;
             }
             return Some(PageData {
@@ -494,20 +499,20 @@ impl Checker {
 
     unsafe fn check_meta(&mut self) -> Option<Meta> {
         let page = unsafe { self.page(0, "meta page") }?;
-        if page.kind != KIND_META {
+        if page.kind != KIND_META && page.kind != KIND_ENVELOPE {
             self.error(
                 "meta page",
                 format!("page 0 has kind {} instead of meta", kind_name(page.kind)),
             );
             return None;
         }
-        let meta = match Meta::decode(&page.data) {
-            Ok(meta) => meta,
-            Err(layout::MetaError::PreStn3) => {
+        let meta = match layout::classify_meta_kind(page.kind, &page.data) {
+            MetaPageClass::Current(meta) => meta,
+            MetaPageClass::PreStn3 => {
                 self.error("meta page", segment::Error::PreStn3);
                 return None;
             }
-            Err(layout::MetaError::Invalid(message)) => {
+            MetaPageClass::Corrupt(message) => {
                 self.error("meta page", message);
                 return None;
             }

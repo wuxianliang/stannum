@@ -3,15 +3,21 @@
 //
 // See LICENSE in the repository root for license terms.
 
+use crate::bm25::Bm25Overrides;
+use crate::fields::{Lookup, all_fields_mask, fused_score, lookup, raw_tf_from_hits};
 use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
 use crate::score::{
-    PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, visible_tid_pairs,
+    PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, check_query_fields_on,
+    visible_tid_pairs,
 };
+use crate::storage::FieldMeta;
 use pgrx::iter::TableIterator;
 use pgrx::{FromDatum, PgRelation, name, pg_sys};
 use rustc_hash::FxHashMap;
 use segment::Tid;
+use segment::index::Index;
 use std::collections::BTreeSet;
+use tinql::runtime::{Query, parse_tinql_to_query};
 use tokenizer::CompiledTokenizerPipeline;
 
 type SearchRow = (pg_sys::ItemPointerData, f32, Option<String>);
@@ -119,12 +125,15 @@ unsafe fn key_attnums(metadata: &pg_sys::FormData_pg_index) -> Vec<i16> {
     (0..keys).map(|position| values[position]).collect()
 }
 
-/// The field names a multi-column index's meta trailer recorded.
-///
-/// STN3 has no field-aware meta until Phase 5. Multi-column `CREATE INDEX`
-/// is refused by `amcanmulticol = false`, so this branch is unreachable.
-unsafe fn field_names(_index: &PgRelation) -> Vec<String> {
-    pgrx::error!("stannum.search() requires a field-aware multi-column index")
+/// The field names a multi-column index's envelope recorded.
+unsafe fn field_names(index: &PgRelation) -> Vec<String> {
+    unsafe {
+        crate::storage::fields_meta(index.as_ptr())
+            .map(|meta| meta.names)
+            .unwrap_or_else(|| {
+                pgrx::error!("stannum.search() requires a field-aware multi-column index")
+            })
+    }
 }
 
 fn validate_snippet(snippet: &str) -> &'static str {
@@ -134,6 +143,213 @@ fn validate_snippet(snippet: &str) -> &'static str {
         "ansi" => "ansi",
         _ => pgrx::error!("stannum.search() snippet must be one of: none, html, ansi"),
     }
+}
+
+struct FieldedTerm {
+    text: String,
+    mask: u16,
+    boost: f32,
+}
+
+fn collect_fielded_terms(
+    query: &Query,
+    names: &[String],
+    mask: u16,
+    boost: f32,
+    out: &mut Vec<FieldedTerm>,
+) {
+    match query {
+        Query::Term(text) => out.push(FieldedTerm {
+            text: text.clone(),
+            mask,
+            boost,
+        }),
+        Query::Field { name, inner } => {
+            let Some(ordinal) = names.iter().position(|stored| stored == name) else {
+                pgrx::error!("stannum: unknown field '{name}'");
+            };
+            collect_fielded_terms(inner, names, 1u16 << ordinal, boost, out);
+        }
+        Query::Boost { factor, inner } => {
+            collect_fielded_terms(inner, names, mask, boost * factor, out);
+        }
+        Query::And(left, right) => {
+            collect_fielded_terms(left, names, mask, boost, out);
+            collect_fielded_terms(right, names, mask, boost, out);
+        }
+        Query::Or(left, right) => {
+            collect_fielded_terms(left, names, mask, boost, out);
+            collect_fielded_terms(right, names, mask, boost, out);
+        }
+        Query::Conjunction(children)
+        | Query::Disjunction { children, .. }
+        | Query::AtLeast { children, .. } => {
+            for child in children {
+                collect_fielded_terms(child, names, mask, boost, out);
+            }
+        }
+        Query::Not(inner) => collect_fielded_terms(inner, names, mask, boost, out),
+        Query::MatchAll
+        | Query::Span { .. }
+        | Query::SpanExpr { .. }
+        | Query::Regex(_)
+        | Query::Range { .. }
+        | Query::Fuzzy { .. } => {}
+    }
+}
+
+fn fielded_query_is_conjunction(query: &Query) -> bool {
+    matches!(
+        query,
+        Query::And(_, _) | Query::Conjunction(_) | Query::AtLeast { .. }
+    )
+}
+
+fn fielded_scores(
+    index: &PgRelation,
+    query: &str,
+    fields: &FieldMeta,
+    k1: Option<f32>,
+    b: Option<f32>,
+) -> FxHashMap<Tid, (f32, u32)> {
+    let tokenizer = unsafe { crate::storage::index_tokenizer(index.as_ptr()) };
+    let parsed = parse_tinql_to_query(query, tokenizer.as_ref()).unwrap_or_else(|error| {
+        crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
+    });
+    check_query_fields_on(&parsed, Some(&fields.names));
+    let field_count = u8::try_from(fields.names.len()).unwrap_or(16);
+    let mut terms = Vec::new();
+    collect_fielded_terms(
+        &parsed,
+        &fields.names,
+        all_fields_mask(field_count),
+        1.0,
+        &mut terms,
+    );
+    if terms.is_empty() {
+        pgrx::error!("stannum.search() does not support this query on a multi-column index");
+    }
+    let defaults = unsafe { crate::options::bm25(index.as_ptr()) };
+    let params = Bm25Overrides { k1, b }
+        .resolve(defaults)
+        .checked()
+        .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}"));
+    let conjunction = fielded_query_is_conjunction(&parsed);
+    let view = unsafe { crate::storage::view(index.oid()) };
+    let mut total_docs = 0u64;
+    let mut field_totals = vec![0u64; fields.names.len()];
+    let mut df = vec![0u64; terms.len()];
+    for (source_index, ((source, _), norms)) in
+        view.sources.iter().zip(view.field_norms.iter()).enumerate()
+    {
+        let _ = source_index;
+        total_docs += u64::from(source.document_count());
+        if let Some(norms) = norms {
+            for (total, extra) in field_totals.iter_mut().zip(&norms.field_totals) {
+                *total += extra;
+            }
+        }
+        for (term_index, term) in terms.iter().enumerate() {
+            match lookup(&**source, &term.text, term.mask, field_count) {
+                Ok(Lookup::Term(logical)) => df[term_index] += logical.df_agg,
+                Ok(Lookup::Terms(_) | Lookup::Overflow) => {}
+                Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
+            }
+        }
+    }
+    let mut scores: FxHashMap<Tid, (f32, u32)> = FxHashMap::default();
+    for (source_index, ((source, _), (dead, norms))) in view
+        .sources
+        .iter()
+        .zip(view.dead_sets.iter().zip(view.field_norms.iter()))
+        .enumerate()
+    {
+        let _ = source_index;
+        let Some(norms) = norms else {
+            pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
+        };
+        let table = source
+            .doc_table()
+            .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
+        for (term_index, term) in terms.iter().enumerate() {
+            let logical = match lookup(&**source, &term.text, term.mask, field_count) {
+                Ok(Lookup::Term(logical)) => logical,
+                Ok(Lookup::Terms(_) | Lookup::Overflow) => continue,
+                Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
+            };
+            if logical.streams.is_empty() {
+                continue;
+            }
+            let mut cursor = logical
+                .cursor()
+                .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+            while let Some(ordinal) = cursor.current_ordinal() {
+                if dead.contains(ordinal) {
+                    cursor
+                        .advance(ordinal.saturating_add(1))
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                    continue;
+                }
+                let tid = table
+                    .tid_at(ordinal)
+                    .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
+                let hits = cursor
+                    .field_hits()
+                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                let raw = raw_tf_from_hits(&hits, field_count);
+                let lengths = norms.lengths(ordinal).unwrap_or_else(|| {
+                    pgrx::error!("stannum: STNF row missing for ordinal {ordinal}")
+                });
+                let score = fused_score(
+                    term.mask,
+                    &fields.weights,
+                    &raw,
+                    &lengths,
+                    &field_totals,
+                    total_docs,
+                    df[term_index],
+                    term.boost,
+                    params,
+                );
+                let entry = scores.entry(tid).or_insert((0.0, 0));
+                entry.0 += score;
+                entry.1 += 1;
+                cursor
+                    .advance(ordinal.saturating_add(1))
+                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+            }
+        }
+    }
+    if conjunction {
+        let needed = terms.len() as u32;
+        scores.retain(|_, (_, hits)| *hits >= needed);
+    }
+    scores
+}
+
+fn fielded_matching_tids(index: &PgRelation, query: &str, fields: &FieldMeta) -> BTreeSet<Tid> {
+    fielded_scores(index, query, fields, None, None)
+        .into_keys()
+        .collect()
+}
+
+fn fielded_ranked_rows(
+    index: &PgRelation,
+    query: &str,
+    fields: &FieldMeta,
+    k1: Option<f32>,
+    b: Option<f32>,
+) -> Vec<(f32, VisibleTid)> {
+    let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
+    let scores = fielded_scores(index, query, fields, k1, b);
+    let roots: BTreeSet<Tid> = scores.keys().copied().collect();
+    let visible = unsafe { visible_tid_pairs(heap_oid, roots) };
+    let mut rows: Vec<_> = visible
+        .into_iter()
+        .filter_map(|row| scores.get(&row.indexed_tid).map(|(score, _)| (*score, row)))
+        .collect();
+    rank_rows(&mut rows);
+    rows
 }
 
 fn pointer_of(tid: Tid) -> pg_sys::ItemPointerData {
@@ -416,6 +632,27 @@ pub(crate) fn search(
     let keys = validate_shape(&index, mode != "none");
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
     let index_oid = index.oid();
+    if let Some(fields) = unsafe { crate::storage::fields_meta(index.as_ptr()) } {
+        let rows = fielded_ranked_rows(&index, query, &fields, k1, b);
+        let limit = if limit == 0 {
+            return TableIterator::new(Vec::new());
+        } else {
+            usize::try_from(limit).expect("non-negative limit fits usize")
+        };
+        let rows: Vec<_> = rows.into_iter().take(limit).collect();
+        let pipeline = unsafe { crate::storage::tokenizer_by_oid(index_oid) };
+        let rows = fetch_snippet(
+            heap_oid,
+            &keys,
+            pipeline.as_ref(),
+            query,
+            mode,
+            begin_tag,
+            end_tag,
+            rows,
+        );
+        return TableIterator::new(rows);
+    }
     let mut scorer = build_standalone_scorer(heap_oid, index_oid, query, k1, b);
     if limit == 0 {
         return TableIterator::new(Vec::new());
@@ -455,8 +692,12 @@ pub(crate) fn search_count(index: PgRelation, query: Option<&str>) -> i64 {
     }
     validate_shape(&index, false);
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
-    let scorer = build_standalone_scorer(heap_oid, index.oid(), query, None, None);
-    let roots = scorer.matching_tids();
+    let roots = if let Some(fields) = unsafe { crate::storage::fields_meta(index.as_ptr()) } {
+        fielded_matching_tids(&index, query, &fields)
+    } else {
+        let scorer = build_standalone_scorer(heap_oid, index.oid(), query, None, None);
+        scorer.matching_tids()
+    };
     let visible = unsafe { visible_tid_pairs(heap_oid, roots) };
     i64::try_from(visible.len())
         .unwrap_or_else(|_| pgrx::error!("stannum.search_count() result is too large"))

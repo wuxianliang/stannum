@@ -5444,28 +5444,38 @@ pub(crate) unsafe fn pick_index(
 }
 
 /// Field syntax on a fieldless (single-column) index is the 0.4.0 error.
-/// Unknown-field and BM25F keys are Phase 5.
+/// A recorded plan accepts a named field or reports `unknown field`.
 pub(crate) fn check_query_fields(query: &Query) {
-    walk_query_fields(query);
+    check_query_fields_on(query, None);
 }
 
-fn walk_query_fields(query: &Query) {
+pub(crate) fn check_query_fields_on(query: &Query, fields: Option<&[String]>) {
+    walk_query_fields(query, fields);
+}
+
+fn walk_query_fields(query: &Query, fields: Option<&[String]>) {
     match query {
-        Query::Field { .. } => {
-            pgrx::error!("stannum: field syntax requires a multi-column index");
-        }
+        Query::Field { name, inner } => match fields {
+            None => pgrx::error!("stannum: field syntax requires a multi-column index"),
+            Some(names) => {
+                if !names.iter().any(|stored| stored == name) {
+                    pgrx::error!("stannum: unknown field '{name}'");
+                }
+                walk_query_fields(inner, fields);
+            }
+        },
         Query::And(left, right) | Query::Or(left, right) => {
-            walk_query_fields(left);
-            walk_query_fields(right);
+            walk_query_fields(left, fields);
+            walk_query_fields(right, fields);
         }
         Query::Conjunction(children)
         | Query::Disjunction { children, .. }
         | Query::AtLeast { children, .. } => {
             for child in children {
-                walk_query_fields(child);
+                walk_query_fields(child, fields);
             }
         }
-        Query::Not(inner) | Query::Boost { inner, .. } => walk_query_fields(inner),
+        Query::Not(inner) | Query::Boost { inner, .. } => walk_query_fields(inner, fields),
         Query::Term(_)
         | Query::Span { .. }
         | Query::SpanExpr { .. }

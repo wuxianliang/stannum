@@ -365,6 +365,10 @@ impl Tables {
         Ok(totals)
     }
 
+    pub(crate) fn norms(&self) -> Result<(u8, Vec<u64>, Vec<u32>)> {
+        Ok((self.field_count, self.field_totals()?, self.rows.clone()))
+    }
+
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
         let totals = self.field_totals()?;
         let df_agg: Vec<(&str, u64)> = self

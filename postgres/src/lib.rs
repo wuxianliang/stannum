@@ -236,10 +236,202 @@ mod tests {
         );
     }
 
-    #[pg_test(error = "access method \"stannum\" does not support multicolumn indexes")]
-    fn multi_column_create_index_still_fails() {
-        Spi::run("CREATE TABLE field_docs (id int, title text, body text)").unwrap();
-        Spi::run("CREATE INDEX field_idx ON field_docs USING stannum (title, body)").unwrap();
+    #[pg_test]
+    fn multi_column_create_index_is_accepted() {
+        Spi::run(
+            "CREATE TABLE field_docs (id int, title text, body text);
+             INSERT INTO field_docs VALUES (1, 'needle', 'pad');
+             CREATE INDEX field_idx ON field_docs USING stannum (title, body);",
+        )
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('field_idx', 'needle')").unwrap(),
+            Some(1)
+        );
+    }
+
+    #[pg_test]
+    fn multi_column_sixteen_keys_are_accepted() {
+        Spi::run(
+            "CREATE TABLE wide16 (id int, c0 text, c1 text, c2 text, c3 text, c4 text, c5 text,
+             c6 text, c7 text, c8 text, c9 text, c10 text, c11 text, c12 text, c13 text, c14 text, c15 text);
+             INSERT INTO wide16 VALUES (1,'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p');
+             CREATE INDEX wide16_idx ON wide16 USING stannum(
+             c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15);",
+        )
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('wide16_idx', 'a')").unwrap(),
+            Some(1)
+        );
+    }
+
+    #[pg_test(error = "stannum multi-column indexes support at most 16 key columns")]
+    fn multi_column_seventeen_keys_are_rejected() {
+        Spi::run(
+            "CREATE TABLE wide17 (id int, c0 text, c1 text, c2 text, c3 text, c4 text, c5 text,
+             c6 text, c7 text, c8 text, c9 text, c10 text, c11 text, c12 text, c13 text, c14 text,
+             c15 text, c16 text);
+             CREATE INDEX wide17_idx ON wide17 USING stannum(
+             c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16);",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(error = "stannum multi-column indexes reject expression keys")]
+    fn multi_column_expression_keys_are_rejected() {
+        Spi::run(
+            "CREATE TABLE expr_docs (id int, title text, body text);
+             CREATE INDEX expr_idx ON expr_docs USING stannum((lower(title)), body);",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(error = "access method \"stannum\" does not support included columns")]
+    fn multi_column_include_is_rejected() {
+        Spi::run(
+            "CREATE TABLE inc_docs (id int, body text);
+             CREATE INDEX inc_idx ON inc_docs USING stannum(body) INCLUDE (id);",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(error = "REINDEX to change field_weights")]
+    fn field_weights_alter_set_is_rejected() {
+        Spi::run(
+            "CREATE TABLE weights_docs (id int, title text, body text);
+             INSERT INTO weights_docs VALUES (1, 'beer', 'wine');
+             CREATE INDEX weights_idx ON weights_docs USING stannum(title, body)
+               WITH (field_weights = 'title:3,body:1');
+             ALTER INDEX weights_idx SET (field_weights = 'title:2,body:1');",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(error = "REINDEX to change field_weights")]
+    fn field_weights_alter_reset_is_rejected() {
+        Spi::run(
+            "CREATE TABLE weights_reset (id int, title text, body text);
+             INSERT INTO weights_reset VALUES (1, 'beer', 'wine');
+             CREATE INDEX weights_reset_idx ON weights_reset USING stannum(title, body)
+               WITH (field_weights = 'title:3,body:1');
+             ALTER INDEX weights_reset_idx RESET (field_weights);",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(
+        error = "stannum index rename_idx: the indexed columns changed since the index was built; REINDEX required"
+    )]
+    fn multi_column_rename_requires_reindex() {
+        Spi::run(
+            "CREATE TABLE rename_docs (id int, title text, body text);
+             INSERT INTO rename_docs VALUES (1, 'needle', 'pad');
+             CREATE INDEX rename_idx ON rename_docs USING stannum(title, body);
+             ALTER TABLE rename_docs RENAME COLUMN title TO headline;
+             SELECT stannum.search_count('rename_idx', 'needle');",
+        )
+        .unwrap();
+    }
+
+    #[pg_test]
+    fn envelope_keeps_alter_tokenizer() {
+        Spi::run(
+            "CREATE TABLE tok_docs (id int, body text);
+             INSERT INTO tok_docs VALUES (1, 'needle');
+             CREATE INDEX tok_idx ON tok_docs USING stannum(body);
+             ALTER INDEX tok_idx SET (tokenizer = unicode);",
+        )
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('tok_idx', 'needle')").unwrap(),
+            Some(1)
+        );
+        let kind = Spi::get_one::<String>(
+            "SELECT kind FROM stannum.index_page_kinds('tok_idx') WHERE block = 0",
+        )
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("envelope"));
+    }
+
+    #[pg_test]
+    fn jieba_envelope_round_trips_analysis_stamp() {
+        Spi::run(
+            "CREATE TABLE jieba_env (id int, body text);
+             INSERT INTO jieba_env VALUES (1, 'hello');
+             CREATE INDEX jieba_env_idx ON jieba_env USING stannum(body) WITH (tokenizer = jieba);",
+        )
+        .unwrap();
+        let matches =
+            Spi::get_one::<bool>("SELECT matches FROM stannum.index_analysis('jieba_env_idx')")
+                .unwrap();
+        assert_eq!(matches, Some(true));
+        let fingerprint = Spi::get_one::<String>(
+            "SELECT to_hex(recorded_dict_fingerprint) FROM stannum.index_analysis('jieba_env_idx')",
+        )
+        .unwrap();
+        assert_eq!(fingerprint.as_deref(), Some("6855a0736155f3dd"));
+        let kind = Spi::get_one::<String>(
+            "SELECT kind FROM stannum.index_page_kinds('jieba_env_idx') WHERE block = 0",
+        )
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("envelope"));
+    }
+
+    #[pg_test]
+    fn multi_column_arithmetic_row1_bits_match_0_4_0() {
+        Spi::run(
+            "CREATE TABLE row1_docs (id int, title text, body text);
+             INSERT INTO row1_docs VALUES
+               (1, 'needle', 'pad'),
+               (2, 'pad', 'needle'),
+               (3, 'needle needle', 'pad');
+             CREATE INDEX row1_idx ON row1_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let rows = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT d.id, encode(float4send(s.score::real), 'hex')
+                     FROM row1_docs d
+                     JOIN stannum.search('row1_idx'::regclass, 'needle', \"limit\" => 10, snippet => 'none') s
+                       ON d.ctid = s.ctid
+                     ORDER BY s.score DESC, d.ctid",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|row| {
+                    (
+                        row.get::<i32>(1).unwrap().unwrap(),
+                        row.get::<String>(2).unwrap().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            vec![
+                (3, "3e2e071f".to_owned()),
+                (1, "3e113925".to_owned()),
+                (2, "3e113925".to_owned()),
+            ]
+        );
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stannum.search_count('row1_idx', 'needle')").unwrap(),
+            Some(3)
+        );
+    }
+
+    #[pg_test(error = "stannum: field syntax requires a multi-column index")]
+    fn single_column_rejects_field_syntax() {
+        Spi::run(
+            "CREATE TABLE single_field (id int, body text);
+             INSERT INTO single_field VALUES (1, 'needle');
+             CREATE INDEX single_field_idx ON single_field USING stannum(body);
+             SELECT stannum.search_count('single_field_idx', 'title:(needle)');",
+        )
+        .unwrap();
     }
 
     /// Scaffold until Phase 5. `amcanmulticol` stays false, so these cannot run.
@@ -4221,16 +4413,51 @@ mod tests {
         Spi::get_one::<i64>("SELECT count(*) FROM c_read WHERE body ==> 'needle'").unwrap();
     }
 
-    /// LSG4 is the 0.4.0 multi-column magic. Opening it is the migration
-    /// error, not generic `segment magic` corruption. (`XXXX` is still
-    /// corruption, covered by the test above.)
+    /// Kind-1 + LSG4 is the 0.4.0 predecessor: migration, not generic
+    /// `segment magic` corruption. (`XXXX` is still corruption, covered
+    /// by the test above.)
     #[pg_test(error = "stannum: index requires REINDEX to 0.5.0 (pre-STN3 segment)")]
     fn lsg4_segment_requires_reindex_not_corruption() {
         let root = corruptible("c_lsg");
-        // LSG4
+        // LSG4 on a kind-1 meta page (recognizable 0.4.0 layout).
         corrupt("c_lsg_idx", root, DATA_AT, "4c534734");
+        corrupt("c_lsg_idx", 0, KIND_AT, "01");
         Spi::run("SET LOCAL enable_seqscan = off").unwrap();
         Spi::get_one::<i64>("SELECT count(*) FROM c_lsg WHERE body ==> 'needle'").unwrap();
+    }
+
+    /// Kind 5 beside an LSG segment is mixed-format corruption, not migration.
+    #[pg_test(error = "stannum: mixed-format index (KIND_ENVELOPE with a legacy LSG segment)")]
+    fn envelope_beside_lsg_is_mixed_format_corruption() {
+        let root = corruptible("c_mix");
+        corrupt("c_mix_idx", root, DATA_AT, "4c534734");
+        Spi::run("SET LOCAL enable_seqscan = off").unwrap();
+        Spi::get_one::<i64>("SELECT count(*) FROM c_mix WHERE body ==> 'needle'").unwrap();
+    }
+
+    /// Plant a recognizable 0.4.0 kind-1 meta page. INSERT must raise the
+    /// migration error. `storage::insert` calls `present`/`open_index` before
+    /// any exclusive lock or page write, so the error is a no-write fence.
+    #[pg_test(error = "stannum: index requires REINDEX to 0.5.0 (pre-STN3 segment)")]
+    fn insert_before_reindex_of_kind1_meta_does_not_write() {
+        Spi::run(
+            "CREATE TABLE fence_docs(id int, body text);
+             INSERT INTO fence_docs VALUES (1, 'before');
+             CREATE INDEX fence_idx ON fence_docs USING stannum(body);",
+        )
+        .unwrap();
+        let kind = Spi::get_one::<String>(
+            "SELECT kind FROM stannum.index_page_kinds('fence_idx') WHERE block = 0",
+        )
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("envelope"));
+        corrupt("fence_idx", 0, KIND_AT, "01");
+        let kind = Spi::get_one::<String>(
+            "SELECT kind FROM stannum.index_page_kinds('fence_idx') WHERE block = 0",
+        )
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("meta"));
+        Spi::run("INSERT INTO fence_docs VALUES (2, 'after')").unwrap();
     }
 
     // --- Tokenizer settings agree across plans ----------------------------------
@@ -4798,7 +5025,7 @@ mod tests {
                 bytes[layout::PAGE_SIZE - layout::SPECIAL_SIZE + 5],
                 layout::VERSION
             );
-            assert_eq!(layout::kind(&bytes), Ok(layout::KIND_META));
+            assert_eq!(layout::kind(&bytes), Ok(layout::KIND_ENVELOPE));
         }
     }
 

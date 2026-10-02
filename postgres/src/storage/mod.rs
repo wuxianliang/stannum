@@ -46,12 +46,13 @@ pub mod wal;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::CStr;
 use std::rc::Rc;
 
 use layout::{
-    BufferState, CHAIN_CAPACITY, FLAG_REMOVAL_HORIZONS, KIND_BUFFER, KIND_FREE, KIND_META,
-    KIND_RUN, MAX_PENDING, MAX_SEGMENTS, Meta, NONE, PAGE_SIZE, Pending, Run, SPECIAL_SIZE,
-    SegmentEntry,
+    BufferState, CHAIN_CAPACITY, EnvelopeField, FLAG_REMOVAL_HORIZONS, KIND_BUFFER, KIND_ENVELOPE,
+    KIND_FREE, KIND_RUN, MAX_PENDING, MAX_SEGMENTS, Meta, MetaPageClass, NONE, PAGE_SIZE, Pending,
+    Run, SPECIAL_SIZE, SegmentEntry,
 };
 use pgrx::{
     FromDatum, GucContext, GucFlags, GucRegistry, GucSetting, PgLogLevel, PgRelation,
@@ -68,6 +69,8 @@ use segment::segment::{Lengths, Reader, Term};
 use segment::segment::{Segment, SegmentBuilder};
 use segment::set::{Cursor, Difference, Intersection};
 use tinql::runtime::Query;
+
+use crate::fields::fielded_key;
 use tinql::runtime::plan::{Limits, plan};
 use tokenizer::{CompiledTokenizerPipeline, Tokenizer};
 
@@ -389,7 +392,7 @@ unsafe fn write_page(
             }
             let page = std::slice::from_raw_parts_mut(raw.cast(), PAGE_SIZE);
             checked(layout::write(page, kind, payload));
-            if kind == KIND_META {
+            if kind == KIND_ENVELOPE {
                 layout::set_flags(page, meta_flags(index));
             }
             pg_sys::CritSectionCount += 1;
@@ -413,7 +416,7 @@ unsafe fn write_page(
         }
         let page = std::slice::from_raw_parts_mut(raw.cast::<u8>(), PAGE_SIZE);
         checked(layout::write(page, kind, payload));
-        if kind == KIND_META {
+        if kind == KIND_ENVELOPE {
             layout::set_flags(page, meta_flags(index));
         }
         pg_sys::GenericXLogFinish(wal);
@@ -428,7 +431,30 @@ fn is_permanent(index: pg_sys::Relation) -> bool {
     unsafe { (*(*index).rd_rel).relpersistence.to_ne_bytes()[0] == b'p' }
 }
 
+/// Recorded multi-column plan. `None` from [`fields_meta`] means no queryable
+/// field plan (single-column, including an inert `expr` slot).
+#[derive(Clone, Debug)]
+pub(crate) struct FieldMeta {
+    pub names: Vec<String>,
+    pub weights: Vec<f32>,
+}
+
+impl FieldMeta {
+    fn from_envelope(fields: &[EnvelopeField]) -> Option<Self> {
+        if fields.len() < 2 {
+            return None;
+        }
+        Some(Self {
+            names: fields.iter().map(|field| field.name.clone()).collect(),
+            weights: fields.iter().map(|field| field.weight).collect(),
+        })
+    }
+}
+
 /// Legacy zero-page indexes keep the reference path until REINDEX.
+///
+/// PreStn3 must error (never return false): a silent skip would let insert
+/// and VACUUM no-op instead of fencing.
 ///
 /// # Safety
 /// `index` is a live index relation held open by the caller.
@@ -438,15 +464,28 @@ pub unsafe fn present(index: pg_sys::Relation) -> bool {
         if (*(*index).rd_rel).relkind.to_ne_bytes()[0] != b'i' || blocks(index) == 0 {
             return false;
         }
-        let meta = Buffer::read(index, 0, false);
-        let kind = meta.kind();
-        if kind != KIND_META {
-            corrupt(format!(
-                "Stannum index page 0 has kind {kind} instead of a meta page (unsupported format?)"
-            ));
-        }
+        let _ = open_index(index);
         true
     }
+}
+
+/// Live wrapper: classify page 0, then relation / STNF / segment-magic checks.
+///
+/// # Safety
+/// `index` is a live index relation the caller may read.
+pub unsafe fn open_index(index: pg_sys::Relation) -> Meta {
+    unsafe { read_meta(index, false).1 }
+}
+
+/// The recorded field plan of a present index. `None` when `field_count` is 1.
+///
+/// # Safety
+/// `index` is a live index relation the caller may read.
+pub(crate) unsafe fn fields_meta(index: pg_sys::Relation) -> Option<FieldMeta> {
+    if !unsafe { present(index) } {
+        return None;
+    }
+    FieldMeta::from_envelope(&unsafe { read_meta(index, false) }.1.fields)
 }
 
 unsafe fn read_meta(index: pg_sys::Relation, exclusive: bool) -> (Buffer, Meta) {
@@ -458,22 +497,210 @@ unsafe fn read_meta(index: pg_sys::Relation, exclusive: bool) -> (Buffer, Meta) 
             AFTER_PUBLICATION.with_borrow_mut(|after| *after = AfterPublication::default());
         }
         let buffer = Buffer::read(index, 0, exclusive);
-        let kind = buffer.kind();
-        if kind != KIND_META {
-            corrupt(format!(
-                "Stannum index page 0 has kind {kind} instead of a meta page (unsupported format?)"
-            ));
-        }
-        let meta = match Meta::decode(layout::payload(buffer.page())) {
-            Ok(meta) => meta,
-            Err(layout::MetaError::PreStn3) => {
-                fail_codec(segment::Error::PreStn3, "index meta page")
-            }
-            Err(layout::MetaError::Invalid(message)) => {
+        let meta = match layout::classify_meta_page(buffer.page()) {
+            MetaPageClass::Current(meta) => meta,
+            MetaPageClass::PreStn3 => fail_codec(segment::Error::PreStn3, "index meta page"),
+            MetaPageClass::Corrupt(message) => {
                 corrupt(format!("Stannum index meta page: {message}"))
             }
         };
+        live_check_meta(index, &meta);
         (buffer, meta)
+    }
+}
+
+/// Catalog / trailer / first-segment checks that need a live relation.
+/// Recovery and WAL-redo stay on [`classify_meta_page`].
+///
+/// # Safety
+/// `index` is the live relation owning this envelope.
+unsafe fn live_check_meta(index: pg_sys::Relation, meta: &Meta) {
+    unsafe {
+        let keys = (*index)
+            .rd_index
+            .as_ref()
+            .map_or(0, |info| info.indnkeyatts);
+        let recorded = i16::try_from(meta.fields.len()).unwrap_or(i16::MAX);
+        if keys > 0 && keys != recorded {
+            let name = pgrx::name_data_to_str(&(*(*index).rd_rel).relname);
+            pgrx::error!(
+                "stannum index {name}: the indexed columns changed since the index was built; REINDEX required"
+            );
+        }
+        if meta.fields.len() == 1 && (meta.fields[0].weight - 1.0).abs() > f32::EPSILON {
+            pgrx::error!("stannum: single-column envelope must record weight 1.0");
+        }
+        if meta.analysis.is_some()
+            && !crate::options::decode_spec(&meta.spec)
+                .is_some_and(|spec| spec.tokenizer == tokenizer::TokenizerSpec::Jieba)
+        {
+            pgrx::error!("stannum: analysis stamp is only valid on jieba indexes");
+        }
+        for entry in &meta.segments {
+            if let Some(magic) = run_magic(index, entry.run)
+                && is_lsg_magic(&magic)
+            {
+                pgrx::error!(
+                    "stannum: mixed-format index (KIND_ENVELOPE with a legacy LSG segment)"
+                );
+            }
+        }
+        if meta.fields.len() >= 2 {
+            check_fields(index, &meta.fields);
+        }
+    }
+}
+
+fn is_lsg_magic(magic: &[u8; 4]) -> bool {
+    matches!(magic, b"LSG1" | b"LSG2" | b"LSG3" | b"LSG4")
+}
+
+/// First four payload bytes of a run, used for STN3 / LSG classification.
+///
+/// # Safety
+/// `index` is a live relation; `run` names a published chain.
+unsafe fn run_magic(index: pg_sys::Relation, run: Run) -> Option<[u8; 4]> {
+    if run.is_empty() {
+        return None;
+    }
+    unsafe {
+        let buffer = Buffer::read(index, run.first, false);
+        if layout::kind(buffer.page()) != Ok(KIND_RUN) {
+            return None;
+        }
+        let (_, data) = buffer.chain();
+        data.get(..4)?.try_into().ok()
+    }
+}
+
+/// Rename / drop drift: stored names vs the heap attnames `indkey` names.
+/// Field-count ≥ 2 only. Index tupdesc names do not follow a heap rename.
+///
+/// # Safety
+/// `index` is a live relation with a recorded multi-column plan.
+unsafe fn check_fields(index: pg_sys::Relation, fields: &[EnvelopeField]) {
+    unsafe {
+        let metadata = (*index).rd_index;
+        if metadata.is_null() {
+            return;
+        }
+        let heap_oid = (*metadata).indrelid;
+        let heap = pg_sys::table_open(heap_oid, pg_sys::AccessShareLock as _);
+        let tupdesc = (*heap).rd_att;
+        let drift = (0..fields.len()).any(|ordinal| {
+            let attnum = *(*metadata).indkey.values.as_ptr().add(ordinal);
+            if attnum <= 0 {
+                return true;
+            }
+            #[cfg(not(feature = "pg18"))]
+            let attr = &(*tupdesc).attrs.as_slice((*tupdesc).natts as usize)[(attnum - 1) as usize];
+            #[cfg(feature = "pg18")]
+            let attr = &*pg_sys::TupleDescAttr(tupdesc, i32::from(attnum - 1));
+            if attr.attisdropped {
+                return true;
+            }
+            let live = CStr::from_ptr(attr.attname.data.as_ptr()).to_string_lossy();
+            live != fields[ordinal].name
+        });
+        pg_sys::table_close(heap, pg_sys::AccessShareLock as _);
+        if drift {
+            let name = pgrx::name_data_to_str(&(*(*index).rd_rel).relname);
+            pgrx::error!(
+                "stannum index {name}: the indexed columns changed since the index was built; REINDEX required"
+            );
+        }
+    }
+}
+
+/// Build the envelope field list from the live index definition.
+///
+/// # Safety
+/// `index` is a live relation being built.
+unsafe fn field_plan(index: pg_sys::Relation) -> Vec<EnvelopeField> {
+    unsafe {
+        let metadata = (*index).rd_index;
+        let key_count = metadata
+            .as_ref()
+            .map_or(0, |info| info.indnkeyatts as usize);
+        if key_count == 0 {
+            return EnvelopeField::single(envelope_key_name(index));
+        }
+        if key_count > 16 {
+            pgrx::error!("stannum multi-column indexes support at most 16 key columns");
+        }
+        let tupdesc = (*index).rd_att;
+        let mut names = Vec::with_capacity(key_count);
+        for ordinal in 0..key_count {
+            let attnum = if metadata.is_null() {
+                1
+            } else {
+                *(*metadata).indkey.values.as_ptr().add(ordinal)
+            };
+            if key_count >= 2 && attnum <= 0 {
+                pgrx::error!("stannum multi-column indexes reject expression keys");
+            }
+            #[cfg(not(feature = "pg18"))]
+            let attr = &(*tupdesc).attrs.as_slice((*tupdesc).natts as usize)[ordinal];
+            #[cfg(feature = "pg18")]
+            let attr = &*pg_sys::TupleDescAttr(tupdesc, ordinal as i32);
+            if attr.attisdropped {
+                pgrx::error!("stannum multi-column indexes reject dropped key columns");
+            }
+            let name = CStr::from_ptr(attr.attname.data.as_ptr())
+                .to_string_lossy()
+                .into_owned();
+            names.push(name);
+        }
+        if key_count >= 2 {
+            let mut seen = HashSet::new();
+            for name in &names {
+                if !seen.insert(name.as_str()) {
+                    pgrx::error!("stannum: duplicate field name '{name}'");
+                }
+            }
+        }
+        let mut weights = vec![1.0_f32; key_count];
+        if let Some(raw) = crate::options::field_weights(index) {
+            apply_field_weights(&names, &mut weights, &raw);
+        }
+        if key_count == 1 {
+            weights[0] = 1.0;
+            names[0] = envelope_key_name(index);
+        }
+        names
+            .into_iter()
+            .zip(weights)
+            .map(|(name, weight)| EnvelopeField { name, weight })
+            .collect()
+    }
+}
+
+fn apply_field_weights(names: &[String], weights: &mut [f32], raw: &str) {
+    let mut seen = HashSet::new();
+    for piece in raw.split(',') {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = piece.split_once(':') else {
+            pgrx::error!("stannum: field_weights must be name:weight pairs, got '{piece}'");
+        };
+        let name = name.trim();
+        let Ok(weight) = value.trim().parse::<f32>() else {
+            pgrx::error!("stannum: field_weights weight for '{name}' is not a number");
+        };
+        if !weight.is_finite() || weight <= 0.0 {
+            pgrx::error!(
+                "stannum: field_weights weight for '{name}' must be a positive finite number"
+            );
+        }
+        let Some(ordinal) = names.iter().position(|stored| stored == name) else {
+            pgrx::error!("stannum: field_weights refers to unknown field '{name}'");
+        };
+        if !seen.insert(ordinal) {
+            pgrx::error!("stannum: field_weights lists '{name}' more than once");
+        }
+        weights[ordinal] = weight;
     }
 }
 
@@ -481,7 +708,7 @@ unsafe fn read_meta(index: pg_sys::Relation, exclusive: bool) -> (Buffer, Meta) 
 /// only do once its meta page is written (see [`AfterPublication`]).
 unsafe fn write_meta(index: pg_sys::Relation, buffer: &Buffer, meta: &Meta) {
     unsafe {
-        write_page(index, buffer, false, KIND_META, &checked(meta.encode()));
+        write_page(index, buffer, false, KIND_ENVELOPE, &checked(meta.encode()));
         let released = RELEASED_XIDS.with_borrow_mut(std::mem::take);
         if !released.is_empty() && wal::registered().is_some() && is_permanent(index) {
             // Read only after the publication above reached WAL: every
@@ -490,7 +717,13 @@ unsafe fn write_meta(index: pg_sys::Relation, buffer: &Buffer, meta: &Meta) {
             // larger xmin (see restamp).
             let horizon = pg_sys::ReadNextTransactionId().into_inner();
             if let Some(stamped) = restamp(meta, &released, horizon) {
-                write_page(index, buffer, false, KIND_META, &checked(stamped.encode()));
+                write_page(
+                    index,
+                    buffer,
+                    false,
+                    KIND_ENVELOPE,
+                    &checked(stamped.encode()),
+                );
             }
         }
         let after = AFTER_PUBLICATION.with_borrow_mut(std::mem::take);
@@ -696,6 +929,119 @@ fn tokens_of<'t>(
     tokenizer
         .tokenize(text)
         .map(|token| (token.text, token.pos))
+}
+
+/// Position stride so tokens of distinct fields never share a position.
+const FIELD_POS_STRIDE: u32 = 1_000_000;
+
+fn segment_builder(field_count: usize) -> SegmentBuilder {
+    let mut builder = SegmentBuilder::default();
+    if field_count >= 2 {
+        let count = u8::try_from(field_count).unwrap_or(16);
+        codec(builder.set_field_count(count));
+    }
+    builder
+}
+
+/// Indexed key texts in key order. `None` is a NULL key.
+///
+/// # Safety
+/// `values` / `isnull` cover every key attribute of `index`.
+unsafe fn key_texts(
+    index: pg_sys::Relation,
+    values: *mut pg_sys::Datum,
+    isnull: *mut bool,
+) -> Vec<Option<String>> {
+    unsafe {
+        let keys = (*index)
+            .rd_index
+            .as_ref()
+            .map_or(1, |info| info.indnkeyatts as usize)
+            .max(1);
+        (0..keys)
+            .map(|ordinal| {
+                if *isnull.add(ordinal) {
+                    None
+                } else {
+                    Some(
+                        String::from_datum(*values.add(ordinal), false)
+                            .expect("non-null indexed text"),
+                    )
+                }
+            })
+            .collect()
+    }
+}
+
+fn encode_document(
+    tokenizer: &CompiledTokenizerPipeline,
+    tid: Tid,
+    texts: &[Option<String>],
+) -> Vec<u8> {
+    let record = if texts.len() < 2 {
+        let text = texts.first().and_then(|text| text.as_deref()).unwrap_or("");
+        codec(ForwardRecord::from_token_stream(
+            tid,
+            tokens_of(tokenizer, text),
+        ))
+    } else {
+        let field_count = u8::try_from(texts.len()).unwrap_or(16);
+        let mut owned = Vec::new();
+        for (ordinal, text) in texts.iter().enumerate() {
+            let Some(text) = text else {
+                continue;
+            };
+            let ordinal = u8::try_from(ordinal).expect("key count ≤ 16");
+            for token in tokenizer.tokenize(text) {
+                let key = fielded_key(ordinal, token.text.as_ref(), field_count)
+                    .unwrap_or_else(|error| pgrx::error!("stannum: fielded term key: {error}"));
+                let pos = token
+                    .pos
+                    .saturating_add(u32::from(ordinal).saturating_mul(FIELD_POS_STRIDE));
+                owned.push((key, pos));
+            }
+        }
+        codec(ForwardRecord::from_tokens(
+            tid,
+            owned.iter().map(|(key, pos)| (key.as_str(), *pos)),
+        ))
+    };
+    let mut bytes = Vec::new();
+    codec(record.encode(&mut bytes));
+    bytes
+}
+
+fn add_fielded_stream(
+    builder: &mut SegmentBuilder,
+    tokenizer: &CompiledTokenizerPipeline,
+    tid: Tid,
+    texts: &[Option<String>],
+) {
+    if texts.len() < 2 {
+        let text = texts.first().and_then(|text| text.as_deref()).unwrap_or("");
+        codec(builder.add_token_stream(tid, tokens_of(tokenizer, text)));
+        return;
+    }
+    let field_count = u8::try_from(texts.len()).unwrap_or(16);
+    let mut owned = Vec::new();
+    for (ordinal, text) in texts.iter().enumerate() {
+        let Some(text) = text else {
+            continue;
+        };
+        let ordinal = u8::try_from(ordinal).expect("key count ≤ 16");
+        for token in tokenizer.tokenize(text) {
+            let key = fielded_key(ordinal, token.text.as_ref(), field_count)
+                .unwrap_or_else(|error| pgrx::error!("stannum: fielded term key: {error}"));
+            let pos = token
+                .pos
+                .saturating_add(u32::from(ordinal).saturating_mul(FIELD_POS_STRIDE));
+            owned.push((key, pos));
+        }
+    }
+    codec(builder.add_token_stream(
+        tid,
+        owned.into_iter().map(|(key, pos)| (Cow::Owned(key), pos)),
+    ));
 }
 
 fn tid_of(pointer: pg_sys::ItemPointerData) -> Tid {
@@ -1956,6 +2302,7 @@ unsafe fn buffer_index(
     identity: u64,
     state: &BufferState,
     published: Option<u64>,
+    field_count: u8,
 ) -> Option<Rc<MutableIndex>> {
     let cache = BUFFER_INDEX.with_borrow_mut(Option::take);
     let mut entry = match cache {
@@ -1971,7 +2318,10 @@ unsafe fn buffer_index(
             epoch: state.epoch,
             covered: 0,
             pages: vec![state.head],
-            index: Rc::new(MutableIndex::default()),
+            index: Rc::new(
+                MutableIndex::with_field_count(field_count.max(1))
+                    .unwrap_or_else(|_| MutableIndex::default()),
+            ),
         },
     };
     if entry.covered < state.bytes as usize {
@@ -2675,11 +3025,18 @@ unsafe fn merge_segments_reconstructed(
     entries: &[SegmentEntry],
 ) -> (Vec<u8>, u32, u64) {
     let mut builder = SegmentBuilder::default();
+    let mut primed = false;
     for entry in entries {
         pgrx::check_for_interrupts!();
         let label = generation_label(entry.generation);
         let bytes = unsafe { read_run(index, entry.run, &label) };
         let segment = codec_in(Segment::parse(&bytes), &label);
+        if !primed {
+            if let Some(trailer) = segment.trailer() {
+                codec(builder.set_field_count(trailer.field_count));
+            }
+            primed = true;
+        }
         let dead = unsafe { dead_set(index, entry, &segment) };
         for record in codec_in(segment.records(|tid| dead.contains(&tid)), &label) {
             pgrx::check_for_interrupts!();
@@ -2698,7 +3055,7 @@ unsafe fn merge_segments_reconstructed(
 unsafe fn fold(index: pg_sys::Relation, meta: &mut Meta, record: &[u8]) {
     unsafe {
         let stream = read_buffer_stream(index, &meta.buffer);
-        let mut builder = SegmentBuilder::default();
+        let mut builder = segment_builder(meta.fields.len());
         for record in segment::forward::records(&stream) {
             codec_in(
                 builder.add_record(&codec_in(record, "write buffer")),
@@ -2745,7 +3102,7 @@ pub unsafe fn build_empty(index: pg_sys::Relation) {
             index,
             &meta_buffer,
             true,
-            KIND_META,
+            KIND_ENVELOPE,
             &checked(meta.encode()),
         );
     }
@@ -2773,7 +3130,35 @@ unsafe fn empty_meta(index: pg_sys::Relation) -> Meta {
             next_generation: 1,
             segments: Vec::new(),
             pending: Vec::new(),
+            fields: field_plan(index),
             analysis: crate::dict::stamp(&spec),
+        }
+    }
+}
+
+/// Single-column default: the heap attname when the key is an ordinary
+/// column, otherwise the inert `expr` slot used for expression keys.
+unsafe fn envelope_key_name(index: pg_sys::Relation) -> String {
+    unsafe {
+        let metadata = (*index).rd_index;
+        if !metadata.is_null() && *(*metadata).indkey.values.as_ptr() <= 0 {
+            return "expr".to_owned();
+        }
+        let tupdesc = (*index).rd_att;
+        if tupdesc.is_null() || (*tupdesc).natts < 1 {
+            return "expr".to_owned();
+        }
+        #[cfg(not(feature = "pg18"))]
+        let attribute = &(*tupdesc).attrs.as_slice((*tupdesc).natts as usize)[0];
+        #[cfg(feature = "pg18")]
+        let attribute = &*pg_sys::TupleDescAttr(tupdesc, 0);
+        let name = std::ffi::CStr::from_ptr(attribute.attname.data.as_ptr())
+            .to_str()
+            .unwrap_or("");
+        if (1..=63).contains(&name.len()) {
+            name.to_owned()
+        } else {
+            "expr".to_owned()
         }
     }
 }
@@ -2790,7 +3175,7 @@ pub unsafe fn build_init_fork(index: pg_sys::Relation) {
         let head = layout::chain_payload(NONE, &[]);
         let smgr = pg_sys::RelationGetSmgr(index);
         for (block, kind, payload) in [
-            (0, KIND_META, meta.as_slice()),
+            (0, KIND_ENVELOPE, meta.as_slice()),
             (1, KIND_BUFFER, head.as_slice()),
         ] {
             // smgr may use direct I/O; ordinary Rust stack alignment is not
@@ -2840,9 +3225,13 @@ impl Builder {
     /// `index` is a live relation that `build_empty` has initialized.
     pub unsafe fn new(index: pg_sys::Relation) -> Self {
         let tokenizer = unsafe { present(index) }.then(|| unsafe { index_tokenizer(index) });
+        let field_count = tokenizer
+            .as_ref()
+            .map(|_| unsafe { read_meta(index, false).1.fields.len() })
+            .unwrap_or(1);
         Self {
             tokenizer,
-            segment: SegmentBuilder::default(),
+            segment: segment_builder(field_count),
         }
     }
 
@@ -2859,14 +3248,11 @@ impl Builder {
             return;
         };
         unsafe {
-            if *isnull {
+            let texts = key_texts(index, values, isnull);
+            if texts.iter().all(Option::is_none) {
                 return;
             }
-            let text = String::from_datum(*values, false).expect("non-null indexed text");
-            codec(
-                self.segment
-                    .add_token_stream(tid_of(*tid), tokens_of(&tokenizer, &text)),
-            );
+            add_fielded_stream(&mut self.segment, &tokenizer, tid_of(*tid), &texts);
             if self.segment.document_count() >= BUILD_SEGMENT_DOCS.get().max(1) as usize {
                 self.flush(index);
             }
@@ -2880,7 +3266,9 @@ impl Builder {
         if self.segment.document_count() == 0 {
             return;
         }
-        let builder = std::mem::take(&mut self.segment);
+        let field_count = self.segment.field_count();
+        let builder =
+            std::mem::replace(&mut self.segment, segment_builder(usize::from(field_count)));
         let (blob, docs, total_length) = finish_builder(builder);
         unsafe {
             lock_maintenance(index);
@@ -3126,10 +3514,13 @@ pub unsafe fn insert(
     tid: pg_sys::ItemPointer,
 ) {
     unsafe {
-        if *isnull || !present(index) {
+        if !present(index) {
             return;
         }
-        let text = String::from_datum(*values, false).expect("non-null indexed text");
+        let texts = key_texts(index, values, isnull);
+        if texts.iter().all(Option::is_none) {
+            return;
+        }
         let (meta_buffer, mut meta, bytes) = loop {
             pgrx::check_for_interrupts!();
             let (identity, spec) = {
@@ -3143,13 +3534,7 @@ pub unsafe fn insert(
             // tokenization and forward-record encoding run.
             let bytes = {
                 let tokenizer = tokenizer_for(&spec);
-                let record = codec(ForwardRecord::from_token_stream(
-                    tid_of(*tid),
-                    tokens_of(&tokenizer, &text),
-                ));
-                let mut bytes = Vec::new();
-                codec(record.encode(&mut bytes));
-                bytes
+                encode_document(&tokenizer, tid_of(*tid), &texts)
             };
             race_point("insert:prepared");
             let locked = loop {
@@ -3277,6 +3662,41 @@ unsafe fn merge_deferred(index: pg_sys::Relation) {
 /// index) plus its dead list, if any.
 pub type Source = (Box<dyn Index>, Option<Rc<Vec<u8>>>);
 
+/// Per-source STNF norms captured with the view. `None` on a single-column
+/// source (no trailer).
+#[derive(Clone, Debug)]
+pub(crate) struct FieldNorms {
+    pub field_count: u8,
+    pub field_totals: Vec<u64>,
+    pub rows: Vec<u32>,
+}
+
+impl FieldNorms {
+    pub(crate) fn lengths(&self, ordinal: u32) -> Option<Vec<u32>> {
+        let n = usize::from(self.field_count);
+        let start = (ordinal as usize).checked_mul(n)?;
+        self.rows.get(start..start + n).map(Vec::from)
+    }
+}
+
+fn check_source_norms(envelope_fields: u8, norms: Option<&FieldNorms>, what: &str) {
+    match (envelope_fields, norms) {
+        (1, Some(_)) => {
+            pgrx::error!("stannum: STNF trailer present on a single-column {what}");
+        }
+        (count, None) if count >= 2 => {
+            pgrx::error!("stannum: multi-column {what} is missing the STNF field-norms trailer");
+        }
+        (count, Some(norms)) if norms.field_count != count => {
+            pgrx::error!(
+                "stannum: STNF field_count {} does not match envelope {count} on {what}",
+                norms.field_count
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Everything a scan or a scorer needs from an index, captured under one
 /// shared meta lock so the buffer and directory are mutually consistent.
 /// Segment pages are fetched on demand through the readers; the view keeps
@@ -3292,6 +3712,8 @@ pub struct View {
     /// Each source's dead list as a set, decoded once per backend and dead
     /// run rather than once per statement; empty for the write buffer.
     pub dead_sets: Vec<DeadSet>,
+    /// STNF norms per source, aligned with `sources`.
+    pub(crate) field_norms: Vec<Option<FieldNorms>>,
     /// Index identity and generation per immutable source.
     pub keys: Vec<(u64, u32)>,
     /// The dead run each immutable source's dead list was read from.
@@ -3367,7 +3789,13 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
             }
             let published = recovery.then(|| meta_buffer.lsn());
             let buffer = if meta.buffer.docs > 0 {
-                match buffer_index(index, meta.identity, &meta.buffer, published) {
+                match buffer_index(
+                    index,
+                    meta.identity,
+                    &meta.buffer,
+                    published,
+                    u8::try_from(meta.fields.len()).unwrap_or(1),
+                ) {
                     Some(buffer) => Some(buffer),
                     None => {
                         // Replay changed a buffer page after the meta page we
@@ -3399,6 +3827,8 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
             let mut sources: Vec<Source> = Vec::with_capacity(meta.segments.len() + 1);
             let mut labels = Vec::with_capacity(meta.segments.len() + 1);
             let mut dead_sets = Vec::with_capacity(meta.segments.len() + 1);
+            let mut field_norms = Vec::with_capacity(meta.segments.len() + 1);
+            let envelope_fields = u8::try_from(meta.fields.len()).unwrap_or(1);
             let keys = meta
                 .segments
                 .iter()
@@ -3414,15 +3844,35 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 pgrx::check_for_interrupts!();
                 let (segment, dead, dead_set) =
                     cached_segment(index, index_oid, meta.identity, entry);
+                let norms = segment.reader.trailer().map(|trailer| FieldNorms {
+                    field_count: trailer.field_count,
+                    field_totals: trailer.field_totals.clone(),
+                    rows: trailer.rows.clone(),
+                });
+                check_source_norms(
+                    envelope_fields,
+                    norms.as_ref(),
+                    &generation_label(entry.generation),
+                );
                 sources.push((Box::new(segment), dead));
                 labels.push(generation_label(entry.generation));
                 dead_sets.push(dead_set);
+                field_norms.push(norms);
             }
             let immutable_sources = sources.len();
             if let Some(buffer) = buffer {
+                let norms = codec_in(buffer.field_norms(), "write buffer").map(
+                    |(field_count, field_totals, rows)| FieldNorms {
+                        field_count,
+                        field_totals,
+                        rows,
+                    },
+                );
+                check_source_norms(envelope_fields, norms.as_ref(), "write buffer");
                 sources.push((Box::new(buffer), None));
                 labels.push("write buffer".to_owned());
                 dead_sets.push(Rc::default());
+                field_norms.push(norms);
             }
             // Segments are immutable; the buffer index was extended under the
             // shared meta lock, so a fold cannot rewrite pages underneath it.
@@ -3432,6 +3882,7 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 immutable_sources,
                 labels,
                 dead_sets,
+                field_norms,
                 keys,
                 dead_runs,
                 buffer_epoch: meta.buffer.epoch,
@@ -3944,12 +4395,21 @@ unsafe fn maintenance_reconstruct_blob(
     inputs: &[SegmentEntry],
 ) -> Option<Vec<u8>> {
     let mut builder = SegmentBuilder::default();
+    let mut primed = false;
     for entry in inputs {
         pgrx::check_for_interrupts!();
         let label = generation_label(entry.generation);
         let result = unsafe { try_read_run(index, entry.run, &label) }.and_then(|bytes| {
             let segment =
                 Segment::parse(&bytes).map_err(|error| format!("Stannum {label}: {error}"))?;
+            if !primed {
+                if let Some(trailer) = segment.trailer() {
+                    builder
+                        .set_field_count(trailer.field_count)
+                        .map_err(|error| format!("Stannum {label}: {error}"))?;
+                }
+                primed = true;
+            }
             let dead = unsafe { try_dead_set(index, entry, &segment) }?;
             let records = segment
                 .records(|tid| dead.contains(&tid))

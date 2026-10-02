@@ -375,6 +375,14 @@ impl MutableIndex {
         self.field_count
     }
 
+    #[allow(clippy::type_complexity)]
+    pub fn field_norms(&self) -> Result<Option<(u8, Vec<u64>, Vec<u32>)>> {
+        match self.sidecar_tables()? {
+            Some(tables) => Ok(Some(tables.norms()?)),
+            None => Ok(None),
+        }
+    }
+
     fn sidecar_tables(&self) -> Result<Option<crate::trailer::Tables>> {
         if self.field_count < crate::trailer::MIN_FIELD_COUNT {
             return Ok(None);
