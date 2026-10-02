@@ -137,7 +137,7 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
     - `script/test-all quick` green.
   - Review focus: design §1.2, §1.3, §1.3.1.
 
-- [ ] **A.2 Mutable flush + merge recount**
+- [x] **A.2 Mutable flush + merge recount** (5518a34)
   - Goal: `CREATE INDEX` and incremental `INSERT` both write one `TermEntry`
     per surface token; parent `df` is the union; merge recounts; buffers this
     version writes begin with `STN4_BUFFER_TAG`.
