@@ -1,0 +1,24 @@
+# STN3 4.6 fielded-terms latency GATE — 12 unscoped tinql queries.
+# Same text on stn3_fielded, stn3_single, and v040. No title:() field syntax.
+
+# common
+the
+history
+
+# medium
+telescope
+computer AND science
+
+# rare
+quasar
+nebula
+
+# AND
+history AND telescope
+war AND history
+(index OR query) AND search
+
+# OR
+telescope OR astronomy
+quasar OR nebula
+python OR database

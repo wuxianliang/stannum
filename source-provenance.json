@@ -204,6 +204,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
     },
+    "benchmarks/stn3_fielded_poc.py": {
+      "owner": "ben",
+      "evidence": "New Stannum STN3 4.6 fielded-terms latency GATE harness; not copied from Lead."
+    },
     "benchmarks/sustained.py": {
       "owner": "ben",
       "evidence": "Original Stannum benchmark work, built on the existing Ben-authored benchmark modules; no Lead source copied. Private-cluster rate/concurrency campaign using the existing Stannum mutation runner."
@@ -287,6 +291,10 @@
     "benchmarks/test_server_times.py": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+    },
+    "benchmarks/test_stn3_fielded_poc.py": {
+      "owner": "ben",
+      "evidence": "New Stannum unit tests for the STN3 4.6 latency GATE harness; not copied from Lead."
     },
     "benchmarks/test_sustained.py": {
       "owner": "ben",
@@ -948,6 +956,10 @@
     "script/test-all": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in bba2ea6dd197e3ca6ed553ef3f412964adc7be6e."
+    },
+    "script/test_dump_segments.py": {
+      "owner": "ben",
+      "evidence": "New Stannum unit tests for current kind-5 / 68-byte dump-segments parsers; not copied from Lead."
     },
     "script/test_pgrx_lock.py": {
       "owner": "ben",
