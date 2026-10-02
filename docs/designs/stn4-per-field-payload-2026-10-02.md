@@ -1,6 +1,6 @@
 # STN4: Per-Field Payload in One Term Entry
 
-Status: proposal, oracle-repair-2 · Basis: `stn3@1e1b20b` after the 4.6 mandatory miss · Normative
+Status: proposal, oracle-repair-3 · Basis: `stn3@1e1b20b` after the 4.6 mandatory miss · Normative
 parent: `docs/designs/stn3-tool-layer-2026-09-29.md` (formula, SQL surface,
 migration fence) · 2026-10-02
 
@@ -118,8 +118,12 @@ Directory size is `5 + 5n` bytes per extent (`"FCH1"` + `n` + `n × (1+4)`),
 not `8 + 5n`. Both extents carry the same directory. A two-channel token is
 30 bytes of directory across the two areas. `n = 0` is corruption (the entry
 would not exist). `record.len = 0` is corruption: a listed channel has a
-stream. A field listed in the envelope but absent from this token is simply
-omitted from the directory.
+stream. **`child.df == 0` is also corruption**, even when `record.len > 0`:
+the stock codecs accept a zero-document stream (payload grammar: `count = 0`),
+but a listed channel that decodes to no documents would report the field as
+present. **Omitted = no posting.** A field listed in the envelope but with no
+postings for this token is absent from **both** directories. Verify enforces
+the omit; `channels()` enforces `child.df > 0` on every record.
 
 `ordinals` records describe stock STN3 ordinal streams (block bounds, 65,536-doc
 chunk folds, sub-block bounds, tf buckets, field-local document lengths).
@@ -152,9 +156,10 @@ Term::channels(&self, field_count: u8) -> Result<Vec<(u8, Term<'_>)>>
 courtesy of the caller. `field_count < 2` or `field_count > 16` is
 `Error::Corrupt` even if a single-column path should never call it. Envelope
 `field_count == 1` still must **not** call `channels()`: stock `ordinals()` /
-`payload()` / `df()` are the term, and a `FCH1` prefix on a single-column
-segment is corruption at verify/open. Envelope `field_count` in `2..=16`:
-`channels(field_count)` **must** succeed before any score or bound.
+`payload()` / `df()` are the term. Single-column verify uses **only** those
+stock decoders. It does **not** sniff a `FCH1` prefix (§1.3.1). Envelope
+`field_count` in `2..=16`: `channels(field_count)` **must** succeed before any
+score or bound.
 
 **Exact framing.** Both extents are parsed independently, then cross-checked.
 Any failure is `Error::Corrupt`. Arithmetic is **checked** (`checked_add` /
@@ -180,7 +185,14 @@ Any failure is `Error::Corrupt`. Arithmetic is **checked** (`checked_add` /
 6. **Magic absent** on a `field_count` in `2..=16` is corruption — not a
    silent stock fallback. Treating a missing directory as one mixed-length
    stream would feed the fused bound the wrong `shortest()` and would fail
-   the 0..1000 / 500 witness.
+   the 0..1000 / 500 witness. Absence of magic is decided by `channels()`
+   failing the directory parse, not by a prefix sniff on single-column data.
+7. **Listed channels are nonempty.** After step 4, each child's ordinals
+   count varint (`child.df`) is `> 0`, and the payload stream's count equals
+   that df. `record.len > 0` is not enough: a stock empty stream is a few
+   bytes of `count = 0`. Zero-document listed channels are corruption.
+   Verify walks `0..field_count` and checks that every zero-posting field is
+   omitted from **both** directories.
 
 **Child `TermEntry` fields come from stock stream headers, not from `len`.**
 Unpack caches them on the child so later `Term::df()` / `max_tf_bucket` do
@@ -194,8 +206,8 @@ not walk postings:
 
 The parent `Term::df()` remains the **union**, and is the only idf input.
 The once-per-cache-entry verify pass checks `child.df ==` ordinals membership
-count and `child.max_tf_bucket ==` recomputed stream max. A mismatch is
-corruption.
+count, `child.df > 0`, and `child.max_tf_bucket ==` recomputed stream max.
+A mismatch is corruption.
 
 **Build / insert caller.** The mutable index does not infer field identity
 from column order at flush time. Every posting names the field and that
@@ -211,8 +223,10 @@ into that channel's bounds — not the concatenated length and not another
 field's length. Heap `CREATE INDEX` and subsequent `INSERT` both call this.
 Flush writes one `TermEntry`: union `df` counted across the token's field
 ordinals (dead included), parent `max_tf_bucket` the max of the channel
-maxima (dictionary nibble only), extents the two `FCH1` blobs. Merge merges
-each field's stock streams independently, then **recounts** the union into
+maxima (dictionary nibble only), extents the two `FCH1` blobs. A field with
+no occurrences for that token is **omitted** from both directories — never a
+`record.len > 0` empty stock stream. Merge merges each field's stock streams
+independently, then **recounts** the union into
 `TermEntry.df`. Adding channel dfs is forbidden: field sets overlap, and a
 sum would keep dead ordinals the merge dropped. Across segments, ordinals are
 disjoint; query time sums parent `TermEntry.df` the way `build_index_scorer`
@@ -223,6 +237,47 @@ It does not fork the key type. After unpack, a channel is a `FieldTerm` and
 the rest of the 4.1–4.4 types (`LogicalTerm`, `LogicalPostingCursor`,
 `FieldHit`) are unchanged. Every multi-column bound or score path goes through
 that unpack; see §3.
+
+### 1.3.1 Unambiguous representation (choice a)
+
+`"FCH1"` is the bytes `46 43 48 31`. Those bytes are **not** disjoint from
+stock stream prefixes. A four-byte sniff is therefore not a decoder. Option (c)
+(structural disjointness of stock streams and FCH1 directories) is false.
+Option (b) (a new discriminator that cannot be a valid stock prefix) is
+unnecessary once `field_count` selects the codec.
+
+**Proof that prefixes collide.** Stock streams begin with a count varint
+(`ordinals.rs`: `stream := count varint, …`; `payload.rs`: `stream := count
+varint, skip u32le * slots, data`). A one-byte varint stores values `0..=127`
+with the high bit clear, so `count = 70` encodes as `0x46` — the first byte
+of `FCH1`. Payload skip slots are `ceil(count / 32) - 1`; for `count = 70`
+that is two `u32le`. The first skip may be `0x..314843`, whose leading three
+bytes are `43 48 31`. Skip slots are opaque `u32le`; any value whose first
+three bytes are `43 48 31` is in-grammar. Therefore `46 43 48 31` **is a legal
+prefix of a valid stock payload**. A verifier that rejects single-column
+extents starting with `FCH1` will reject legal STN3 payloads. (A stock
+ordinals list with `count =
+70` then `0x43` as a bound `buckets` varint fails `buckets >> BUCKET_COUNT`
+with `BUCKET_COUNT = 16`, so the ordinals collision is rarer; payload is
+enough.)
+
+**Choice (a).** Envelope `field_count` — known from kind-5 STNM before any
+`TermEntry` is opened — selects the decoder. The two codecs are never both
+applied to the same extent.
+
+| `field_count` | Decoder | Forbidden |
+|---|---|---|
+| `1` | stock `ordinals()` / `payload()` / `df()` only | `channels()`; `memeq`/`starts_with(b"FCH1")` on the extent |
+| `2..=16` | `channels(field_count)` (directory + child stock slices) | stock-parsing the **parent** extent; sniffing as a substitute for `channels()` |
+
+Single-column write still never emits a directory. Single-column verify does
+not care whether the first four bytes happen to be `FCH1`: if the stock
+decoder accepts the extent, it is valid stock; if it rejects, it is stock
+corruption. Multi-column missing-magic is `channels()` failing step 1/6, not
+a prefix test that single-column also runs. Options (b) (new discriminator
+byte that cannot start a varint) and (c) (prove byte-level disjointness) are
+rejected: (c) is false, and (b) forks both extents to dodge a collision that
+`field_count` already prevents.
 
 ### 1.4 What does not live in the entry
 
@@ -292,53 +347,88 @@ would let body-only `pre*` matches consume the title-scoped budget and return
 `Overflow` when the in-scope set fits. That is a behavior change and is
 forbidden.
 
-Expansion still uses the stock seam (`Window`, `Fn(&str) -> bool`, `limit`).
-The adapter owns the count. For every key the window yields:
+Expansion still uses the stock `Window` and a text-only `Fn(&str) -> bool`.
+The adapter owns the count **and** the walk. For every key the cursor yields:
 
 1. **Decode token.** The dictionary key *is* the analyzed surface token.
    The `Fn(&str)` text filter (identity for prefix/range; regex/fuzzy
    predicate for those shapes) runs on that string. It does not encode a
    field and it does not see channels.
 2. **Channel-set ∩ query mask.** The adapter then opens that key's `Term`
-   (`Index::term`, or the `Term` stock expand already loaded) and reads
-   `channels(field_count)`. Keep the token only if at least one channel's
-   field bit is set in the query mask. A body-only token under `title:(…)`
-   fails this step and is discarded. Opening a missing term is not a hit.
+   (the cursor's current term) and reads `channels(field_count)`. Keep the
+   token only if at least one channel's field bit is set in the query mask.
+   A body-only token under `title:(…)` fails this step and is discarded.
+   Opening a missing term is not a hit.
 3. **Then count against `max_expansion`.** Only tokens that passed (1) and
-   (2) increment the cap. If that in-scope count exceeds `max_expansion`,
-   the result is `Lookup::Overflow` and the lists are discarded. Tokens
-   that failed (2) never increment the cap and never appear in `Terms`.
+   (2) increment the cap. Tokens that failed (2) never increment the cap and
+   never appear in `Terms`.
 
 **Channel opens are fallible and must not live in `Fn(&str) -> bool`.**
 Stock `expand`'s filter cannot return `Result`. Opening `channels()` inside
 that predicate would turn a corrupt directory into `false` (a non-match) or
 into a panic. Both are forbidden. The text filter is **only** step (1).
 
-The adapter walks **outside** the boolean predicate:
+**Required walk: a streaming dictionary cursor, not `Index::expand`.**
+`Index::expand` materializes `Vec<(String, Term)>` and returns `Overflow`
+without scanning further. A scan limit of `usize::MAX` therefore holds the
+whole window in RAM (a scoped query with millions of out-of-scope matches is
+a memory bomb). A finite limit hides a later channel error behind Overflow.
+**Neither is a permitted implementation** of channel-aware expansion, not
+even as an alternative to a cursor.
 
-- Call `Index::expand(window, text_filter, …)` with a filter that never
-  opens terms. On a partial mask, do not pass `limit: max_expansion` with
-  that text-only filter (that is the P0 cap bug). A scan limit of
-  `usize::MAX`, or an adapter-owned dictionary cursor, is allowed.
-- For each `(token, term)` in dictionary order, `term.channels(field_count)`:
-  - `Err(e)`: keep the **first** error (dictionary order). Do not treat the
-    token as a non-match. Do not increment the cap. Continue only far enough
-    to obey interrupt checks; the walk's result is that error.
-  - `Ok(ch)` with `ch ∩ mask == ∅`: skip; not counted.
-  - `Ok(ch)` with a nonempty intersection: count += 1; keep the token if
-    still under the cap.
-- **After** the walk, inspect the first channel-open error **even if** stock
-  expand also returned `Overflow` or the in-scope count exceeded
-  `max_expansion`. Outcome priority: **error > Overflow > Terms**. An error
-  must never become `Lookup::Overflow` and never become a silent drop.
+The required seam is an `Index` method (owned, like `Term::channels`; the
+`term` / `expand` signatures do not change):
+
+```
+Index::scan_window(window, text_filter)
+    -> iterator of Result<(String, Term<'_>)>
+```
+
+It yields dictionary order, one pair at a time. It applies the text filter
+and interrupt checks (`INTERRUPT_INTERVAL`). It does not apply
+`max_expansion`, does not open `channels()`, and does not collect. Reader
+wraps `dictionary.{prefix,range,iter}` plus `resolve` of the current entry
+only. MutableIndex walks its sorted keys the same way. Forking `expand` to
+return a stream is rejected: the `Overflow` enum cannot continue.
+
+`fields/expand.rs` is the only multi-column expansion implementation. For
+`field_count` in `2..=16` it **MUST NOT** call `Index::expand`, including
+with `limit: usize::MAX` and including with any finite limit. Single-column
+(`field_count == 1`) may keep using `Index::expand` with a finite limit:
+there are no channels to open.
+
+The adapter over `scan_window`:
+
+- `kept: Vec` with capacity `max_expansion`. This is the only retained term
+  list. Memory is O(`max_expansion`) plus the current iterator item, never
+  O(window).
+- `overflow = false`.
+- For each `Result<(token, term)>` in dictionary order:
+  - iterator `Err(e)`: drop `kept` and return that error (dictionary itself
+    is corrupt).
+  - `term.channels(field_count)` `Err(e)`: this is the first channel error.
+    Drop `kept` and return it. Do not treat the token as a non-match. Do not
+    increment the cap. Do not push. Scanning further is unnecessary: dictionary
+    order already selected the first error.
+  - `Ok(ch)` with `ch ∩ mask == ∅`: skip; not counted; not stored.
+  - `Ok(ch)` with a nonempty intersection: `count += 1`. If `count <=
+    max_expansion`, push onto `kept`. If `count > max_expansion`, set
+    `overflow`, do **not** push, **do not stop**: keep iterating so a later
+    channel error is still observed (error beats Overflow).
+- After a full walk with no channel error: if `overflow`, drop `kept` and
+  return `Lookup::Overflow`; otherwise return `Terms(kept)`. Outcome
+  priority: **error > Overflow > Terms**. An error must never become
+  `Lookup::Overflow` and never become a silent drop.
 
 Query-time channel defects surface as `AdapterError` (index/corrupt), the
 same query-vs-verify split as parent: query is an error, verify of a stored
 directory is corruption.
 
 Unscoped queries use the all-fields mask; a stored token always has ≥1
-channel, so (2) is true for every existing key and the cap counts the window
-the same way a single-column expand would. Tokens remain unique in the
+nonempty channel, so (2) is true for every existing key and the cap counts
+the window the same way a single-column expand would. Multi-column unscoped
+still walks `scan_window`: a later corrupt FCH1 must not hide behind Overflow.
+Tokens remain unique in the
 dictionary, so the BTree group-by-decoded-text step is identity. Order of
 `Lookup::Terms` is still `(decoded text, mask)`.
 
@@ -550,8 +640,9 @@ field's position-list lengths, and it checks parent `TermEntry.df` against the
 union of channel ordinals (`0 < df ≤ document_count`). Merge recounts both the
 norms and the entry dfs.
 
-Single-column: `total == pages_end`, no trailer, no `FCH1`. A trailer on a
-single-column immutable segment is corruption.
+Single-column: `total == pages_end`, no trailer. Writer never emits a
+directory. Verify does **not** sniff `FCH1` on single-column extents (§1.3.1).
+A trailer on a single-column immutable segment is corruption.
 
 ### 6.3 Classification (mutually exclusive predicates)
 
@@ -560,79 +651,110 @@ Indexes built on this branch between 4.3 and 4.6 wrote kind-5 + STN3 + STNF v1
 not 0.4.0, so the §8 migration sentence about LSG1–LSG4 must not fire.
 
 **Per-segment labels** (immutable STN3 blobs only; single-column blobs are
-either valid stock or malformed):
+either valid stock — stock decoder, no `FCH1` sniff — or malformed):
 
 - `ValidV2`: well-formed STNF v2 **and** every dictionary term's extents
-  satisfy §1.3 exact framing (`channels(field_count)` succeeds).
+  satisfy §1.3 exact framing (`channels(field_count)` succeeds, including
+  `child.df > 0`).
 - `ValidV1`: well-formed STNF v1 (df section present, lengths sum, CRC and
   dimensions agree). Fielded-terms keys are expected; FCH1 is not required.
 - `Malformed`: missing trailer on a multi-column immutable segment; truncated
   / bad-CRC / unknown-version STNF; v1 layout with `df_len = 0`; v2 layout
   with a df section; well-formed STNF v2 whose **any** term fails FCH1
-  framing; mixed envelope/LSG magic; single-column with a trailer or `FCH1`.
+  framing (including a listed channel with `child.df == 0`); mixed
+  envelope/LSG magic; single-column with a trailer; single-column extents
+  the **stock** decoder rejects. A single-column extent whose first four
+  bytes are `FCH1` is **not** malformed on that fact alone.
 
 A blob is never both `ValidV1` and `ValidV2`. `Malformed` is not a version.
 
-**Relation predicates** — exactly one; evaluate `PreStn3` first, then the
-multiset `S` of immutable multi-column segment labels. Empty `S` is the
-empty/buffer-only rows below, not these four.
-
-| Predicate | Class | Guarded callbacks |
-|---|---|---|
-| LSG1–LSG4 magic and/or kind-1 0.4.0 meta (incl. 0.4.0 empty / buffer-only) | `PreStn3` | existing migration error, no write |
-| `S` nonempty ∧ every label is `ValidV2` ∧ none `Malformed` | `Current` | proceed |
-| `S` nonempty ∧ every label is `ValidV1` ∧ none `Malformed` | `StaleFielded` | **rebuild error**, no write |
-| `S` nonempty ∧ every label is well-formed (`ValidV1` or `ValidV2`) ∧ `S` contains **both** `ValidV1` and `ValidV2` ∧ none `Malformed` | `MixedFielded` | **rebuild error**, distinct string, no write |
-| any label is `Malformed`, or `S` is nonempty and none of the three rows above hold | `Corrupt` | existing corruption, no write |
-
-`MixedFielded` requires **every** segment well-formed. `v1 + v2 + malformed`
-and `v1 + v2 + missing trailer` are `Corrupt`, not mixed. A well-formed v2
-trailer whose postings fail FCH1 is `Malformed` → `Corrupt`, not `Current`.
-
-**Empty.** Kind-5, `S` empty, empty insert buffer (zero docs): `Current`.
-There is no trailer to be v1 or v2. `search` / `search_count` still answer 0.
-A 0.4.0 empty index is `PreStn3` (kind-1), unchanged.
-
-**Buffer-only.** Kind-5, `S` empty, nonempty mutable buffer. There is no
-trailer, so classification may look at dictionary **keys** here only, via a
-**minimal historical shape recognizer** that is not the fielded codec:
+**Buffer labels** — computed on **every** kind-5 relation, including when
+immutable segments exist. Skipping the buffer when `S` is nonempty is how a
+stale or corrupt buffer would classify as `Current`.
 
 ```
 storage::legacy_fielded_key_shape(key: &str, field_count: u8) -> bool
 ```
 
-It returns true iff `key` is `~` + one lowercase hex nibble + `~` + a nonempty
-escaped token (every payload `~` doubled), and the nibble is `< field_count`.
-It does not produce an encoded key, does not call `Index::term` on an encoded
-key, and does not participate in lookup, expand, scoring, or writing. C.3
-deletes `fields/codec.rs`; this function stays as an isolated classifier.
+True iff `key` is `~` + one lowercase hex nibble + `~` + a nonempty escaped
+token (every payload `~` doubled), and the nibble is `< field_count`. It does
+not produce an encoded key, does not call `Index::term` on an encoded key, and
+does not participate in lookup, expand, scoring, or writing. C.3 deletes
+`fields/codec.rs`; this function stays as an isolated classifier and **runs
+even when immutable segments exist**.
 
-- `field_count == 1`: `Current` (stock terms, no directory).
-- `field_count` in `2..=16`, every stored term unpacks as valid FCH1 under
-  that `field_count`: `Current`.
-- `field_count` in `2..=16`, every stored term satisfies
-  `legacy_fielded_key_shape`: `StaleFielded`.
-- Mix of FCH1 and legacy-shaped keys, or any key that is neither: `Corrupt`.
+- `BufferEmpty`: `docs == 0` and no stored terms. Vacuous; introduces no
+  generation.
+- `BufferCurrent`: nonempty; every term is the STN4 in-memory shape (surface
+  key + per-field occurrence map from `add_occurrence`). Value shape decides.
+  A surface token whose bytes equal `~0~foo` is still Current.
+- `BufferStale`: nonempty; every term's key satisfies
+  `legacy_fielded_key_shape(key, field_count)` **and** the value is the
+  withdrawn single-stream `TermData` (one posting list; field implied by the
+  key).
+- `BufferMalformed`: nonempty and not uniformly Current or Stale (mix of
+  shapes; a key that is neither a STN4 map nor a legacy-shaped single-stream;
+  a broken in-memory channel).
 
-Immutable classification **never** uses `legacy_fielded_key_shape`. A valid v2
-segment whose surface token is the bytes `~0~foo` is `ValidV2` / `Current`:
-that is a legal analyzed token, not a fielded-terms key.
+`field_count == 1`: stock buffer terms are `BufferCurrent`; `legacy_fielded_key_shape`
+cannot hold (`nibble < 1`). Immutable classification **never** uses the
+recognizer on immutable dictionary keys: a ValidV2 surface token `~0~foo` stays
+`ValidV2`.
+
+**Relation predicates** — exactly one. Evaluate `PreStn3` first. Then let `S`
+be the multiset of immutable multi-column segment labels, and `B` the buffer
+label. Generations:
+
+```
+G_v2 = (S contains ValidV2) ∨ (B = BufferCurrent)
+G_v1 = (S contains ValidV1) ∨ (B = BufferStale)
+M    = (S contains Malformed) ∨ (B = BufferMalformed)
+```
+
+`BufferEmpty` contributes to neither `G_v2` nor `G_v1`.
+Single-column immutable blobs are not members of `S`. A trailer, or a
+stock-decoder failure, still sets `M`. They are never `ValidV1` / `ValidV2`.
+A coincidental `FCH1` prefix on a stock-accepted single-column extent does
+not set `M`.
+
+| Predicate | Class | Guarded callbacks |
+|---|---|---|
+| LSG1–LSG4 magic and/or kind-1 0.4.0 meta (incl. 0.4.0 empty / buffer-only) | `PreStn3` | existing migration error, no write |
+| `M` | `Corrupt` | existing corruption, no write |
+| `¬M` ∧ `G_v1` ∧ `G_v2` | `MixedFielded` | **rebuild error**, distinct string, no write |
+| `¬M` ∧ `G_v1` ∧ `¬G_v2` | `StaleFielded` | **rebuild error**, no write |
+| `¬M` ∧ `¬G_v1` | `Current` | proceed |
+
+`Current` therefore requires a valid current buffer: `B ∈ {BufferCurrent,
+BufferEmpty}` **and** every immutable multi-column segment `ValidV2` (or `S`
+empty). A ValidV2 segment set plus `BufferStale` is `MixedFielded`, not
+`Current`. A ValidV2 set plus `BufferMalformed` is `Corrupt`.
+
+`MixedFielded` requires **every** segment and the buffer well-formed.
+`v1 + v2 + malformed` and `v1 + v2 + missing trailer` are `Corrupt`, not mixed.
+A well-formed v2 trailer whose postings fail FCH1 is `Malformed` → `Corrupt`,
+not `Current`. Empty kind-5 (`S` empty, `BufferEmpty`): `¬M ∧ ¬G_v1` →
+`Current`. `search` / `search_count` still answer 0. A 0.4.0 empty index is
+`PreStn3` (kind-1), unchanged.
 
 **Fixtures (A.3 / E.1):**
 
 | Fixture | Class |
 |---|---|
-| all immutable segments well-formed v2 + valid FCH1 | `Current` |
-| all immutable segments well-formed v1 | `StaleFielded` |
-| well-formed v1 + well-formed v2 only | `MixedFielded` |
+| all immutable well-formed v2 + valid FCH1, `BufferEmpty` or `BufferCurrent` | `Current` |
+| all immutable well-formed v1, `BufferEmpty` or `BufferStale` | `StaleFielded` |
+| well-formed v1 + well-formed v2 only, buffer empty or matching one side | `MixedFielded` |
+| well-formed v2 segments + `BufferStale` | `MixedFielded` |
+| well-formed v1 segments + `BufferCurrent` | `MixedFielded` |
+| well-formed v2 segments + `BufferMalformed` | `Corrupt` |
 | v1 + v2 + one malformed trailer | `Corrupt` |
 | v1 + v2 + one multi-column segment missing a trailer | `Corrupt` |
 | well-formed v2 trailer, one term with malformed FCH1 | `Corrupt` |
 | well-formed v2 + valid FCH1, dictionary contains surface token `~0~foo` | `Current` |
 | empty kind-5 | `Current` |
-| buffer-only, every term valid FCH1 | `Current` |
-| buffer-only, every term `legacy_fielded_key_shape` | `StaleFielded` |
-| buffer-only, mix | `Corrupt` |
+| buffer-only `BufferCurrent` | `Current` |
+| buffer-only `BufferStale` | `StaleFielded` |
+| buffer-only `BufferMalformed` / mix | `Corrupt` |
 | LSG4 / kind-1 | `PreStn3` |
 
 Rebuild error texts (`StaleFielded` vs `MixedFielded`) are distinct from the
@@ -661,7 +783,7 @@ Layer diagram is parent §3. L2 still does not import `IndexScorer`. Owned
 shims (`operator.rs`, `score.rs` `scope_scan_query`, `highlight_udfs.rs`,
 `customscan.rs`, `am.rs`, `options.rs`, `storage/layout.rs`, `tinql/`) do not
 gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
-`legacy_fielded_key_shape` in the opener.
+`legacy_fielded_key_shape` in the opener (always, not only buffer-only).
 
 ### Carry (math and semantics; tests stay)
 
@@ -671,10 +793,10 @@ gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
 | `postgres/src/fields/bound.rs` | `fused_bound` / `fused_interval_bound` / `next_interval_end` / envelopes / intersecting-block truncation. Input remains `FieldTerm` streams. |
 | `postgres/src/fields/types.rs` | `FieldTerm`, `LogicalTerm { text, mask, df_agg, streams }`, `Lookup`. `df_agg` is filled from `Term::df()`, not from a sidecar. |
 | `postgres/src/fields/cursor.rs` | `LogicalPostingCursor`, `FieldHit`, advance atomicity, successor peeks. Opened on unpacked channels. |
-| `postgres/src/fields/expand.rs` | `Lookup` outcomes, empty-streams-not-error, overflow plan, scope mask on the logical term, `max_expansion` counted only after channel-set ∩ mask. Channel opens are a fallible walk, not `Fn(&str)`. |
+| `postgres/src/fields/expand.rs` | `Lookup` outcomes, empty-streams-not-error, overflow plan, scope mask on the logical term, `max_expansion` counted only after channel-set ∩ mask. Channel opens are a fallible `scan_window` walk, not `Fn(&str)` and not `Index::expand`. |
 | `postgres/src/fields/error.rs` | `AdapterError` Index vs key split; query vs verify as distinct kinds. Fielded `KeyDefect` header/escape variants die with the codec. Channel framing errors are `segment::Error::Corrupt` / `AdapterError::Index`. |
 | `postgres/src/storage/layout.rs` | `KIND_ENVELOPE = 5`, names/weights/stamp. |
-| `postgres/src/storage/mod.rs` | `Current` / `PreStn3` / `Corrupt` fence; add `StaleFielded` and `MixedFielded`; `legacy_fielded_key_shape` for buffer-only classification only. |
+| `postgres/src/storage/mod.rs` | `Current` / `PreStn3` / `Corrupt` fence; add `StaleFielded` and `MixedFielded`; buffer labels `BufferEmpty` / `BufferCurrent` / `BufferStale` / `BufferMalformed`; `legacy_fielded_key_shape` on every kind-5 buffer, including beside immutable segments. |
 | `segment/src/dictionary.rs` | Layout of `TermEntry` and prefix-compressed blocks. No new fields. |
 | `segment/src/payload.rs`, `ordinals.rs`, `bound.rs` | Stock stream codecs. Channels are those codecs. |
 
@@ -683,12 +805,12 @@ gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
 | File | Fate |
 |---|---|
 | `postgres/src/fields/codec.rs` | **Dead as a codec.** `fielded_key` / `header` / `upper_fence` / writers go. C.3 deletes this file. The `~{h}~` **grammar** survives only as `storage::legacy_fielded_key_shape` (§6.3), which never looks up or writes. |
-| `postgres/src/fields/expand.rs` lookup/expand bodies | Decoded `Window`; text `Fn(&str)` only; fallible channel walk; error > Overflow > Terms. |
+| `postgres/src/fields/expand.rs` lookup/expand bodies | Decoded `Window`; `Index::scan_window`; text `Fn(&str)` only; fallible channel walk; retain ≤ `max_expansion` terms; continue past overflow for the first channel error; error > Overflow > Terms. Must not call `Index::expand` when `field_count` in `2..=16`. |
 | `postgres/src/fields/df.rs` | `query_total_df` reads entry dfs. `union_df_agg` remains a **build-time** helper to compute the stored union (and a verify check). Sidecar reader goes with STNF v1. |
 | `segment/src/trailer.rs` | v2: drop `df_len` / `DfEntry`. v1 parse remains long enough to classify `StaleFielded`. |
 | `segment/src/segment.rs` | `Term::channels()`. `Reader::new` still stops stock checks at `pages_end`; trailer API reads v2. |
-| `segment/src/index.rs` mutable | `add_occurrence(token, field, positions, field_length)`; per-token per-field builders; flush writes `FCH1`. |
-| `segment/src/merge.rs`, `verify.rs` | Per-channel stock merge/verify; recount union into `TermEntry.df`; no df sidecar add. |
+| `segment/src/index.rs` | `Index::scan_window` streaming cursor. Mutable: `add_occurrence(token, field, positions, field_length)`; per-token per-field builders; flush writes `FCH1` and omits zero-posting fields. |
+| `segment/src/merge.rs`, `verify.rs` | Per-channel stock merge/verify; recount union into `TermEntry.df`; no df sidecar add. Multi-column verify unpacks `channels()` (including `child.df > 0`). Single-column verify is stock-only: no `FCH1` prefix sniff. |
 
 `fields/mod.rs` L1 comment updates: it owns the channel unpack, the fused
 scorer, the bound, and the norms reader. It does not own a key codec.
@@ -720,16 +842,20 @@ pg-agent; the risk is slip, not a forced cutover date.
 - [ ] **A.1 Channel directory + `Term::channels(field_count)`**
   - Scope: encode/decode `FCH1`; §1.3 exact framing (header+records fit;
     checked `5+5n` and `Σ len`; `Σ len == extent_len - (5+5n)`; child decoder
-    consumes the slice exactly; `len == 0` rejected; ordinal/payload field
-    lists equal and ordered; `field_count` not in `2..=16` is Corrupt even on
-    a mistaken call). Child `df` from count varint; `max_tf_bucket` from stream
-    bounds. No SQL.
+    consumes the slice exactly; `len == 0` rejected; `child.df > 0` on every
+    listed record; ordinal/payload field lists equal and ordered; `field_count`
+    not in `2..=16` is Corrupt even on a mistaken call; §1.3.1 choice (a)).
+    Child `df` from count varint; `max_tf_bucket` from stream bounds. No SQL.
   - Done when: unit tests cover that matrix; `channels(1)` and `channels(17)`
     are Corrupt; trailing bytes in a child slice are Corrupt; mismatched
     ordinal/payload field sets are Corrupt; child.df is posting count not byte
-    `len`; single-column fixtures never write `FCH1`; missing magic on
-    multi-column is corruption; stock `term()` still works on 0.5.0
-    single-column fixtures.
+    `len`; a listed record with stock `count = 0` is Corrupt; flush omits
+    zero-posting fields from both directories; writer never emits a directory
+    on single-column; **single-column verify does not sniff `FCH1`** — a stock
+    payload whose first four bytes are `46 43 48 31` still verifies when the
+    stock decoder accepts it; missing magic on multi-column is corruption via
+    `channels()`, not a prefix test shared with single-column; stock `term()`
+    still works on 0.5.0 single-column fixtures.
 - [ ] **A.2 Mutable flush + merge recount**
   - Scope: `add_occurrence(token, field, positions, field_length)`; per-token
     per-field builders; parent `TermEntry.df` = union including dead; merge per
@@ -737,24 +863,29 @@ pg-agent; the risk is slip, not a forced cutover date.
     INDEX` (SQL build) **and** incremental `INSERT` after the index exists.
   - Done when: two-field fixture with overlap counts union 3 not 4 on SQL build
     **and** on insert-after-create; dead ordinal remains in `df` until rewrite;
-    merge of two segments recounts; `field_length` is that field's raw count.
+    merge of two segments recounts; `field_length` is that field's raw count;
+    a token posted in title only does not write a body directory record.
 - [ ] **A.3 STNF v2 + classification matrix**
   - Scope: trailer without df; §6.3 predicates (`ValidV1` / `ValidV2` /
-    `Malformed` → relation class); `legacy_fielded_key_shape`; rebuild strings;
-    `ambuild` exempt.
+    `Malformed` plus `BufferEmpty` / `BufferCurrent` / `BufferStale` /
+    `BufferMalformed` → relation class); `legacy_fielded_key_shape` on every
+    kind-5 buffer; rebuild strings; `ambuild` exempt.
   - Done when: every fixture row in §6.3 holds, including v1+v2+malformed →
     `Corrupt`; v1+v2+missing trailer → `Corrupt`; v2 + malformed FCH1 →
-    `Corrupt`; valid v2 with surface token `~0~foo` → `Current`; buffer-only
-    FCH1 → `Current`; buffer-only legacy keys → `StaleFielded`; empty kind-5 →
-    `Current`; well-formed v1-only → `StaleFielded`; well-formed v1+v2 only →
-    `MixedFielded`; LSG4 still the §8 migration string. No page dirty on
-    rebuild/corrupt classes.
+    `Corrupt`; valid v2 with surface token `~0~foo` → `Current`; valid v2
+    segments + `BufferStale` → `MixedFielded`; valid v2 + `BufferMalformed` →
+    `Corrupt`; valid v1 + `BufferCurrent` → `MixedFielded`; buffer-only
+    `BufferCurrent` → `Current`; buffer-only `BufferStale` → `StaleFielded`;
+    empty kind-5 → `Current`; well-formed v1-only → `StaleFielded`; well-formed
+    v1+v2 only → `MixedFielded`; LSG4 still the §8 migration string. No page
+    dirty on rebuild/corrupt classes.
 
 ### Phase B — Query wiring (≈ 1.5 wks)
 
 - [ ] **B.1 Lookup / expand / cursor on channels**
-  - Scope: replace expand/lookup bodies; `df_agg` from parent `Term::df`;
-    expansion order §2 steps (1)(2)(3); drop codec from this path.
+  - Scope: replace expand/lookup bodies; `Index::scan_window`; `df_agg` from
+    parent `Term::df`; expansion order §2 steps (1)(2)(3); drop codec from this
+    path. Multi-column must not call `Index::expand`.
   - Done when: fields unit tests that used encoded keys are rewritten against
     surface tokens; empty streams not error; overflow still `Lookup::Overflow`;
     scoped mask does not change `df_agg` (`LogicalTerm.df_agg` is the parent
@@ -762,17 +893,22 @@ pg-agent; the risk is slip, not a forced cutover date.
     for prefix/wildcard, range, regex, and fuzzy, `title:(…)` with body-only
     hits `> max_expansion` and title hits `≤ max_expansion` returns `Terms`
     of the title tokens, not Overflow; in-scope over cap still Overflows.
+    **Streaming fixtures:** a window with far more out-of-scope matches than
+    `max_expansion` retains at most the cap; grep the adapter for
+    `usize::MAX` and `Index::expand` is empty on the multi-column path.
     **Channel-error fixtures:** a window that also contains a corrupt FCH1
     term returns `AdapterError`, not Overflow and not `Terms` that skipped
-    it; the same error wins when in-scope hits already exceeded the cap;
-    `Fn(&str)` is never the channel-open site.
+    it; the same error wins when in-scope hits already exceeded the cap
+    (cursor continues past overflow); `Fn(&str)` is never the channel-open
+    site.
 - [ ] **B.2 Bound + verify on channels**
   - Scope: wire existing `fused_bound` to unpacked `FieldTerm`s; no parent-nibble
     fallback; verify recomputes per-channel min_len/max bucket and parent `df`.
   - Done when: 0..1000/500 witness still truncates; pruned == exhaustive
     top-k rows; bound-read `Err` still INFINITY; two unit-weight channels score
     `tf* = 2` and a parent-nibble bound of 1 is never consulted; missing
-    `channels()` on multi-column bound → INFINITY, score → error.
+    `channels()` on multi-column bound → INFINITY, score → error; verify
+    rejects listed `child.df == 0`; single-column verify does not sniff `FCH1`.
 
 ### Phase C — Gates (≈ 1.5 wks)
 
@@ -799,10 +935,12 @@ pg-agent; the risk is slip, not a forced cutover date.
   - Scope: delete `fields/codec.rs` and encoded-key **writers** / lookup
     fixtures; `fields/mod.rs` comment matches §7. **Keep**
     `storage::legacy_fielded_key_shape` as the only `~{h}~` grammar — buffer
-    classification only, no encode helper, no `Index::term` on encoded keys.
+    classification on every kind-5 buffer (including beside immutable
+    segments), no encode helper, no `Index::term` on encoded keys.
   - Done when: no `fielded_key` writer in `postgres/src` or `segment/src`;
     grep for encode/header/upper_fence in `fields/` is empty; classifier tests
-    (buffer-only stale vs current) still compile; workspace tests green.
+    (buffer-only stale vs current; v2 segments + stale buffer → MixedFielded)
+    still compile; workspace tests green.
 
 ### Phase D — Phrases, highlights, planner (old Phase 5) (≈ 2 wks)
 
@@ -820,7 +958,8 @@ Done-when texts of old 5.1–5.5 apply, with "fielded key" read as "channel".
       table: well-formed v1 rebuild-errors (`StaleFielded`), not LSG4;
       well-formed v1+v2 → `MixedFielded`; v1+v2+malformed and v1+v2+missing
       trailer → `Corrupt`; v2+bad FCH1 → `Corrupt`; v2 with token `~0~foo` →
-      `Current`.
+      `Current`; valid v2 + stale buffer → `MixedFielded`; valid v2 +
+      malformed buffer → `Corrupt`.
 - [ ] **E.2** Runbook + divergence ledger (old 6.2), including STN4 rebuild
       of any development fielded-terms indexes.
 - [ ] **E.3** Wheel alignment (old 6.3)
@@ -867,11 +1006,13 @@ may overlap C.3. E.1 may start after A.3 (classification is the new CI row).
   file. A follow-up task is not a waiver. Not a formula change and not a
   return to fielded keys.
 - **`StaleFielded` vs `Corrupt` vs `MixedFielded`.** Predicates in §6.3: mixed
-  requires every segment well-formed. Any malformed member makes the relation
-  `Corrupt`. Buffer-only stale uses `legacy_fielded_key_shape` only. A.3 pins
-  the fixture table.
-- **Channel-open errors in expand.** `Fn(&str)` cannot carry `Result`. A corrupt
-  FCH1 in the window is `AdapterError`, never a non-match and never Overflow.
+  requires every segment **and the buffer** well-formed. Buffer labels always
+  participate. Valid v2 + stale buffer is `MixedFielded`, not `Current`. A.3
+  pins the fixture table.
+- **Channel-open errors in expand.** `Fn(&str)` cannot carry `Result`. Multi-column
+  expansion is `scan_window` only: O(`max_expansion`) retained terms, continue
+  past overflow, first FCH1 error wins. `Index::expand` / `usize::MAX` is not
+  an allowed alternative.
 - **Channel/parent df confusion.** Channel `Term::df()` is the ordinals count
   varint (field-local). Using it as idf reintroduces the field-local-idf break
   §5.2 case 1 catches. Tests must read the parent entry for `LogicalTerm.df_agg`.
@@ -880,11 +1021,17 @@ may overlap C.3. E.1 may start after A.3 (classification is the new CI row).
   / error, never a stock fallback.
 - **Scoped expansion cap.** Counting out-of-scope tokens against `max_expansion`
   changes 0.4.0 answers. B.1 fixtures are the lock.
-- **Verify must not call stock `ordinals()` on a `FCH1` blob.** That path is
-  corruption on a valid STN4 term. Multi-column verify always unpacks first.
+- **Verify must not call stock `ordinals()` on a multi-column parent extent.**
+  That path is corruption on a valid STN4 term. Multi-column verify always
+  unpacks `channels()` first. Single-column verify must not sniff `FCH1`
+  (§1.3.1): payload count 70 is `0x46`.
+- **Zero-document listed channels.** Stock codecs accept `count = 0`.
+  `channels()` requires `child.df > 0`; flush omits empty fields from both
+  directories.
 - **Upstream merges.** `segment.rs` and merge/verify already conflict on STNF.
   `Term::channels` is more surface in those files. The dictionary layout and
-  `Index::term(&str)` stay upstream-shaped on purpose.
+  `Index::term(&str)` stay upstream-shaped; `scan_window` is the owned streaming
+  add, not a change to `expand`'s `Vec`/`Overflow` contract.
 - **Next fallback after a STN4 mandatory miss** is not another layout inside
   this document. It is a `contract/divergences` entry, a `contract_version`
   bump, and an explicit statement that pg-agent rank order or cost envelope
