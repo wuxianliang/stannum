@@ -26,10 +26,10 @@ Checked against TIN 1.0.3's recorded answers:
 
 | Status | Cases | Meaning |
 | --- | ---: | --- |
-| PASS | 170 | Every capture equals TIN's answer |
+| PASS | 169 | Every capture equals TIN's answer |
 | DIFF | 12 | Both raise an ERROR with the same SQLSTATE; the message wording differs |
 | IMPROVED | 5 | TIN refuses the query with an ERROR; Stannum answers it |
-| GAP | 2 | Stannum lacks what the case exercises |
+| GAP | 3 | Stannum lacks what the case exercises |
 | FAIL | 0 | |
 
 Improvements and gaps are declared in
@@ -88,6 +88,7 @@ the last two possible.
 
 | Case | Difference |
 | --- | --- |
+| `catalog.I-01` | TIN rejects `(id, body)` with `0A000` because its AM cannot be multi-column. Stannum sets `amcanmulticol`, so PostgreSQL fails with `42704` (integer has no default operator class). The integer-only key is the same `42704` on both engines; only the AM name differs. |
 | `catalog.I-07` | Stannum runs no background maintenance workers and has no `maintenance_jobs_per_db` setting, so a session `SET` of it is not refused. |
 | `catalog.S-07` | Stannum has no `promote()` function. Inserts fold the write buffer into segments and VACUUM merges them. |
 

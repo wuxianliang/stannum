@@ -84,6 +84,24 @@ divergences:
       Why is this not supported? The explicit form works; is the implicit
       form missing the index's tokenizer options?
 
+  - id: catalog.I-01
+    against: tin-1.0.3
+    kind: gap
+    captures: [two_columns]
+    summary: >
+      TIN rejects (id, body) with 0A000 because its AM cannot be multi-column.
+      Stannum sets amcanmulticol, so PostgreSQL proceeds and fails with the
+      same missing-opclass error as an integer-only key.
+    tin: 0A000 'access method "tin" does not support multicolumn indexes'
+    stannum: >
+      42704 'data type integer has no default operator class for access
+      method "stannum"' (PostgreSQL DefineIndex; we never see the keys).
+      The int-only capture stays 42704; only the AM name differs (DIFF).
+    question: >
+      TIN's AM capability is single-column. Stannum's is not, so a mixed
+      integer+text key list is a missing-opclass error, not an AM-capability
+      error.
+
   - id: catalog.I-07
     against: tin-1.0.3
     kind: gap
