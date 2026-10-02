@@ -14,7 +14,7 @@
 //! Exact `fused_tf` still uses `from_count` on raw position counts.
 
 use segment::bound::BlockBound;
-use segment::ordinals::{CHUNK, ChunkBound, Ordinals, SUB, SUBS};
+use segment::ordinals::{ChunkBound, Ordinals, CHUNK, SUB, SUBS};
 use segment::tf_bucket::TfBucket;
 
 use super::score::saturate;
@@ -157,13 +157,16 @@ fn chunked_cuts(stream: &Ordinals<'_>, pivot: u32, cut: &mut Option<u32>) {
 }
 
 /// Per-field envelopes for every block that intersects `[start, end)`.
-#[must_use]
+///
+/// `Err` means a stored bound could not be read. The interval must not prune:
+/// skipping that block can drop `fused_bound` below `exact_score`. `Ok(None)`
+/// on a field is an empty / non-intersecting block and stays a skip.
 pub(crate) fn interval_envelopes(
     streams: &[(u8, &Ordinals<'_>)],
     start: u32,
     end: u32,
     field_count: u8,
-) -> Vec<Option<FieldEnvelope>> {
+) -> segment::Result<Vec<Option<FieldEnvelope>>> {
     let n = usize::from(field_count.min(16));
     let mut present: Vec<Option<FieldEnvelope>> = vec![None; n];
     for &(field, stream) in streams {
@@ -171,7 +174,7 @@ pub(crate) fn interval_envelopes(
         if index >= n {
             continue;
         }
-        let Some(env) = field_envelope(stream, start, end) else {
+        let Some(env) = field_envelope(stream, start, end)? else {
             continue;
         };
         present[index] = Some(match present[index] {
@@ -179,12 +182,16 @@ pub(crate) fn interval_envelopes(
             None => env,
         });
     }
-    present
+    Ok(present)
 }
 
-fn field_envelope(stream: &Ordinals<'_>, start: u32, end: u32) -> Option<FieldEnvelope> {
+fn field_envelope(
+    stream: &Ordinals<'_>,
+    start: u32,
+    end: u32,
+) -> segment::Result<Option<FieldEnvelope>> {
     if end <= start {
-        return None;
+        return Ok(None);
     }
     match stream.list() {
         Some(list) => list_envelope(stream, list, start, end),
@@ -197,18 +204,30 @@ fn list_envelope(
     list: &[u32],
     start: u32,
     end: u32,
-) -> Option<FieldEnvelope> {
-    let first = *list.first()?;
-    let last = *list.last()?;
+) -> segment::Result<Option<FieldEnvelope>> {
+    let Some((&first, rest)) = list.split_first() else {
+        return Ok(None);
+    };
+    let last = rest.last().copied().unwrap_or(first);
     let list_end = last.saturating_add(1);
     if list_end <= start || first >= end {
-        return None;
+        return Ok(None);
     }
-    let bound = stream.chunk_bound(0).ok().flatten()?;
-    envelope_from_bound(bound, first.max(start), list_end.min(end))
+    match stream.chunk_bound(0)? {
+        Some(bound) => Ok(envelope_from_bound(
+            bound,
+            first.max(start),
+            list_end.min(end),
+        )),
+        None => Ok(None),
+    }
 }
 
-fn chunked_envelope(stream: &Ordinals<'_>, start: u32, end: u32) -> Option<FieldEnvelope> {
+fn chunked_envelope(
+    stream: &Ordinals<'_>,
+    start: u32,
+    end: u32,
+) -> segment::Result<Option<FieldEnvelope>> {
     let mut acc: Option<FieldEnvelope> = None;
     for i in 0..stream.chunk_count() {
         let key = stream.chunk_key(i);
@@ -217,7 +236,7 @@ fn chunked_envelope(stream: &Ordinals<'_>, start: u32, end: u32) -> Option<Field
         if chunk_end <= start || chunk_start >= end {
             continue;
         }
-        let Some(bound) = stream.chunk_bound(i).ok().flatten() else {
+        let Some(bound) = stream.chunk_bound(i)? else {
             continue;
         };
         let Some(env) = envelope_from_bound(bound, chunk_start.max(start), chunk_end.min(end))
@@ -229,7 +248,7 @@ fn chunked_envelope(stream: &Ordinals<'_>, start: u32, end: u32) -> Option<Field
             None => env,
         });
     }
-    acc
+    Ok(acc)
 }
 
 fn envelope_from_bound(
@@ -326,15 +345,19 @@ pub(crate) fn fused_interval_bound(
     boost: f32,
     params: Bm25Params,
 ) -> f32 {
-    let present = interval_envelopes(streams, start, end, field_count);
-    fused_bound(mask, weights, &present, avgdl_star, idf_f32, boost, params)
+    match interval_envelopes(streams, start, end, field_count) {
+        Ok(present) => fused_bound(mask, weights, &present, avgdl_star, idf_f32, boost, params),
+        // A bound-read failure must not look like an empty block: WAND would
+        // prune real hits if the remaining envelope fell below exact_score.
+        Err(_) => f32::INFINITY,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use segment::ordinals::{LIST_MAX, encode_scored};
+    use segment::ordinals::{encode_scored, LIST_MAX};
     use segment::tf_bucket::TfBucket;
 
     use super::*;
@@ -634,7 +657,7 @@ mod tests {
         );
         let bytes = scored(&[0], &[10], &[7]);
         let stream = open(&bytes);
-        let env = field_envelope(&stream, 0, 1).unwrap();
+        let env = field_envelope(&stream, 0, 1).unwrap().unwrap();
         assert_eq!(env.max_tf_bucket, stored);
         let bound = fused_bound(
             0b1,
@@ -679,7 +702,7 @@ mod tests {
             let end0 = next_interval_end(&only, 0).unwrap();
             assert_eq!(end0, 500, "title 0..1000 must truncate at body start 500");
 
-            let env0 = interval_envelopes(&pairs, 0, end0, 2);
+            let env0 = interval_envelopes(&pairs, 0, end0, 2).expect("readable bounds");
             assert!(env0[0].is_some(), "title covers [0, 500)");
             assert!(
                 env0[1].is_none(),
@@ -688,12 +711,13 @@ mod tests {
 
             let end500 = next_interval_end(&only, 500).unwrap();
             assert_eq!(end500, 1000);
-            let env500 = interval_envelopes(&pairs, 500, end500, 2);
+            let env500 = interval_envelopes(&pairs, 500, end500, 2).expect("readable bounds");
             assert!(env500[0].is_some(), "title 0..1000 still intersects [500, 1000)");
             assert!(env500[1].is_some(), "body raises tf* at 500");
 
             let end1000 = next_interval_end(&only, 1000).unwrap();
-            let env1000 = interval_envelopes(&pairs, 1000, end1000, 2);
+            let env1000 =
+                interval_envelopes(&pairs, 1000, end1000, 2).expect("readable bounds");
             assert!(
                 env1000[0].is_none(),
                 "title exclusive end 1000 does not intersect [1000, {end1000})"
@@ -762,8 +786,12 @@ mod tests {
             let tf_star_0 = fused_tf(0b11, &term.weights, &[Some(1), None]);
             assert_eq!(tf_star_0.to_bits(), (term.weights[0] * title_rep).to_bits());
             assert!(
-                env500[1].unwrap().max_tf_bucket > env0[0].unwrap().max_tf_bucket
-                    || body_rep * term.weights[1] > 0.0
+                b500 > b0,
+                "fused bound must rise at 500: before {b0} after {b500}"
+            );
+            assert!(
+                env500[1].unwrap().max_tf_bucket > env0[0].unwrap().max_tf_bucket,
+                "body envelope bucket must exceed the title-only bucket at 500"
             );
         });
         let (_rows, compared, skipped) = check_invariant(&term);
@@ -788,8 +816,8 @@ mod tests {
             assert!(opened[0].1.list().is_none(), "fixture is chunked");
             let end0 = next_interval_end(&only, 0).unwrap();
             assert_eq!(end0, SUB);
-            let env0 = interval_envelopes(&pairs, 0, end0, 1);
-            let env1 = interval_envelopes(&pairs, SUB, SUB * 2, 1);
+            let env0 = interval_envelopes(&pairs, 0, end0, 1).expect("readable bounds");
+            let env1 = interval_envelopes(&pairs, SUB, SUB * 2, 1).expect("readable bounds");
             let b0 = env0[0].unwrap().max_tf_bucket;
             let b1 = env1[0].unwrap().max_tf_bucket;
             assert!(
@@ -851,7 +879,7 @@ mod tests {
                 let and: Vec<u32> = cand_a.intersection(&cand_b).copied().collect();
                 assert_eq!(and, vec![0, 10]);
                 let mut saw_min_too_tight = false;
-                for ordinal in and {
+                for &ordinal in &and {
                     let end = next_interval_end(&only_a, ordinal)
                         .into_iter()
                         .chain(next_interval_end(&only_b, ordinal))
@@ -898,6 +926,76 @@ mod tests {
                 assert!(
                     saw_min_too_tight,
                     "conjunction fixture must show min(per-term bounds) is not an upper bound"
+                );
+
+                let mut intervals = Vec::new();
+                let mut walk = 0usize;
+                while walk < and.len() {
+                    let start = and[walk];
+                    let end = next_interval_end(&only_a, start)
+                        .into_iter()
+                        .chain(next_interval_end(&only_b, start))
+                        .min()
+                        .filter(|end| *end > start)
+                        .unwrap_or_else(|| start.saturating_add(1));
+                    intervals.push((start, end));
+                    while walk < and.len() && and[walk] < end {
+                        walk += 1;
+                    }
+                }
+                let scored: Vec<(u32, f32)> = and
+                    .iter()
+                    .map(|&ordinal| (ordinal, a.exact_at(ordinal) + b.exact_at(ordinal)))
+                    .collect();
+                let exhaustive = top_k(&scored, TOP_K);
+                let mut heap = Vec::new();
+                let mut i = 0usize;
+                for &(start, end) in &intervals {
+                    let bound = fused_interval_bound(
+                        &pairs_a,
+                        a.mask,
+                        &a.weights,
+                        start,
+                        end,
+                        a.field_count,
+                        a.avgdl(),
+                        a.idf(),
+                        a.boost,
+                        a.params,
+                    ) + fused_interval_bound(
+                        &pairs_b,
+                        b.mask,
+                        &b.weights,
+                        start,
+                        end,
+                        b.field_count,
+                        b.avgdl(),
+                        b.idf(),
+                        b.boost,
+                        b.params,
+                    );
+                    let mut inside = Vec::new();
+                    while i < scored.len() && scored[i].0 < end {
+                        if scored[i].0 >= start {
+                            inside.push(scored[i]);
+                        }
+                        i += 1;
+                    }
+                    let threshold = if heap.len() == TOP_K {
+                        heap.last().map(|(_, s)| *s).unwrap_or(f32::NEG_INFINITY)
+                    } else {
+                        f32::NEG_INFINITY
+                    };
+                    if heap.len() == TOP_K && bound <= threshold {
+                        continue;
+                    }
+                    for (ordinal, score) in inside {
+                        insert_top_k(&mut heap, ordinal, score, TOP_K);
+                    }
+                }
+                assert_eq!(
+                    heap, exhaustive,
+                    "conjunction pruned vs exhaustive top-{TOP_K} rows+order"
                 );
             });
         });
@@ -1039,5 +1137,80 @@ mod tests {
         assert_eq!(bound.to_bits(), as_min.to_bits());
         assert_ne!(bound.to_bits(), as_sum.to_bits());
         let _ = fused_len(&[1.0, 1.0], &[10, 100]);
+    }
+
+    fn take_uleb128(bytes: &[u8], at: &mut usize) -> u32 {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let byte = bytes[*at];
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value as u32;
+            }
+            shift += 7;
+        }
+    }
+
+    /// Zero the lazy bounds section of a chunked scored stream. `open` still
+    /// succeeds; the first `chunk_bound` parse fails.
+    fn zero_chunked_bounds(bytes: &mut [u8]) {
+        let mut at = 0;
+        let count = take_uleb128(bytes, &mut at);
+        assert!(
+            count as usize > LIST_MAX,
+            "fixture must be chunked so bounds stay lazy"
+        );
+        let chunks = take_uleb128(bytes, &mut at);
+        let bounds_len = take_uleb128(bytes, &mut at) as usize;
+        const ENTRY: usize = 8;
+        let bounds_at = at + chunks as usize * ENTRY;
+        bytes[bounds_at..bounds_at + bounds_len].fill(0);
+    }
+
+    #[test]
+    fn unreadable_chunk_bound_is_unprunable() {
+        let count = LIST_MAX as u32 + 8;
+        let ordinals: Vec<u32> = (0..count).collect();
+        let tfs = vec![20u32; count as usize];
+        let lens = vec![12u32; count as usize];
+        let mut bytes = scored(&ordinals, &tfs, &lens);
+        zero_chunked_bounds(&mut bytes);
+        let stream = open(&bytes);
+        assert!(
+            stream.chunk_bound(0).is_err(),
+            "fixture must fail the bound read, not look empty"
+        );
+        assert!(
+            stream.list().is_none(),
+            "unreadable fixture is the chunked path"
+        );
+        let pairs = [(0u8, &stream)];
+        let bound = fused_interval_bound(
+            &pairs,
+            0b1,
+            &[1.0],
+            0,
+            count,
+            1,
+            12.0,
+            fused_idf(1, 1),
+            1.0,
+            Bm25Params::default(),
+        );
+        assert!(
+            bound.is_infinite(),
+            "unread bound must not prune: got {bound}"
+        );
+        let exact = saturate(
+            TfBucket::from_count(20).representative_count() as f32,
+            12.0,
+            12.0,
+            fused_idf(1, 1),
+            1.0,
+            Bm25Params::default(),
+        );
+        assert!(exact <= bound, "exact {exact} > unprunable bound {bound}");
     }
 }
