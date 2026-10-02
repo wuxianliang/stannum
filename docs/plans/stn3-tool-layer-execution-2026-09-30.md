@@ -293,7 +293,10 @@ decision (design §5.2) — do not silently proceed.
   - Review focus: design §8 grammar/matrix; `amvalidate`/`amoptions`/
     `ambuildphasename` outside the fence.
 
-- [ ] **4.6 Latency benchmark + decision — GATE**
+- [x] **4.6 Latency benchmark + decision — GATE** (b49ad94) — **RED: MANDATORY MISS**.
+  Dictionary 3.34×, build 1.95× (threshold 1.8×); p50 5.61× (advisory
+  1.3×, no waiver). Semantic smoke stays green — the fused scorer is
+  exact. Decision recorded: **STN4**. Escalated to the user.
   - Scope: §5.2 protocol (paired ratios, PG17, concurrency 1, 20 runs,
     nearest-rank quantiles, corpus checksummed, results to
     `docs/benchmarks/stn3-fielded-poc.json`); Chinese half gated on Phase 3.
