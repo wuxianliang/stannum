@@ -9,7 +9,7 @@
 //! that, so an immutable [`Reader`] and an in-memory [`MutableIndex`] that
 //! grows by one record at a time are interchangeable at query time.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -280,6 +280,22 @@ impl TermData {
     }
 }
 
+/// One field's postings under construction for a multi-column (STN4) term:
+/// the same shape as [`TermData`], with `doc_len` per occurrence being that
+/// field's raw token count (design §1.3).
+struct FieldChannel {
+    /// Strictly increasing.
+    tids: Vec<Tid>,
+    /// Aligned with `tids`.
+    occurrences: Vec<Occurrence>,
+    positions: Vec<u32>,
+}
+
+/// A surface token's per-field channels. `channels[f]` is `None` while the
+/// token has no posting in field `f`.
+struct FieldedTermData {
+    channels: Vec<Option<FieldChannel>>,
+}
 /// Encoded streams handed to cursors. Append-only: a slot is never freed or
 /// moved while the index lives, so borrowed views survive later appends.
 #[derive(Default)]
@@ -345,6 +361,13 @@ pub struct MutableIndex {
     sorted: RefCell<Option<Vec<String>>>,
     encoded: RefCell<Encoded>,
     field_count: u8,
+    /// Whether this instance ingests STN4 fielded records rather than stock
+    /// (or legacy fielded-key) records. A property of the stream, set by the
+    /// first `begin_fielded_document`.
+    fielded: Cell<bool>,
+    fielded_documents: RefCell<BTreeMap<Tid, Vec<u32>>>,
+    fielded_terms: RefCell<FxHashMap<String, FieldedTermData>>,
+    pending_fielded: Cell<Option<Tid>>,
 }
 
 impl Default for MutableIndex {
@@ -356,6 +379,10 @@ impl Default for MutableIndex {
             sorted: RefCell::new(None),
             encoded: RefCell::new(Encoded::default()),
             field_count: 1,
+            fielded: Cell::new(false),
+            fielded_documents: RefCell::new(BTreeMap::new()),
+            fielded_terms: RefCell::new(FxHashMap::default()),
+            pending_fielded: Cell::new(None),
         }
     }
 }
@@ -375,6 +402,153 @@ impl MutableIndex {
         self.field_count
     }
 
+    /// Whether this instance ingests STN4 fielded records. An untagged
+    /// legacy buffer keeps the stock record grammar, so the mode is a
+    /// property of the stream, not of `field_count`.
+    pub fn is_fielded(&self) -> bool {
+        self.fielded.get()
+    }
+
+    fn enter_fielded_mode(&self) -> Result<()> {
+        if self.field_count < crate::trailer::MIN_FIELD_COUNT {
+            return Err(Error::Corrupt("fielded record on a single-column index"));
+        }
+        if !self.terms.borrow().is_empty() || !self.documents.borrow().is_empty() {
+            return Err(Error::Corrupt("mixed fielded and stock records"));
+        }
+        self.fielded.set(true);
+        Ok(())
+    }
+
+    /// Begins one multi-column document for STN4 ingestion (see
+    /// [`crate::segment::SegmentBuilder::begin_fielded_document`]).
+    pub fn begin_fielded_document(&self, tid: Tid) -> Result<()> {
+        self.enter_fielded_mode()?;
+        Tid::new(tid.block, tid.offset)?;
+        let documents = self.fielded_documents.borrow();
+        if documents.contains_key(&tid)
+            || self
+                .pending_fielded
+                .get()
+                .is_some_and(|pending| pending == tid)
+        {
+            return Err(Error::Unordered);
+        }
+        self.pending_fielded.set(Some(tid));
+        Ok(())
+    }
+
+    /// One posting of a multi-column document (design §1.3): the field it
+    /// belongs to, that field's raw token count, and the posting's positions
+    /// within that field.
+    pub fn add_occurrence(
+        &self,
+        token: &str,
+        field: u8,
+        positions: &[u32],
+        field_length: u32,
+    ) -> Result<()> {
+        if !self.fielded.get() {
+            return Err(Error::Corrupt(
+                "fielded occurrence without a fielded document",
+            ));
+        }
+        let tid = self
+            .pending_fielded
+            .get()
+            .ok_or(Error::Corrupt("fielded occurrence without a document"))?;
+        if token.is_empty() {
+            return Err(Error::EmptyTerm);
+        }
+        if field >= self.field_count {
+            return Err(Error::Corrupt("fielded occurrence field"));
+        }
+        if positions.is_empty() {
+            return Err(Error::InvalidPositions);
+        }
+        crate::payload::validate_positions(positions)?;
+        if field_length < *positions.last().expect("nonempty") {
+            return Err(Error::InvalidPositions);
+        }
+        // Length agreement is validated before any mutation; the posting is
+        // installed first and the document's field length committed after, so
+        // a rejected occurrence leaves the index exactly as it was.
+        if let Some(lengths) = self.fielded_documents.borrow().get(&tid)
+            && let Some(&cell) = lengths.get(usize::from(field))
+            && cell != 0
+            && cell != field_length
+        {
+            return Err(Error::Corrupt("fielded length disagreement"));
+        }
+        let appended = {
+            let documents = self.fielded_documents.borrow();
+            documents.keys().next_back().is_none_or(|last| *last < tid)
+        };
+        let mut encoded = self.encoded.borrow_mut();
+        encoded.documents = None;
+        encoded.lengths = None;
+        encoded.doc_list = None;
+        if !appended {
+            // Reused heap space before existing documents renumbers every
+            // ordinal after it: every encoded stream is stale.
+            encoded.terms.clear();
+        }
+        let bucket = crate::tf_bucket::TfBucket::from_count(positions.len() as u32).value();
+        let mut terms = self.fielded_terms.borrow_mut();
+        let mut sorted = self.sorted.borrow_mut();
+        let vacant = !terms.contains_key(token);
+        let data = terms
+            .entry(token.to_owned())
+            .or_insert_with(|| FieldedTermData {
+                channels: (0..usize::from(self.field_count)).map(|_| None).collect(),
+            });
+        if vacant {
+            *sorted = None;
+        }
+        if !encoded.terms.is_empty() {
+            encoded.terms.remove(token);
+        }
+        let channel = data
+            .channels
+            .get_mut(usize::from(field))
+            .ok_or(Error::Corrupt("fielded occurrence field"))?
+            .get_or_insert_with(|| FieldChannel {
+                tids: Vec::new(),
+                occurrences: Vec::new(),
+                positions: Vec::new(),
+            });
+        let at = match channel.tids.last() {
+            Some(last) if *last < tid => channel.tids.len(),
+            _ => channel.tids.partition_point(|existing| *existing < tid),
+        };
+        let start = u32::try_from(channel.positions.len())
+            .ok()
+            .filter(|start| start.checked_add(positions.len() as u32).is_some())
+            .ok_or(Error::Corrupt("mutable index positions"))?;
+        channel.positions.extend_from_slice(positions);
+        channel.tids.insert(at, tid);
+        channel.occurrences.insert(
+            at,
+            Occurrence {
+                bucket,
+                doc_len: field_length,
+                start,
+                len: positions.len() as u32,
+            },
+        );
+        let mut documents = self.fielded_documents.borrow_mut();
+        let lengths = documents
+            .entry(tid)
+            .or_insert_with(|| vec![0u32; usize::from(self.field_count)]);
+        let cell = lengths
+            .get_mut(usize::from(field))
+            .ok_or(Error::Corrupt("fielded occurrence field"))?;
+        if *cell == 0 {
+            *cell = field_length;
+            *self.total_length.borrow_mut() += u64::from(field_length);
+        }
+        Ok(())
+    }
     #[allow(clippy::type_complexity)]
     pub fn field_norms(&self) -> Result<Option<(u8, Vec<u64>, Vec<u32>)>> {
         match self.sidecar_tables()? {
@@ -386,6 +560,29 @@ impl MutableIndex {
     fn sidecar_tables(&self) -> Result<Option<crate::trailer::Tables>> {
         if self.field_count < crate::trailer::MIN_FIELD_COUNT {
             return Ok(None);
+        }
+        if self.fielded.get() {
+            let documents: Vec<Tid> = self.fielded_documents.borrow().keys().copied().collect();
+            let mut tables = crate::trailer::Tables::new(self.field_count, documents.len() as u32)?;
+            let terms = self.fielded_terms.borrow();
+            for (term, data) in terms.iter() {
+                for (field, channel) in data.channels.iter().enumerate() {
+                    let Some(channel) = channel else { continue };
+                    for (tid, occurrence) in channel.tids.iter().zip(&channel.occurrences) {
+                        let ordinal = documents
+                            .binary_search(tid)
+                            .expect("every occurrence belongs to a recorded document")
+                            as u32;
+                        tables.add(
+                            field as u8,
+                            term,
+                            ordinal,
+                            self.positions_of(channel, occurrence).len() as u32,
+                        )?;
+                    }
+                }
+            }
+            return Ok(Some(tables));
         }
         let documents: Vec<Tid> = self.documents.borrow().keys().copied().collect();
         let mut tables = crate::trailer::Tables::new(self.field_count, documents.len() as u32)?;
@@ -420,6 +617,30 @@ impl MutableIndex {
         self.check_sidecar()?;
         let mut builder = crate::segment::SegmentBuilder::default();
         builder.set_field_count(self.field_count)?;
+        if self.fielded.get() {
+            let documents = self.fielded_documents.borrow();
+            let terms = self.fielded_terms.borrow();
+            for (tid, lengths) in documents.iter() {
+                builder.begin_fielded_document(*tid)?;
+                for (term, data) in terms.iter() {
+                    for (field, channel) in data.channels.iter().enumerate() {
+                        let Some(channel) = channel else { continue };
+                        if let Ok(i) = channel.tids.binary_search(tid) {
+                            builder.add_occurrence(
+                                term,
+                                field as u8,
+                                self.positions_of(channel, &channel.occurrences[i]),
+                                lengths
+                                    .get(field)
+                                    .copied()
+                                    .unwrap_or(channel.occurrences[i].doc_len),
+                            )?;
+                        }
+                    }
+                }
+            }
+            return Ok(builder.finish());
+        }
         let documents = self.documents.borrow();
         let terms = self.terms.borrow();
         for (tid, doc_len) in documents.iter() {
@@ -525,7 +746,36 @@ impl MutableIndex {
     }
 
     pub fn is_empty(&self) -> bool {
+        if self.fielded.get() {
+            return self.fielded_documents.borrow().is_empty();
+        }
         self.documents.borrow().is_empty()
+    }
+
+    /// Adds one encoded STN4 record (see [`crate::forward::FieldedRecord`])
+    /// at the start of `bytes`, returning the bytes consumed. A record with
+    /// no groups registers nothing, matching the stock token-less rule.
+    /// The record is decoded and checked against `field_count` completely
+    /// before any state is installed: a malformed tagged record never
+    /// leaves a partially ingested document behind (design §6.3.1).
+    pub fn add_fielded_encoded(&self, bytes: &[u8]) -> Result<usize> {
+        self.enter_fielded_mode()?;
+        let (record, consumed) = crate::forward::FieldedRecord::decode(bytes)?;
+        for group in &record.groups {
+            if group.field >= self.field_count {
+                return Err(Error::Corrupt("fielded occurrence field"));
+            }
+        }
+        if record.groups.is_empty() {
+            return Ok(consumed);
+        }
+        self.begin_fielded_document(record.tid)?;
+        for group in &record.groups {
+            for term in &group.terms {
+                self.add_occurrence(&term.term, group.field, &term.positions, group.field_length)?;
+            }
+        }
+        Ok(consumed)
     }
 
     /// The documents in TID order, shared until the next insertion.
@@ -533,7 +783,16 @@ impl MutableIndex {
         if let Some(list) = &self.encoded.borrow().doc_list {
             return list.clone();
         }
-        let list = Rc::new(self.documents.borrow().keys().copied().collect::<Vec<_>>());
+        let list = if self.fielded.get() {
+            self.fielded_documents
+                .borrow()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        } else {
+            self.documents.borrow().keys().copied().collect::<Vec<_>>()
+        };
+        let list = Rc::new(list);
         self.encoded.borrow_mut().doc_list = Some(list.clone());
         list
     }
@@ -572,9 +831,68 @@ impl MutableIndex {
         if let Some(entry) = self.encoded.borrow().terms.get(term) {
             return Some(*entry);
         }
+        if self.fielded.get() {
+            let terms = self.fielded_terms.borrow();
+            let data = terms.get(term)?;
+            return Some(self.encode_fielded_term(term, data));
+        }
         let terms = self.terms.borrow();
         let data = terms.get(term)?;
         Some(self.encode_term(term, data))
+    }
+
+    /// Encodes one multi-column term: per-field stock streams wrapped in an
+    /// FCH1 directory (design §1.2/§1.3). Parent `df` is the union across
+    /// channels; `max_tf_bucket` the max of the channel maxima; a field with
+    /// no postings is omitted from both directories.
+    fn encode_fielded_term(&self, term: &str, data: &FieldedTermData) -> TermEntry {
+        let documents = self.doc_list();
+        let mut union = Vec::new();
+        let mut max_tf_bucket = 0u8;
+        let mut streams: Vec<crate::channels::FieldStreams> = Vec::new();
+        for (field, channel) in data.channels.iter().enumerate() {
+            let Some(channel) = channel else { continue };
+            let mut payload = PayloadBuilder::default();
+            let mut ordinals = Vec::with_capacity(channel.tids.len());
+            let mut scores = Vec::with_capacity(channel.tids.len());
+            for (tid, occurrence) in channel.tids.iter().zip(&channel.occurrences) {
+                ordinals.push(
+                    documents
+                        .binary_search(tid)
+                        .expect("every occurrence belongs to a recorded document")
+                        as u32,
+                );
+                scores.push((occurrence.bucket, occurrence.doc_len));
+                payload
+                    .push(self.positions_of(channel, occurrence))
+                    .expect("positions validated on insertion");
+                max_tf_bucket = max_tf_bucket.max(occurrence.bucket);
+                union.push(*tid);
+            }
+            streams.push(crate::channels::FieldStreams {
+                field: field as u8,
+                ordinals: crate::ordinals::encode_scored(&ordinals, &scores),
+                payload: payload.finish(),
+            });
+        }
+        union.sort_unstable();
+        union.dedup();
+        let encoded = crate::channels::encode(self.field_count, &streams)
+            .expect("writer streams are well formed");
+        let mut encoded_slots = self.encoded.borrow_mut();
+        let entry = TermEntry {
+            df: union.len() as u32,
+            max_tf_bucket,
+            ordinals: encoded_slots.push(encoded.ordinals),
+            payload: encoded_slots.push(encoded.payload),
+        };
+        encoded_slots.terms.insert(term.to_owned(), entry);
+        entry
+    }
+
+    fn positions_of<'a>(&self, channel: &'a FieldChannel, occurrence: &Occurrence) -> &'a [u32] {
+        let start = occurrence.start as usize;
+        &channel.positions[start..start + occurrence.len as usize]
     }
 
     /// Slots of the offsets and page table, encoded on first use.
@@ -597,8 +915,19 @@ impl MutableIndex {
             return slot;
         }
         let mut bytes = Vec::with_capacity(self.documents.borrow().len() * 4);
-        for len in self.documents.borrow().values() {
-            bytes.extend_from_slice(&len.to_le_bytes());
+        if self.fielded.get() {
+            for lengths in self.fielded_documents.borrow().values() {
+                let doc_len = lengths
+                    .iter()
+                    .copied()
+                    .try_fold(0u32, |sum, len| sum.checked_add(len))
+                    .unwrap_or(u32::MAX);
+                bytes.extend_from_slice(&doc_len.to_le_bytes());
+            }
+        } else {
+            for len in self.documents.borrow().values() {
+                bytes.extend_from_slice(&len.to_le_bytes());
+            }
         }
         let mut encoded = self.encoded.borrow_mut();
         let slot = (encoded.push(bytes).offset >> 32) as usize;
@@ -647,6 +976,9 @@ impl AreaFetch for MutableIndex {
 
 impl Index for MutableIndex {
     fn document_count(&self) -> u32 {
+        if self.fielded.get() {
+            return self.fielded_documents.borrow().len() as u32;
+        }
         self.documents.borrow().len() as u32
     }
 
@@ -667,7 +999,16 @@ impl Index for MutableIndex {
         let names: Vec<String> = {
             let mut sorted = self.sorted.borrow_mut();
             let sorted = sorted.get_or_insert_with(|| {
-                let mut names: Vec<String> = self.terms.borrow().keys().cloned().collect();
+                let source = if self.fielded.get() {
+                    self.fielded_terms
+                        .borrow()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    self.terms.borrow().keys().cloned().collect::<Vec<_>>()
+                };
+                let mut names = source;
                 names.sort_unstable();
                 names
             });
@@ -929,6 +1270,118 @@ mod tests {
         ForwardRecord::from_tokens(Tid::new(id / 50, (id % 50 + 1) as u16).unwrap(), refs).unwrap()
     }
 
+    /// Feeds `columns` through the STN4 posting API: per-field grouping with
+    /// raw per-field positions and field lengths.
+    fn add_fielded(index: &MutableIndex, id: u32, columns: &[&str]) -> crate::Result<()> {
+        index.begin_fielded_document(Tid::new(id / 50, (id % 50 + 1) as u16).unwrap())?;
+        for (field, text) in columns.iter().enumerate() {
+            let mut by_term: std::collections::BTreeMap<&str, Vec<u32>> =
+                std::collections::BTreeMap::new();
+            let mut len = 0u32;
+            for (i, word) in text.split_whitespace().enumerate() {
+                len += 1;
+                by_term.entry(word).or_default().push(i as u32 + 1);
+            }
+            if len == 0 {
+                continue;
+            }
+            for (word, positions) in by_term {
+                index.add_occurrence(word, field as u8, &positions, len)?;
+            }
+        }
+        crate::Result::Ok(())
+    }
+
+    #[test]
+    fn fielded_mutable_index_round_trips_through_the_buffer_grammar() {
+        // insert → buffer → fold: the STN4 record grammar decodes back into
+        // the same mutable state, and flush matches a segment built by hand.
+        let tid = Tid::new(0, 1).unwrap();
+        let mut record = crate::forward::FieldedRecord {
+            tid,
+            groups: Vec::new(),
+        };
+        for (field, text, len) in [(0u8, "beer wine", 2u32), (1, "beer", 1)] {
+            let mut terms = Vec::new();
+            for (i, word) in text.split_whitespace().enumerate() {
+                if word == "beer" {
+                    terms.push(crate::forward::FieldedTerm {
+                        term: word.into(),
+                        positions: vec![i as u32 + 1],
+                    });
+                }
+            }
+            if field == 0 {
+                terms.push(crate::forward::FieldedTerm {
+                    term: "wine".into(),
+                    positions: vec![2],
+                });
+            }
+            record.groups.push(crate::forward::FieldedGroup {
+                field,
+                field_length: len,
+                terms,
+            });
+        }
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&crate::forward::STN4_BUFFER_TAG);
+        record.encode(&mut stream).unwrap();
+        let mutable = MutableIndex::with_field_count(2).unwrap();
+        let mut at = 2;
+        while at < stream.len() {
+            at += mutable.add_fielded_encoded(&stream[at..]).unwrap();
+        }
+        assert_eq!(mutable.document_count(), 1);
+        let beer = mutable.term("beer").unwrap().unwrap();
+        assert_eq!(beer.df(), 1, "union df across the two channels");
+        let channels = beer.channels(2).unwrap();
+        assert_eq!(channels.len(), 2);
+        mutable.check_sidecar().unwrap();
+        let bytes = mutable.flush().unwrap();
+        let segment = Reader::parse(&bytes).unwrap();
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.version, 2);
+        assert_eq!(trailer.row(0, 0), Some(2));
+        assert_eq!(trailer.row(0, 1), Some(1));
+        let segment_beer = segment.term("beer").unwrap().unwrap();
+        assert_eq!(segment_beer.df(), 1);
+        assert!(crate::verify::verify_segment(&bytes).is_clean());
+        // The same postings through the direct API produce the same blob.
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(2).unwrap();
+        builder.begin_fielded_document(tid).unwrap();
+        builder.add_occurrence("beer", 0, &[1], 2).unwrap();
+        builder.add_occurrence("wine", 0, &[2], 2).unwrap();
+        builder.add_occurrence("beer", 1, &[1], 1).unwrap();
+        assert_eq!(bytes, builder.finish());
+    }
+
+    #[test]
+    fn fielded_mutable_index_df_is_the_union_not_the_sum() {
+        let mutable = MutableIndex::with_field_count(2).unwrap();
+        add_fielded(&mutable, 1, &["needle", "needle"]).unwrap();
+        add_fielded(&mutable, 2, &["needle", "pad"]).unwrap();
+        add_fielded(&mutable, 3, &["needle", "needle needle"]).unwrap();
+        let needle = mutable.term("needle").unwrap().unwrap();
+        assert_eq!(needle.df(), 3, "union df == 3, not 4");
+        let channels = needle.channels(2).unwrap();
+        let per_field: Vec<(u8, u32)> = channels
+            .iter()
+            .map(|(field, child)| (*field, child.df()))
+            .collect();
+        assert_eq!(per_field, vec![(0, 3), (1, 2)]);
+        assert_eq!(
+            per_field.iter().map(|(_, df)| df).sum::<u32>(),
+            5,
+            "the sum the entry df must not be"
+        );
+        assert_eq!(mutable.total_length(), 2 + 2 + 3);
+        let bytes = mutable.flush().unwrap();
+        let segment = Reader::parse(&bytes).unwrap();
+        assert_eq!(segment.term("needle").unwrap().unwrap().df(), 3);
+        assert!(crate::verify::verify_segment(&bytes).is_clean());
+    }
+
     #[test]
     fn mutable_index_crc_checks_sidecar_before_flush() {
         let mutable = MutableIndex::with_field_count(2).unwrap();
@@ -936,22 +1389,11 @@ mod tests {
             .add_record(fielded_record(1, &["beer wine", "beer"]))
             .unwrap();
         mutable.check_sidecar().unwrap();
-        let bytes = mutable.flush().unwrap();
-        let segment = Reader::parse(&bytes).unwrap();
-        let trailer = segment.trailer().unwrap();
-        assert_eq!(trailer.field_count, 2);
-        assert_eq!(trailer.row(0, 0), Some(2));
-        assert_eq!(trailer.row(0, 1), Some(1));
-        let beer = trailer.df_agg.iter().find(|e| e.token == "beer").unwrap();
-        assert_eq!(beer.df, 1);
-        let builder_blob = {
-            let mut builder = SegmentBuilder::default();
-            builder.set_field_count(2).unwrap();
-            builder
-                .add_record(&fielded_record(1, &["beer wine", "beer"]))
-                .unwrap();
-            builder.finish()
-        };
-        assert_eq!(bytes, builder_blob);
+        // Legacy fielded-key content must not reach a flush: this version
+        // writes one TermEntry per surface token, never a `~{h}~` key.
+        assert_eq!(
+            mutable.flush().unwrap_err(),
+            Error::Corrupt("fielded build expects add_occurrence")
+        );
     }
 }

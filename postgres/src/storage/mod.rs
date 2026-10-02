@@ -70,7 +70,6 @@ use segment::segment::{Segment, SegmentBuilder};
 use segment::set::{Cursor, Difference, Intersection};
 use tinql::runtime::Query;
 
-use crate::fields::fielded_key;
 use tinql::runtime::plan::{Limits, plan};
 use tokenizer::{CompiledTokenizerPipeline, Tokenizer};
 
@@ -704,6 +703,40 @@ fn apply_field_weights(names: &[String], weights: &mut [f32], raw: &str) {
     }
 }
 
+/// Test-only introspection: the persisted write-buffer stream, exactly as
+/// the pages hold it.
+#[cfg(feature = "pg_test")]
+pub(crate) unsafe fn test_buffer_stream(index: pg_sys::Relation) -> Vec<u8> {
+    unsafe {
+        let (_, meta) = read_meta(index, false);
+        read_buffer_stream(index, &meta.buffer)
+    }
+}
+
+/// Test-only: replaces the write buffer wholesale (docs included), as VACUUM
+/// and a fold do, so fixtures can plant legacy generations.
+#[cfg(feature = "pg_test")]
+pub(crate) unsafe fn test_replace_buffer(index: pg_sys::Relation, data: &[u8], docs: u32) {
+    unsafe {
+        let (guard, mut meta) = read_meta(index, true);
+        replace_buffer(index, &mut meta.buffer, data, docs);
+        write_meta(index, &guard, &meta);
+        drop(guard);
+    }
+}
+
+/// Test-only: the immutable segment blobs, in directory order.
+#[cfg(feature = "pg_test")]
+pub(crate) unsafe fn test_segment_blobs(index: pg_sys::Relation) -> Vec<Vec<u8>> {
+    unsafe {
+        let (_, meta) = read_meta(index, false);
+        meta.segments
+            .iter()
+            .map(|entry| read_run(index, entry.run, &format!("segment {}", entry.generation)))
+            .collect()
+    }
+}
+
 /// Publishes `meta`, then does what the structural change in progress could
 /// only do once its meta page is written (see [`AfterPublication`]).
 unsafe fn write_meta(index: pg_sys::Relation, buffer: &Buffer, meta: &Meta) {
@@ -931,9 +964,6 @@ fn tokens_of<'t>(
         .map(|token| (token.text, token.pos))
 }
 
-/// Position stride so tokens of distinct fields never share a position.
-const FIELD_POS_STRIDE: u32 = 1_000_000;
-
 fn segment_builder(field_count: usize) -> SegmentBuilder {
     let mut builder = SegmentBuilder::default();
     if field_count >= 2 {
@@ -978,37 +1008,60 @@ fn encode_document(
     tid: Tid,
     texts: &[Option<String>],
 ) -> Vec<u8> {
-    let record = if texts.len() < 2 {
+    let mut bytes = Vec::new();
+    if texts.len() < 2 {
         let text = texts.first().and_then(|text| text.as_deref()).unwrap_or("");
-        codec(ForwardRecord::from_token_stream(
+        let record = codec(ForwardRecord::from_token_stream(
             tid,
             tokens_of(tokenizer, text),
-        ))
+        ));
+        codec(record.encode(&mut bytes));
     } else {
-        let field_count = u8::try_from(texts.len()).unwrap_or(16);
-        let mut owned = Vec::new();
-        for (ordinal, text) in texts.iter().enumerate() {
-            let Some(text) = text else {
-                continue;
-            };
-            let ordinal = u8::try_from(ordinal).expect("key count ≤ 16");
-            for token in tokenizer.tokenize(text) {
-                let key = fielded_key(ordinal, token.text.as_ref(), field_count)
-                    .unwrap_or_else(|error| pgrx::error!("stannum: fielded term key: {error}"));
-                let pos = token
-                    .pos
-                    .saturating_add(u32::from(ordinal).saturating_mul(FIELD_POS_STRIDE));
-                owned.push((key, pos));
-            }
-        }
-        codec(ForwardRecord::from_tokens(
-            tid,
-            owned.iter().map(|(key, pos)| (key.as_str(), *pos)),
-        ))
-    };
-    let mut bytes = Vec::new();
-    codec(record.encode(&mut bytes));
+        // STN4 (design §1.3/§6.3.1): one record per document whose groups
+        // name field, field length and positions. No `~{h}~` key.
+        let record = fielded_record(tokenizer, tid, texts);
+        codec(record.encode(&mut bytes));
+    }
     bytes
+}
+/// Groups one document's per-field tokenization (design §1.3): every
+/// posting names its field and that field's raw token count, positions are
+/// the field's own, and a field with no tokens is omitted. `~{h}~` keys are
+/// gone from the write path.
+fn fielded_record(
+    tokenizer: &CompiledTokenizerPipeline,
+    tid: Tid,
+    texts: &[Option<String>],
+) -> segment::forward::FieldedRecord {
+    let mut groups = Vec::new();
+    for (ordinal, text) in texts.iter().enumerate() {
+        let Some(text) = text else {
+            continue;
+        };
+        let ordinal = u8::try_from(ordinal).expect("key count ≤ 16");
+        let mut by_term: std::collections::BTreeMap<String, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        let mut field_length = 0u32;
+        for token in tokenizer.tokenize(text) {
+            field_length += 1;
+            by_term
+                .entry(token.text.as_ref().to_owned())
+                .or_default()
+                .push(token.pos);
+        }
+        if field_length == 0 {
+            continue;
+        }
+        groups.push(segment::forward::FieldedGroup {
+            field: ordinal,
+            field_length,
+            terms: by_term
+                .into_iter()
+                .map(|(term, positions)| segment::forward::FieldedTerm { term, positions })
+                .collect(),
+        });
+    }
+    segment::forward::FieldedRecord { tid, groups }
 }
 
 fn add_fielded_stream(
@@ -1022,26 +1075,29 @@ fn add_fielded_stream(
         codec(builder.add_token_stream(tid, tokens_of(tokenizer, text)));
         return;
     }
-    let field_count = u8::try_from(texts.len()).unwrap_or(16);
-    let mut owned = Vec::new();
-    for (ordinal, text) in texts.iter().enumerate() {
-        let Some(text) = text else {
-            continue;
-        };
-        let ordinal = u8::try_from(ordinal).expect("key count ≤ 16");
-        for token in tokenizer.tokenize(text) {
-            let key = fielded_key(ordinal, token.text.as_ref(), field_count)
-                .unwrap_or_else(|error| pgrx::error!("stannum: fielded term key: {error}"));
-            let pos = token
-                .pos
-                .saturating_add(u32::from(ordinal).saturating_mul(FIELD_POS_STRIDE));
-            owned.push((key, pos));
+    add_fielded_record(builder, &fielded_record(tokenizer, tid, texts));
+}
+
+/// Replays one decoded STN4 record into the segment builder. Every group is
+/// checked against the builder's field count before the document begins: a
+/// record a tagged stream should never have held is rejected whole (design
+/// §6.3.1 arm 6.1), not half-ingested.
+fn add_fielded_record(builder: &mut SegmentBuilder, record: &segment::forward::FieldedRecord) {
+    let field_count = builder.field_count();
+    if record.groups.iter().any(|group| group.field >= field_count) {
+        pgrx::error!("stannum: fielded record names field past the envelope");
+    }
+    codec(builder.begin_fielded_document(record.tid));
+    for group in &record.groups {
+        for term in &group.terms {
+            codec(builder.add_occurrence(
+                &term.term,
+                group.field,
+                &term.positions,
+                group.field_length,
+            ));
         }
     }
-    codec(builder.add_token_stream(
-        tid,
-        owned.into_iter().map(|(key, pos)| (Cow::Owned(key), pos)),
-    ));
 }
 
 fn tid_of(pointer: pg_sys::ItemPointerData) -> Tid {
@@ -2229,6 +2285,10 @@ struct BufferIndex {
     epoch: u32,
     covered: usize,
     pages: Vec<u32>,
+    /// Whether the ingested stream is STN4 fielded (tagged) rather than
+    /// stock records — decided from the tag on the first fill and kept
+    /// for every later append, which never rewrites the generation.
+    fielded: bool,
     index: Rc<MutableIndex>,
 }
 
@@ -2318,6 +2378,7 @@ unsafe fn buffer_index(
             epoch: state.epoch,
             covered: 0,
             pages: vec![state.head],
+            fielded: false,
             index: Rc::new(
                 MutableIndex::with_field_count(field_count.max(1))
                     .unwrap_or_else(|_| MutableIndex::default()),
@@ -2339,8 +2400,21 @@ unsafe fn buffer_index(
             return None;
         };
         let mut at = 0;
+        if entry.covered == 0 && field_count >= 2 && !entry.fielded {
+            // First fill of a multi-column buffer: the tag selects the
+            // grammar (design §6.3.1 arm 6). An untagged legacy stream keeps
+            // the stock record reader, exactly as 4.6 read it.
+            entry.fielded = tail.starts_with(&segment::forward::STN4_BUFFER_TAG);
+            if entry.fielded {
+                at = segment::forward::STN4_BUFFER_TAG.len();
+            }
+        }
         while at < tail.len() {
-            at += codec_in(entry.index.add_encoded(&tail[at..]), "write buffer");
+            at += if entry.fielded {
+                codec_in(entry.index.add_fielded_encoded(&tail[at..]), "write buffer")
+            } else {
+                codec_in(entry.index.add_encoded(&tail[at..]), "write buffer")
+            };
         }
         entry.covered = state.bytes as usize;
     }
@@ -3056,11 +3130,26 @@ unsafe fn fold(index: pg_sys::Relation, meta: &mut Meta, record: &[u8]) {
     unsafe {
         let stream = read_buffer_stream(index, &meta.buffer);
         let mut builder = segment_builder(meta.fields.len());
-        for record in segment::forward::records(&stream) {
-            codec_in(
-                builder.add_record(&codec_in(record, "write buffer")),
-                "write buffer",
-            );
+        if meta.fields.len() >= 2 {
+            let body = stream
+                .strip_prefix(&segment::forward::STN4_BUFFER_TAG)
+                .unwrap_or_else(|| {
+                    corrupt(
+                        "Stannum write buffer: missing STN4 tag on a multi-column buffer"
+                            .to_owned(),
+                    )
+                });
+            for record in segment::forward::fielded_records(body) {
+                let record = codec_in(record, "write buffer");
+                add_fielded_record(&mut builder, &record);
+            }
+        } else {
+            for record in segment::forward::records(&stream) {
+                codec_in(
+                    builder.add_record(&codec_in(record, "write buffer")),
+                    "write buffer",
+                );
+            }
         }
         let (blob, docs, total_length) = finish_builder(builder);
         add_segment(
@@ -3071,7 +3160,16 @@ unsafe fn fold(index: pg_sys::Relation, meta: &mut Meta, record: &[u8]) {
             total_length,
             MAX_MERGE_DOCS.get() as u64,
         );
-        replace_buffer(index, &mut meta.buffer, record, 1);
+        if meta.fields.len() >= 2 {
+            // The replaced buffer is a fresh nonempty multi-column stream
+            // this version writes: it begins with the tag (design §6.3.1).
+            let mut tagged = Vec::with_capacity(2 + record.len());
+            tagged.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
+            tagged.extend_from_slice(record);
+            replace_buffer(index, &mut meta.buffer, &tagged, 1);
+        } else {
+            replace_buffer(index, &mut meta.buffer, record, 1);
+        }
     }
 }
 
@@ -3565,6 +3663,38 @@ pub unsafe fn insert(
             // Rebuilds normally conflict with the caller's relation lock;
             // validate the persisted tokenizer nevertheless, never publishing
             // bytes encoded for a different index identity or pipeline.
+        };
+        // Multi-column write fence and tag birth (design §6.3.1). The
+        // persisted tag — not any in-memory shape — is the generation: it is
+        // read before any conversion into builders, an untagged well-formed
+        // stream (including zero-term) is stale and errors before any page is
+        // dirtied, and the first insert into an empty buffer writes the tag
+        // and the record as one WAL-logged append.
+        let bytes = if meta.fields.len() >= 2 {
+            if (meta.buffer.docs == 0) != (meta.buffer.bytes == 0) {
+                corrupt("Stannum write buffer: document and byte counts disagree".to_owned());
+            }
+            if meta.buffer.bytes == 0 {
+                let mut tagged = Vec::with_capacity(bytes.len() + 2);
+                tagged.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
+                tagged.extend_from_slice(&bytes);
+                tagged
+            } else {
+                let stream = read_buffer_stream(index, &meta.buffer);
+                if !stream.starts_with(&segment::forward::STN4_BUFFER_TAG) {
+                    // Arm 6.2: the untagged stream must be a well-formed
+                    // legacy record stream to be stale; garbage is corrupt.
+                    for record in segment::forward::records(&stream) {
+                        codec_in(record, "write buffer");
+                    }
+                    pgrx::error!(
+                        "stannum: index holds a pre-STN4 fielded write buffer; REINDEX the index"
+                    );
+                }
+                bytes
+            }
+        } else {
+            bytes
         };
         let folded = folds(index, &meta.buffer, bytes.len());
         if folded {
@@ -4206,24 +4336,58 @@ pub unsafe fn bulk_delete(
             }
             if meta.buffer.docs > 0 {
                 let stream = unsafe { read_buffer_stream(index, &meta.buffer) };
+                let tagged = meta.fields.len() >= 2
+                    && stream.starts_with(&segment::forward::STN4_BUFFER_TAG);
+                let body = if tagged {
+                    &stream[segment::forward::STN4_BUFFER_TAG.len()..]
+                } else {
+                    &stream[..]
+                };
                 let mut kept = Vec::with_capacity(stream.len());
                 let mut kept_docs = 0u32;
                 let mut dropped = false;
-                for record in segment::forward::records(&stream) {
-                    let record = codec_in(record, "write buffer");
-                    if is_dead(record.tid) {
-                        removed += 1;
-                        dropped = true;
-                    } else {
-                        live += 1;
-                        kept_docs += 1;
-                        codec(record.encode(&mut kept));
+                if tagged {
+                    for record in segment::forward::fielded_records(body) {
+                        let record = codec_in(record, "write buffer");
+                        if is_dead(record.tid) {
+                            removed += 1;
+                            dropped = true;
+                        } else {
+                            live += 1;
+                            kept_docs += 1;
+                            codec(record.encode(&mut kept));
+                        }
                     }
-                }
-                if dropped {
-                    unsafe { replace_buffer(index, &mut meta.buffer, &kept, kept_docs) };
-                    race_point("bulk_delete:buffered");
-                    changed = true;
+                    if dropped {
+                        // The kept stream stays tagged while it holds
+                        // documents; an empty one is BufferEmpty, not a lone
+                        // tag (design §6.3.1 arm 1).
+                        let mut tagged_kept = Vec::with_capacity(kept.len() + 2);
+                        if kept_docs > 0 {
+                            tagged_kept.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
+                        }
+                        tagged_kept.extend_from_slice(&kept);
+                        unsafe { replace_buffer(index, &mut meta.buffer, &tagged_kept, kept_docs) };
+                        race_point("bulk_delete:buffered");
+                        changed = true;
+                    }
+                } else {
+                    for record in segment::forward::records(body) {
+                        let record = codec_in(record, "write buffer");
+                        if is_dead(record.tid) {
+                            removed += 1;
+                            dropped = true;
+                        } else {
+                            live += 1;
+                            kept_docs += 1;
+                            codec(record.encode(&mut kept));
+                        }
+                    }
+                    if dropped {
+                        unsafe { replace_buffer(index, &mut meta.buffer, &kept, kept_docs) };
+                        race_point("bulk_delete:buffered");
+                        changed = true;
+                    }
                 }
             }
         }
@@ -4970,9 +5134,19 @@ pub unsafe fn segment_rows(index: pg_sys::Relation) -> Vec<SegmentRow> {
         }
         if meta.buffer.docs > 0 {
             let stream = read_buffer_stream(index, &meta.buffer);
-            let lengths: u64 = segment::forward::records(&stream)
-                .map(|record| u64::from(codec_in(record, "write buffer").doc_len))
-                .sum();
+            let lengths: u64 = if meta.fields.len() >= 2
+                && stream.starts_with(&segment::forward::STN4_BUFFER_TAG)
+            {
+                segment::forward::fielded_records(
+                    &stream[segment::forward::STN4_BUFFER_TAG.len()..],
+                )
+                .map(|record| u64::from(codec_in(record, "write buffer").total_length()))
+                .sum()
+            } else {
+                segment::forward::records(&stream)
+                    .map(|record| u64::from(codec_in(record, "write buffer").doc_len))
+                    .sum()
+            };
             rows.push(SegmentRow {
                 ordinal: meta.segments.len() as i64,
                 kind: "mutable".to_owned(),

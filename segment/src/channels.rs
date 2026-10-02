@@ -38,7 +38,6 @@ pub(crate) const MAGIC: &[u8; 4] = b"FCH1";
 /// A.2's flush is the production caller. Until then the tests are the writer,
 /// so a non-test build does not name this type.
 #[derive(Clone, Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct FieldStreams {
     pub field: u8,
     pub ordinals: Vec<u8>,
@@ -48,7 +47,6 @@ pub(crate) struct FieldStreams {
 /// The two extents of one multi-column term, or the bare stock streams when
 /// `field_count == 1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct EncodedChannels {
     pub ordinals: Vec<u8>,
     pub payload: Vec<u8>,
@@ -63,7 +61,6 @@ fn directory_len(n: u128) -> Result<usize> {
         .ok_or(Error::Corrupt("channel directory"))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn stream_count(bytes: &[u8], what: &'static str) -> Result<u32> {
     if bytes.is_empty() {
         return Ok(0);
@@ -276,7 +273,6 @@ pub(crate) fn open_channels(
     Ok(children)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn write_directory(out: &mut Vec<u8>, records: &[(u8, u32)]) {
     out.extend_from_slice(MAGIC);
     out.push(u8::try_from(records.len()).expect("at most 16 channels"));
@@ -286,7 +282,6 @@ fn write_directory(out: &mut Vec<u8>, records: &[(u8, u32)]) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn stream_len(bytes: &[u8]) -> Result<u32> {
     u32::try_from(bytes.len()).map_err(|_| Error::Corrupt("channel length"))
 }
@@ -296,7 +291,6 @@ fn stream_len(bytes: &[u8]) -> Result<u32> {
 /// `field_count == 1` returns the single nonempty stock stream with no
 /// directory. `2..=16` writes `FCH1` and omits streams whose count varint is
 /// 0. A multi-column token present in only one field still gets a directory.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn encode(field_count: u8, fields: &[FieldStreams]) -> Result<EncodedChannels> {
     if !(1..=MAX_FIELD_COUNT).contains(&field_count) {
         return Err(Error::Corrupt("channel field_count"));

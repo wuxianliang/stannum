@@ -2,24 +2,26 @@
 //
 // See LICENSE in the repository root for license terms.
 
-//! STNF sidecar after a segment's page table: per-field norms and union df.
+//! STNF sidecar after a segment's page table: per-field norms.
 //!
 //! ```text
-//! trailer  := magic "STNF", version u8 = 1, norms_len u32le, df_len u32le,
-//!             norms, df_agg
+//! v2 := magic "STNF", version u8 = 2, norms_len u32le, norms
+//! v1 := magic "STNF", version u8 = 1, norms_len u32le, df_len u32le,
+//!       norms, df_agg
 //! norms    := field_count u8 (2..=16), field_total u64le × field_count,
 //!             rows u32le × field_count × document_count, crc32 u32le
-//! df_agg   := count u32le, entry*
+//! df_agg   := count u32le, entry*   (v1 only, withdrawn)
 //! entry    := token_len u32le, token utf-8, df u64le
 //! ```
 //!
+//! This version writes **v2** (norms only): union df lives on each
+//! `TermEntry`, not in a sidecar. v1 stays decodable so 4.3–4.6 segments can
+//! be classified (`StaleFielded`, design §6.2); no writer emits it.
 //! Present only on a multi-column blob (`total > pages_end`). A single-column
-//! segment omits both sections. `STNF` is not `STN3` and not `LDP2`. CRC-32
+//! segment omits the section. `STNF` is not `STN3` and not `LDP2`. CRC-32
 //! is ISO-HDLC (zlib `crc32`) over the row bytes only, `u32le`, after the
 //! rows and inside `norms_len`. Row `o`, field `f` is at
 //! `(o * field_count + f) * 4` from the start of the rows.
-
-use std::collections::{BTreeMap, BTreeSet};
 
 use crate::reader::Reader;
 use crate::{Error, Result};
@@ -27,15 +29,20 @@ use crate::{Error, Result};
 /// Sidecar magic. Distinct from segment `STN3` and meta `LDP2`.
 pub const MAGIC: &[u8; 4] = b"STNF";
 
-/// The only version this codec writes or accepts.
-pub const VERSION: u8 = 1;
+/// The version this codec writes (design §6.2: norms only).
+pub const VERSION: u8 = 2;
+/// The withdrawn fielded-terms version, decodable for classification only.
+pub const VERSION_V1: u8 = 1;
 
 /// Inclusive field-count range a trailer may name. `1` is omitted: a
 /// single-column segment has no trailer.
 pub const MIN_FIELD_COUNT: u8 = 2;
 pub const MAX_FIELD_COUNT: u8 = 16;
 
-pub(crate) const PREFIX_LEN: usize = 13; // magic + version + norms_len + df_len
+/// v1: magic + version + norms_len + df_len.
+pub(crate) const PREFIX_LEN_V1: usize = 13;
+/// v2: magic + version + norms_len.
+pub(crate) const PREFIX_LEN_V2: usize = 9;
 
 /// One decoded-token union-df row. `token` is analyzed text, not a fielded key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,14 +53,16 @@ pub struct DfEntry {
 
 /// Parsed STNF sidecar. Dimensions are well-formed; CRC-32 over the rows
 /// has been checked. Semantic agreement with postings is a later pass.
+/// `df_agg` is nonempty only on v1 (withdrawn); v2 carries norms alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trailer {
+    /// 1 (withdrawn fielded-terms) or 2 (this codec).
+    pub version: u8,
     pub field_count: u8,
     pub field_totals: Vec<u64>,
     pub rows: Vec<u32>,
     pub df_agg: Vec<DfEntry>,
 }
-
 impl Trailer {
     /// Length at document ordinal `o`, field `f`: index
     /// `(o * field_count + f)` from the start of `rows`.
@@ -65,11 +74,42 @@ impl Trailer {
     }
 }
 
-/// Encodes a trailer whose dimensions and df table satisfy the wire grammar.
+/// Encodes a **v2** trailer whose dimensions satisfy the wire grammar.
 ///
 /// `rows` is document-major: length `field_totals.len() * document_count`.
-/// `df_agg` is decoded-token byte order, unique, nonempty tokens, `df > 0`.
-pub fn encode(field_totals: &[u64], rows: &[u32], df_agg: &[(&str, u64)]) -> Result<Vec<u8>> {
+/// Union df is not written: it lives on each `TermEntry` (design §6.2).
+pub fn encode(field_totals: &[u64], rows: &[u32]) -> Result<Vec<u8>> {
+    let field_count = u8::try_from(field_totals.len()).map_err(|_| field_count_error())?;
+    check_field_count(field_count)?;
+    if !rows.len().is_multiple_of(usize::from(field_count)) {
+        return Err(Error::Corrupt("STNF norms"));
+    }
+
+    let mut norms = Vec::new();
+    norms.push(field_count);
+    for total in field_totals {
+        norms.extend_from_slice(&total.to_le_bytes());
+    }
+    let rows_at = norms.len();
+    for length in rows {
+        norms.extend_from_slice(&length.to_le_bytes());
+    }
+    let crc = crc32fast::hash(&norms[rows_at..]);
+    norms.extend_from_slice(&crc.to_le_bytes());
+
+    let norms_len = u32::try_from(norms.len()).map_err(|_| Error::Corrupt("STNF norms"))?;
+    let mut out = Vec::with_capacity(PREFIX_LEN_V2 + norms.len());
+    out.extend_from_slice(MAGIC);
+    out.push(VERSION);
+    out.extend_from_slice(&norms_len.to_le_bytes());
+    out.extend_from_slice(&norms);
+    Ok(out)
+}
+
+/// Encodes a withdrawn **v1** trailer (norms plus the df sidecar). No
+/// production writer emits this; classification fixtures need the bytes.
+#[cfg(test)]
+pub fn encode_v1(field_totals: &[u64], rows: &[u32], df_agg: &[(&str, u64)]) -> Result<Vec<u8>> {
     let field_count = u8::try_from(field_totals.len()).map_err(|_| field_count_error())?;
     check_field_count(field_count)?;
     if !rows.len().is_multiple_of(usize::from(field_count)) {
@@ -101,9 +141,9 @@ pub fn encode(field_totals: &[u64], rows: &[u32], df_agg: &[(&str, u64)]) -> Res
 
     let norms_len = u32::try_from(norms.len()).map_err(|_| Error::Corrupt("STNF norms"))?;
     let df_len = u32::try_from(df.len()).map_err(|_| Error::Corrupt("STNF df_agg"))?;
-    let mut out = Vec::with_capacity(PREFIX_LEN + norms.len() + df.len());
+    let mut out = Vec::with_capacity(PREFIX_LEN_V1 + norms.len() + df.len());
     out.extend_from_slice(MAGIC);
-    out.push(VERSION);
+    out.push(VERSION_V1);
     out.extend_from_slice(&norms_len.to_le_bytes());
     out.extend_from_slice(&df_len.to_le_bytes());
     out.extend_from_slice(&norms);
@@ -112,7 +152,7 @@ pub fn encode(field_totals: &[u64], rows: &[u32], df_agg: &[(&str, u64)]) -> Res
 }
 
 /// Decodes a complete STNF blob. `bytes` is exactly `pages_end..total`.
-/// Short, long, bad magic, or version other than 1 is corruption.
+/// Short, long, bad magic, or a version other than 1 or 2 is corruption.
 pub fn decode(bytes: &[u8], document_count: u32) -> Result<Trailer> {
     match decode_inner(bytes, document_count) {
         Err(Error::Truncated) => Err(Error::Corrupt("STNF trailer")),
@@ -130,15 +170,21 @@ fn decode_inner(bytes: &[u8], document_count: u32) -> Result<Trailer> {
     if bytes.len() < 5 {
         return Err(Error::Corrupt("STNF trailer"));
     }
-    if bytes[4] != VERSION {
+    if bytes[4] != VERSION_V1 && bytes[4] != VERSION {
         return Err(Error::Corrupt("STNF version"));
     }
-    if bytes.len() < PREFIX_LEN {
+    let v1 = bytes[4] == VERSION_V1;
+    let prefix_len = if v1 { PREFIX_LEN_V1 } else { PREFIX_LEN_V2 };
+    if bytes.len() < prefix_len {
         return Err(Error::Corrupt("STNF trailer"));
     }
     let norms_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
-    let df_len = u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize;
-    let claimed = PREFIX_LEN
+    let df_len = if v1 {
+        u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize
+    } else {
+        0
+    };
+    let claimed = prefix_len
         .checked_add(norms_len)
         .and_then(|n| n.checked_add(df_len))
         .ok_or(Error::Corrupt("STNF trailer"))?;
@@ -146,11 +192,12 @@ fn decode_inner(bytes: &[u8], document_count: u32) -> Result<Trailer> {
         return Err(Error::Corrupt("STNF trailer"));
     }
 
-    let norms = &bytes[PREFIX_LEN..PREFIX_LEN + norms_len];
-    let df = &bytes[PREFIX_LEN + norms_len..];
+    let norms = &bytes[prefix_len..prefix_len + norms_len];
+    let df = &bytes[prefix_len + norms_len..];
     let (field_count, field_totals, rows) = decode_norms(norms, document_count)?;
-    let df_agg = decode_df_agg(df)?;
+    let df_agg = if v1 { decode_df_agg(df)? } else { Vec::new() };
     Ok(Trailer {
+        version: bytes[4],
         field_count,
         field_totals,
         rows,
@@ -229,6 +276,7 @@ fn decode_df_agg(bytes: &[u8]) -> Result<Vec<DfEntry>> {
     Ok(entries)
 }
 
+#[cfg(test)]
 fn check_df_agg(df_agg: &[(&str, u64)]) -> Result<()> {
     let mut prev: Option<&str> = None;
     for &(token, df) in df_agg {
@@ -308,12 +356,13 @@ fn unescape_payload(payload: &str) -> Result<String> {
     Ok(out)
 }
 
-/// Per-field norms and union df accumulated from fielded postings.
+/// Per-field norms accumulated from fielded postings. Union df is not
+/// tracked: v2 keeps it on the `TermEntry`, and the postings themselves are
+/// the recount source (design §6.2).
 pub(crate) struct Tables {
     field_count: u8,
     doc_count: u32,
     rows: Vec<u32>,
-    df: BTreeMap<String, BTreeSet<u32>>,
 }
 
 impl Tables {
@@ -326,16 +375,13 @@ impl Tables {
             field_count,
             doc_count,
             rows: vec![0u32; n],
-            df: BTreeMap::new(),
         })
     }
 
     pub(crate) fn add(&mut self, field: u8, token: &str, ordinal: u32, pos_len: u32) -> Result<()> {
+        let _ = token;
         if field >= self.field_count || ordinal >= self.doc_count {
             return Err(Error::Corrupt("STNF field_count"));
-        }
-        if token.is_empty() {
-            return Err(Error::Corrupt("STNF df_agg"));
         }
         let index = (ordinal as usize)
             .checked_mul(usize::from(self.field_count))
@@ -348,7 +394,6 @@ impl Tables {
         *cell = cell
             .checked_add(pos_len)
             .ok_or(Error::Corrupt("STNF norms"))?;
-        self.df.entry(token.to_owned()).or_default().insert(ordinal);
         Ok(())
     }
 
@@ -371,13 +416,7 @@ impl Tables {
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
         let totals = self.field_totals()?;
-        let df_agg: Vec<(&str, u64)> = self
-            .df
-            .iter()
-            .map(|(token, ordinals)| (token.as_str(), ordinals.len() as u64))
-            .filter(|(_, df)| *df > 0)
-            .collect();
-        encode(&totals, &self.rows, &df_agg)
+        encode(&totals, &self.rows)
     }
 
     /// Encode then decode so CRC-32/ISO-HDLC over the row bytes is checked
@@ -439,8 +478,8 @@ pub(crate) fn test_fielded_key(ordinal: u8, token: &str) -> String {
 mod tests {
     use super::*;
 
-    fn sample() -> (Vec<u64>, Vec<u32>, Vec<(&'static str, u64)>) {
-        (vec![3, 5], vec![1, 2, 2, 3], vec![("beer", 2), ("wine", 1)])
+    fn sample() -> (Vec<u64>, Vec<u32>) {
+        (vec![3, 5], vec![1, 2, 2, 3])
     }
 
     #[test]
@@ -450,16 +489,34 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_doc_major_rows() {
-        let (totals, rows, df) = sample();
-        let bytes = encode(&totals, &rows, &df).unwrap();
+    fn roundtrip_doc_major_rows_v2() {
+        let (totals, rows) = sample();
+        let bytes = encode(&totals, &rows).unwrap();
         assert_eq!(&bytes[..4], MAGIC);
         assert_eq!(bytes[4], VERSION);
+        assert_eq!(bytes[4], 2);
+        // v2 prefix is magic + version + norms_len only: no df_len word.
+        assert_eq!(
+            bytes.len(),
+            PREFIX_LEN_V2 + u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize
+        );
         let trailer = decode(&bytes, 2).unwrap();
+        assert_eq!(trailer.version, 2);
         assert_eq!(trailer.field_count, 2);
         assert_eq!(trailer.field_totals, totals);
         assert_eq!(trailer.rows, rows);
         assert_eq!(trailer.row(1, 1), Some(3));
+        assert!(trailer.df_agg.is_empty(), "v2 carries no df section");
+    }
+
+    #[test]
+    fn v1_round_trips_for_classification() {
+        let (totals, rows) = sample();
+        let bytes = encode_v1(&totals, &rows, &[("beer", 2), ("wine", 1)]).unwrap();
+        assert_eq!(bytes[4], VERSION_V1);
+        let trailer = decode(&bytes, 2).unwrap();
+        assert_eq!(trailer.version, 1);
+        assert_eq!(trailer.rows, rows);
         assert_eq!(
             trailer.df_agg,
             vec![
@@ -477,25 +534,40 @@ mod tests {
 
     #[test]
     fn empty_docs_and_empty_df_roundtrip() {
-        let bytes = encode(&[0, 0], &[], &[]).unwrap();
+        let bytes = encode(&[0, 0], &[]).unwrap();
         let trailer = decode(&bytes, 0).unwrap();
         assert_eq!(trailer.field_count, 2);
         assert!(trailer.rows.is_empty());
         assert!(trailer.df_agg.is_empty());
+        let v1 = encode_v1(&[0, 0], &[], &[]).unwrap();
+        assert_eq!(decode(&v1, 0).unwrap().df_agg, Vec::new());
     }
 
     #[test]
     fn field_count_one_is_corruption() {
-        assert_eq!(encode(&[1], &[1], &[]).err(), Some(field_count_error()));
-        let mut bytes = encode(&[0, 0], &[], &[]).unwrap();
-        bytes[PREFIX_LEN] = 1;
+        assert_eq!(encode(&[1], &[1]).err(), Some(field_count_error()));
+        let mut bytes = encode(&[0, 0], &[]).unwrap();
+        bytes[PREFIX_LEN_V2] = 1;
         assert_eq!(decode(&bytes, 0).err(), Some(field_count_error()));
     }
 
     #[test]
+    fn v2_layout_with_a_df_section_is_corrupt() {
+        // A v2 trailer followed by df bytes fails the exact-length check:
+        // the v2 grammar has no df section to consume them.
+        let (totals, rows) = sample();
+        let mut bytes = encode(&totals, &rows).unwrap();
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        assert_eq!(
+            decode(&bytes, 2).err(),
+            Some(Error::Corrupt("STNF trailer"))
+        );
+    }
+
+    #[test]
     fn structural_rejects() {
-        let (totals, rows, df) = sample();
-        let good = encode(&totals, &rows, &df).unwrap();
+        let (totals, rows) = sample();
+        let good = encode(&totals, &rows).unwrap();
 
         assert_eq!(
             decode(&good[..3], 2).err(),
@@ -518,27 +590,27 @@ mod tests {
         assert_eq!(decode(&magic, 2).err(), Some(Error::Corrupt("STNF magic")));
 
         let mut version = good.clone();
-        version[4] = 2;
+        version[4] = 3;
         assert_eq!(
             decode(&version, 2).err(),
             Some(Error::Corrupt("STNF version"))
         );
         assert_eq!(
-            decode(b"STNF\x02", 2).err(),
+            decode(b"STNF\x03", 2).err(),
             Some(Error::Corrupt("STNF version"))
         );
 
         let mut crc = good.clone();
         let norms_len = u32::from_le_bytes(crc[5..9].try_into().unwrap()) as usize;
-        crc[PREFIX_LEN + norms_len - 1] ^= 1;
+        crc[PREFIX_LEN_V2 + norms_len - 1] ^= 1;
         assert_eq!(decode(&crc, 2).err(), Some(Error::Corrupt("STNF crc32")));
     }
 
     #[test]
     fn huge_df_agg_count_with_tiny_section_is_corrupt() {
-        let mut bytes = encode(&[0, 0], &[], &[]).unwrap();
+        let mut bytes = encode_v1(&[0, 0], &[], &[]).unwrap();
         let norms_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
-        let df_at = PREFIX_LEN + norms_len;
+        let df_at = PREFIX_LEN_V1 + norms_len;
         assert_eq!(
             bytes.len() - df_at,
             4,
@@ -549,17 +621,17 @@ mod tests {
     }
 
     #[test]
-    fn encode_rejects_unsorted_empty_or_zero_df() {
+    fn v1_encoder_rejects_unsorted_empty_or_zero_df() {
         assert_eq!(
-            encode(&[0, 0], &[], &[("b", 1), ("a", 1)]).err(),
+            encode_v1(&[0, 0], &[], &[("b", 1), ("a", 1)]).err(),
             Some(Error::Corrupt("STNF df_agg"))
         );
         assert_eq!(
-            encode(&[0, 0], &[], &[("", 1)]).err(),
+            encode_v1(&[0, 0], &[], &[("", 1)]).err(),
             Some(Error::Corrupt("STNF df_agg"))
         );
         assert_eq!(
-            encode(&[0, 0], &[], &[("a", 0)]).err(),
+            encode_v1(&[0, 0], &[], &[("a", 0)]).err(),
             Some(Error::Corrupt("STNF df_agg"))
         );
     }

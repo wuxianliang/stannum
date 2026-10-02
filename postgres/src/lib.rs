@@ -244,10 +244,17 @@ mod tests {
              CREATE INDEX field_idx ON field_docs USING stannum (title, body);",
         )
         .unwrap();
-        assert_eq!(
-            Spi::get_one::<i64>("SELECT stannum.search_count('field_idx', 'needle')").unwrap(),
-            Some(1)
-        );
+        // Multi-column SQL queries are B.1's scope: after A.2 the dictionary
+        // holds surface tokens, so the writer-side invariant is the check.
+        let rel = open_rel("field_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 1);
+            let segment = segment::segment::Segment::parse(&blobs[0]).unwrap();
+            assert_eq!(segment.term("needle").unwrap().unwrap().df(), 1);
+            assert!(segment::verify::verify_segment(&blobs[0]).is_clean());
+        }
+        close_rel(rel);
     }
 
     #[pg_test]
@@ -260,10 +267,20 @@ mod tests {
              c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15);",
         )
         .unwrap();
-        assert_eq!(
-            Spi::get_one::<i64>("SELECT stannum.search_count('wide16_idx', 'a')").unwrap(),
-            Some(1)
-        );
+        let rel = open_rel("wide16_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 1);
+            let segment = segment::segment::Segment::parse(&blobs[0]).unwrap();
+            let a = segment.term("a").unwrap().unwrap();
+            assert_eq!(a.df(), 1);
+            // Every field ordinal through 15 is a legal channel.
+            let channels = a.channels(16).unwrap();
+            assert_eq!(channels.len(), 1);
+            assert_eq!(channels[0].0, 0);
+            assert!(segment::verify::verify_segment(&blobs[0]).is_clean());
+        }
+        close_rel(rel);
     }
 
     #[pg_test(error = "stannum multi-column indexes support at most 16 key columns")]
@@ -378,49 +395,175 @@ mod tests {
         assert_eq!(kind.as_deref(), Some("envelope"));
     }
 
+    /// Opens an index relation by name for in-crate introspection. Paired
+    /// with [`close_rel`]; the caller must not run SPI statements between
+    /// the two while holding write interest in the relation.
+    fn open_rel(name: &str) -> pg_sys::Relation {
+        let oid = Spi::get_one::<pg_sys::Oid>(&format!("SELECT '{name}'::regclass"))
+            .unwrap()
+            .unwrap();
+        unsafe { pg_sys::RelationIdGetRelation(oid) }
+    }
+
+    fn close_rel(rel: pg_sys::Relation) {
+        unsafe { pg_sys::RelationClose(rel) };
+    }
+
+    /// The plan's A.2 overlap fixture: `needle` in both fields of doc 1,
+    /// title-only in doc 2, body-only in doc 3. Union df is 3; the channel
+    /// dfs sum to 4; a sum would also keep the shape of the withdrawn
+    /// per-field sidecar.
+    fn overlap_fixture(index: &str) {
+        Spi::run(&format!(
+            "CREATE TABLE {index}_docs (id int, title text, body text);
+             INSERT INTO {index}_docs VALUES
+               (1, 'needle', 'needle'),
+               (2, 'needle', 'pad'),
+               (3, '', 'needle needle');
+             CREATE INDEX {index}_idx ON {index}_docs USING stannum(title, body);",
+        ))
+        .unwrap();
+    }
+
     #[pg_test]
-    fn multi_column_arithmetic_row1_bits_match_0_4_0() {
+    fn multi_column_union_df_is_three_not_four_on_create_index() {
+        overlap_fixture("create_idx");
+        let rel = open_rel("create_idx_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 1, "ambuild flushed one segment");
+            let segment = segment::segment::Segment::parse(&blobs[0]).unwrap();
+            let needle = segment.term("needle").unwrap().unwrap();
+            assert_eq!(needle.df(), 3, "union df == 3, not 4");
+            let channels = needle.channels(2).unwrap();
+            let per_field: Vec<(u8, u32)> = channels
+                .iter()
+                .map(|(field, child)| (*field, child.df()))
+                .collect();
+            assert_eq!(per_field, vec![(0, 2), (1, 2)]);
+            assert_eq!(
+                per_field.iter().map(|(_, df)| df).sum::<u32>(),
+                4,
+                "the channel sum the entry df must not be"
+            );
+            // field_length is that field's raw token count, in the v2 norms.
+            let trailer = segment.trailer().unwrap();
+            assert_eq!(trailer.version, 2);
+            assert_eq!(trailer.row(0, 0), Some(1));
+            assert_eq!(trailer.row(0, 1), Some(1));
+            assert_eq!(trailer.row(1, 0), Some(1));
+            assert_eq!(trailer.row(1, 1), Some(1));
+            assert_eq!(trailer.row(2, 0), Some(0), "empty title: no cells");
+            assert_eq!(trailer.row(2, 1), Some(2));
+            // A token posted in body only writes no title directory record.
+            let pad = segment.term("pad").unwrap().unwrap();
+            let pad_channels = pad.channels(2).unwrap();
+            assert_eq!(pad_channels.len(), 1);
+            assert_eq!(pad_channels[0].0, 1);
+            assert!(
+                segment.term("~0~needle").unwrap().is_none(),
+                "no fielded keys"
+            );
+            assert!(segment::verify::verify_segment(&blobs[0]).is_clean());
+        }
+        close_rel(rel);
+        assert_clean("create_idx_idx");
+    }
+
+    #[pg_test]
+    fn multi_column_insert_after_create_writes_tagged_buffer_and_folds() {
+        overlap_fixture("ins_idx");
+        // The heap is indexed at CREATE INDEX; delete the rows and re-insert
+        // so every posting goes through aminsert into a fresh buffer.
+        Spi::run("DELETE FROM ins_idx_docs").unwrap();
+        let rel = open_rel("ins_idx_idx");
+        unsafe {
+            Spi::run(
+                "INSERT INTO ins_idx_docs VALUES
+                   (1, 'needle', 'needle'),
+                   (2, 'needle', 'pad'),
+                   (3, '', 'needle needle');",
+            )
+            .unwrap();
+            let stream = crate::storage::test_buffer_stream(rel);
+            assert!(
+                stream.starts_with(&segment::forward::STN4_BUFFER_TAG),
+                "the buffer is born tagged: {:02x?}",
+                &stream[..8.min(stream.len())]
+            );
+            let records: Vec<_> = segment::forward::fielded_records(
+                &stream[segment::forward::STN4_BUFFER_TAG.len()..],
+            )
+            .map(|record| record.unwrap())
+            .collect();
+            assert_eq!(records.len(), 3);
+            let mut docs = std::collections::BTreeSet::new();
+            for record in &records {
+                for group in &record.groups {
+                    if group.terms.iter().any(|term| term.term == "needle") {
+                        docs.insert(record.tid);
+                    }
+                }
+            }
+            assert_eq!(docs.len(), 3, "union over the buffered records");
+            let doc3 = records
+                .iter()
+                .find(|record| record.groups.iter().any(|g| g.field_length == 2))
+                .unwrap();
+            assert_eq!(doc3.groups.len(), 1, "the empty title is omitted");
+            assert_eq!(doc3.groups[0].field, 1);
+        }
+        close_rel(rel);
+        // Force the fold (the GUC floor is 1kB), then reopen: the flushed
+        // segment recounts the union.
         Spi::run(
-            "CREATE TABLE row1_docs (id int, title text, body text);
-             INSERT INTO row1_docs VALUES
-               (1, 'needle', 'pad'),
-               (2, 'pad', 'needle'),
-               (3, 'needle needle', 'pad');
-             CREATE INDEX row1_idx ON row1_docs USING stannum(title, body);",
+            "SET LOCAL stannum.write_buffer_bytes = 1024;
+             INSERT INTO ins_idx_docs VALUES
+               (4, 'zzz', repeat('filler ', 400));",
         )
         .unwrap();
-        let rows = Spi::connect(|client| {
-            client
-                .select(
-                    "SELECT d.id, encode(float4send(s.score::real), 'hex')
-                     FROM row1_docs d
-                     JOIN stannum.search('row1_idx'::regclass, 'needle', \"limit\" => 10, snippet => 'none') s
-                       ON d.ctid = s.ctid
-                     ORDER BY s.score DESC, d.ctid",
-                    None,
-                    &[],
-                )
-                .unwrap()
-                .map(|row| {
-                    (
-                        row.get::<i32>(1).unwrap().unwrap(),
-                        row.get::<String>(2).unwrap().unwrap(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(
-            rows,
-            vec![
-                (3, "3e2e071f".to_owned()),
-                (1, "3e113925".to_owned()),
-                (2, "3e113925".to_owned()),
-            ]
-        );
-        assert_eq!(
-            Spi::get_one::<i64>("SELECT stannum.search_count('row1_idx', 'needle')").unwrap(),
-            Some(3)
-        );
+        let rel = open_rel("ins_idx_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert!(!blobs.is_empty(), "the fold flushed a segment");
+            for blob in &blobs {
+                assert!(segment::verify::verify_segment(blob).is_clean());
+            }
+            let flushed = segment::segment::Segment::parse(blobs.last().unwrap()).unwrap();
+            assert_eq!(flushed.term("needle").unwrap().unwrap().df(), 3);
+            let stream = crate::storage::test_buffer_stream(rel);
+            assert!(stream.starts_with(&segment::forward::STN4_BUFFER_TAG));
+        }
+        close_rel(rel);
+    }
+
+    /// Design §6.3.1's chosen transition: an untagged zero-term legacy buffer
+    /// (a 4.3–4.6 index with documents but no postings) classifies
+    /// `BufferStale`, and the first term-bearing INSERT is the rebuild error
+    /// before any page is dirtied.
+    #[pg_test(error = "stannum: index holds a pre-STN4 fielded write buffer; REINDEX the index")]
+    fn insert_into_untagged_zero_term_legacy_buffer_errors_before_write() {
+        Spi::run(
+            "CREATE TABLE legacy_docs (id int, title text, body text);
+             CREATE INDEX legacy_idx ON legacy_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let rel = open_rel("legacy_idx");
+        unsafe {
+            // One document, zero terms, no tag: exactly the 4.6 zero-term
+            // buffer shape (`docs > 0`, well-formed records, no keys).
+            let record = segment::forward::ForwardRecord::from_tokens(
+                segment::Tid::new(0, 1).unwrap(),
+                Vec::<(&str, u32)>::new(),
+            )
+            .unwrap();
+            let mut stream = Vec::new();
+            record.encode(&mut stream).unwrap();
+            assert!(!stream.starts_with(&segment::forward::STN4_BUFFER_TAG));
+            crate::storage::test_replace_buffer(rel, &stream, 1);
+        }
+        close_rel(rel);
+        Spi::run("INSERT INTO legacy_docs VALUES (2, 'needle', 'pad')").unwrap();
     }
 
     #[pg_test(error = "stannum: field syntax requires a multi-column index")]

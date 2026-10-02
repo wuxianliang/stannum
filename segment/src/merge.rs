@@ -76,10 +76,17 @@ fn check(actual: usize, limit: usize, name: &'static str) -> std::result::Result
 fn merge_field_count(segments: &[Segment<'_>]) -> Result<u8> {
     let mut found: Option<u8> = None;
     for segment in segments {
-        let field_count = segment.trailer().map(|t| t.field_count).unwrap_or(1);
+        let Some(trailer) = segment.trailer() else {
+            continue;
+        };
+        if trailer.version != crate::trailer::VERSION {
+            // A withdrawn v1 trailer must be classified stale before any
+            // merge sees it, not fail incidentally inside a channel decode.
+            return Err(Error::Corrupt("STNF version"));
+        }
         match found {
-            None => found = Some(field_count),
-            Some(prev) if prev == field_count => {}
+            None => found = Some(trailer.field_count),
+            Some(prev) if prev == trailer.field_count => {}
             Some(_) => return Err(Error::Corrupt("STNF field_count")),
         }
     }
@@ -259,6 +266,30 @@ fn merge_inner(
             // The heap was just peeked and no intervening operation can empty it.
             term_inputs.push(terms.pop().expect("peeked term exists").0.1);
         }
+        if field_count >= crate::trailer::MIN_FIELD_COUNT {
+            merge_fielded_term(
+                &segments,
+                &mut term_inputs,
+                &mut entries,
+                &mut dictionary,
+                &mut ordinals_area,
+                &mut payload_area,
+                &live_lengths,
+                sidecar.as_mut(),
+                field_count,
+                &term,
+                limits.max_output_bytes,
+                &mut checkpoint,
+            )?;
+            for &i in &term_inputs {
+                if let Some(item) = dictionaries[i].next() {
+                    let (term, entry) = item?;
+                    entries[i] = Some(entry);
+                    terms.push(Reverse((term, i)));
+                }
+            }
+            continue;
+        }
         cursors.clear();
         postings_heap.clear();
         for &i in &term_inputs {
@@ -407,6 +438,184 @@ fn merge_inner(
     checkpoint()?;
     check(out.len(), limits.max_output_bytes, "output bytes")?;
     Ok(out)
+}
+
+/// Merges one surface token's per-field channel streams across inputs
+/// (design §1.3/§7): each field's stock streams merge independently, the
+/// union is recounted into `TermEntry.df` — channel dfs are never added —
+/// and the channel directory is rewritten. Norms are recounted from the
+/// live postings only.
+#[allow(clippy::too_many_arguments)]
+fn merge_fielded_term(
+    segments: &[Segment<'_>],
+    term_inputs: &mut [usize],
+    entries: &mut [Option<TermEntry>],
+    dictionary: &mut DictionaryBuilder,
+    ordinals_area: &mut Vec<u8>,
+    payload_area: &mut Vec<u8>,
+    live_lengths: &HashMap<Tid, (u32, usize, u32)>,
+    mut sidecar: Option<&mut crate::trailer::Tables>,
+    field_count: u8,
+    term: &str,
+    max_output_bytes: usize,
+    checkpoint: &mut impl FnMut() -> std::result::Result<(), MergeError>,
+) -> std::result::Result<(), MergeError> {
+    struct ChannelCursor<'a> {
+        field: u8,
+        input: usize,
+        documents: crate::docs::TidCursor<'a>,
+        payload: crate::payload::PayloadCursor<'a>,
+        input_ordinal: u32,
+        new_ordinal: u32,
+    }
+    let mut channel_cursors: Vec<ChannelCursor<'_>> = Vec::new();
+    for &i in term_inputs.iter() {
+        let entry = entries[i].take().expect("each queued term owns an entry");
+        let resolved = segments[i].resolve(entry)?;
+        for (field, child) in resolved.channels(field_count)? {
+            let mut documents = child.cursor()?;
+            let mut payload = child.payload()?.cursor();
+            if child.df() == 1
+                && documents.current().is_some_and(|tid| {
+                    live_lengths
+                        .get(&tid)
+                        .is_none_or(|&(_, owner, _)| owner != i)
+                })
+            {
+                // This fully validated channel has no surviving document.
+                // No payload cursor will be consumed for it.
+                checkpoint()?;
+                continue;
+            }
+            let Some((_, new_ordinal)) =
+                skip_dead(&mut documents, &mut payload, live_lengths, i, checkpoint)?
+            else {
+                continue;
+            };
+            let input_ordinal = documents
+                .ordinal()
+                .ok_or(Error::Corrupt("posting missing document"))?;
+            channel_cursors.push(ChannelCursor {
+                field,
+                input: i,
+                documents,
+                payload,
+                input_ordinal,
+                new_ordinal,
+            });
+        }
+    }
+    channel_cursors.sort_by_key(|cursor| (cursor.field, cursor.input));
+    let mut union = BTreeSet::new();
+    let mut max_bucket = 0u8;
+    let mut streams: Vec<crate::channels::FieldStreams> = Vec::new();
+    let mut ordinals = Vec::new();
+    let mut scores: Vec<(u8, u32)> = Vec::new();
+    let mut positions = Vec::new();
+    let at = 0;
+    while at < channel_cursors.len() {
+        let field = channel_cursors[at].field;
+        let end = at
+            + channel_cursors[at..]
+                .iter()
+                .position(|cursor| cursor.field != field)
+                .unwrap_or(channel_cursors.len() - at);
+        let mut group: Vec<ChannelCursor<'_>> = channel_cursors.drain(at..end).collect();
+        let mut heap = BinaryHeap::new();
+        for (index, cursor) in group.iter_mut().enumerate() {
+            if let Some(tid) = cursor.documents.current() {
+                heap.push(Reverse((tid, index)));
+            }
+        }
+        let mut payload = PayloadBuilder::default();
+        ordinals.clear();
+        scores.clear();
+        while let Some(Reverse((_, index))) = heap.pop() {
+            checkpoint()?;
+            let cursor = &mut group[index];
+            positions.clear();
+            cursor.payload.next_into(&mut positions)?;
+            let bucket = cursor
+                .documents
+                .bucket()
+                .ok_or(Error::Corrupt("term member without a bucket"))?;
+            let field_length = segments[cursor.input]
+                .trailer()
+                .and_then(|trailer| trailer.row(cursor.input_ordinal, cursor.field))
+                .ok_or(Error::Corrupt("STNF norms"))?;
+            ordinals.push(cursor.new_ordinal);
+            scores.push((bucket, field_length));
+            payload.push(&positions)?;
+            let tf = positions.len() as u32;
+            if let Some(tables) = sidecar.as_deref_mut() {
+                tables.add(field, term, cursor.new_ordinal, tf)?;
+            }
+            union.insert(cursor.new_ordinal);
+            max_bucket = max_bucket.max(bucket);
+            let input = cursor.input;
+            cursor.documents.advance()?;
+            let live = skip_dead(
+                &mut cursor.documents,
+                &mut cursor.payload,
+                live_lengths,
+                input,
+                checkpoint,
+            )?;
+            if let Some((_, new_ordinal)) = live {
+                cursor.input_ordinal = cursor
+                    .documents
+                    .ordinal()
+                    .ok_or(Error::Corrupt("posting missing document"))?;
+                cursor.new_ordinal = new_ordinal;
+            }
+            if let Some(tid) = cursor.documents.current() {
+                heap.push(Reverse((tid, index)));
+            }
+        }
+        if !ordinals.is_empty() {
+            streams.push(crate::channels::FieldStreams {
+                field,
+                ordinals: crate::ordinals::encode_scored(&ordinals, &scores),
+                payload: payload.finish(),
+            });
+        }
+    }
+    if union.is_empty() {
+        return Ok(());
+    }
+    let encoded = crate::channels::encode(field_count, &streams).map_err(MergeError::Codec)?;
+    check(
+        ordinals_area
+            .len()
+            .checked_add(payload_area.len())
+            .and_then(|n| n.checked_add(encoded.ordinals.len()))
+            .and_then(|n| n.checked_add(encoded.payload.len()))
+            .ok_or(MergeError::Limit("output bytes"))?,
+        max_output_bytes,
+        "output bytes",
+    )?;
+    dictionary
+        .push(
+            term,
+            TermEntry {
+                df: union.len() as u32,
+                max_tf_bucket: max_bucket,
+                ordinals: Extent {
+                    offset: ordinals_area.len() as u64,
+                    len: u32::try_from(encoded.ordinals.len())
+                        .map_err(|_| MergeError::Limit("ordinal extent"))?,
+                },
+                payload: Extent {
+                    offset: payload_area.len() as u64,
+                    len: u32::try_from(encoded.payload.len())
+                        .map_err(|_| MergeError::Limit("payload extent"))?,
+                },
+            },
+        )
+        .map_err(MergeError::Codec)?;
+    ordinals_area.extend_from_slice(&encoded.ordinals);
+    payload_area.extend_from_slice(&encoded.payload);
+    Ok(())
 }
 
 /// Preserve the byte layout while reusing the largest allocation. Reserving a
@@ -709,6 +918,37 @@ pub(crate) mod tests {
         let mut builder = SegmentBuilder::default();
         builder.set_field_count(field_count).unwrap();
         for (tid, columns) in docs {
+            builder.begin_fielded_document(*tid).unwrap();
+            for (field, text) in columns.iter().enumerate() {
+                let mut by_term: std::collections::BTreeMap<&str, Vec<u32>> =
+                    std::collections::BTreeMap::new();
+                let mut len = 0u32;
+                for (i, word) in text.split_whitespace().enumerate() {
+                    len += 1;
+                    by_term.entry(word).or_default().push(i as u32 + 1);
+                }
+                if len == 0 {
+                    continue;
+                }
+                for (word, positions) in by_term {
+                    builder
+                        .add_occurrence(word, field as u8, &positions, len)
+                        .unwrap();
+                }
+            }
+        }
+        builder.finish()
+    }
+
+    /// A leftover 4.3–4.6 v1 segment: stock extents carrying fielded-key
+    /// terms under a v1 trailer. Built by splicing, since no writer emits it.
+    fn legacy_v1_segment(docs: &[(Tid, &[&str])]) -> Vec<u8> {
+        legacy_v1_segment_with(2, docs)
+    }
+
+    fn legacy_v1_segment_with(field_count: u8, docs: &[(Tid, &[&str])]) -> Vec<u8> {
+        let mut builder = SegmentBuilder::default();
+        for (tid, columns) in docs {
             let mut tokens = Vec::new();
             let mut position = 0u32;
             for (field, text) in columns.iter().enumerate() {
@@ -724,30 +964,113 @@ pub(crate) mod tests {
                 .add_document(*tid, tokens.iter().map(|(t, p)| (t.as_str(), *p)))
                 .unwrap();
         }
-        builder.finish()
+        let stock = builder.finish();
+        // Rows and df from the texts directly: parsing the stock blob would
+        // trip the fielded-key-without-trailer guard before the splice.
+        let mut rows = vec![0u32; usize::from(field_count) * docs.len()];
+        let mut df: std::collections::BTreeMap<String, u64> = Default::default();
+        for (o, (_, columns)) in docs.iter().enumerate() {
+            let mut seen = std::collections::BTreeSet::new();
+            for (f, text) in columns.iter().enumerate() {
+                let len = text.split_whitespace().count() as u32;
+                rows[o * usize::from(field_count) + f] = len;
+                for word in text.split_whitespace() {
+                    seen.insert(word);
+                }
+            }
+            for word in seen {
+                *df.entry(word.to_owned()).or_insert(0) += 1;
+            }
+        }
+        let mut totals = vec![0u64; usize::from(field_count)];
+        for row in rows.chunks_exact(usize::from(field_count)) {
+            for (total, cell) in totals.iter_mut().zip(row) {
+                *total += u64::from(*cell);
+            }
+        }
+        let df_rows: Vec<(String, u64)> = df.into_iter().collect();
+        let df_refs: Vec<(&str, u64)> = df_rows.iter().map(|(t, d)| (t.as_str(), *d)).collect();
+        let trailer = crate::trailer::encode_v1(&totals, &rows, &df_refs).unwrap();
+        let mut out = stock;
+        out.extend_from_slice(&trailer);
+        out
     }
 
     #[test]
-    fn merge_recounts_df_agg_from_live_streams_not_input_sidecars() {
+    fn merge_recounts_df_from_live_channels_not_input_dfs() {
         let tid1 = Tid::new(0, 1).unwrap();
         let tid2 = Tid::new(0, 2).unwrap();
-        // A: tid1 foo in both fields (live); tid2 foo in field 0 (will be dead).
-        let a = fielded_segment(2, &[(tid1, &["foo", "foo"]), (tid2, &["foo"])]);
+        // A: tid1 foo in BOTH fields (live); tid2 foo in field 0 (dead in A).
+        let a = fielded_segment(2, &[(tid1, &["foo", "foo"]), (tid2, &["foo", ""])]);
         // B: tid2 foo in field 0, live (dead-CTID reuse is allowed).
-        let b = fielded_segment(2, &[(tid2, &["foo"])]);
-        let a_df = Segment::parse(&a).unwrap().trailer().unwrap().df_agg[0].df;
-        let b_df = Segment::parse(&b).unwrap().trailer().unwrap().df_agg[0].df;
-        assert_eq!(a_df, 2, "input A counts the dead ordinal");
-        assert_eq!(b_df, 1);
-        assert_eq!(a_df + b_df, 3);
+        let b = fielded_segment(2, &[(tid2, &["foo", ""])]);
+        let a_parse = Segment::parse(&a).unwrap();
+        let b_parse = Segment::parse(&b).unwrap();
+        let a_foo = a_parse.term("foo").unwrap().unwrap();
+        let b_foo = b_parse.term("foo").unwrap().unwrap();
+        assert_eq!(a_foo.df(), 2, "input A counts the dead ordinal");
+        assert_eq!(b_foo.df(), 1);
+        assert_eq!(
+            a_foo.df() + b_foo.df(),
+            3,
+            "the sum the merge must not write"
+        );
 
         let dead = [BTreeSet::from([tid2]), BTreeSet::new()];
         let blobs = [a, b];
-        // The inputs are still fielded-key stock extents. Multi-column verify
-        // requires FCH1, so merge rejects them. Recounting the union on a
-        // channel directory is A.2.
-        let rejected = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap_err();
-        assert!(rejected.to_string().contains("channel magic"), "{rejected}");
+        let merged = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
+        let segment = Segment::parse(&merged).unwrap();
+        let foo = segment.term("foo").unwrap().unwrap();
+        assert_eq!(
+            foo.df(),
+            2,
+            "union over live docs, not the sum of channel or input dfs"
+        );
+        let channels = foo.channels(2).unwrap();
+        let per_field: Vec<(u8, u32)> = channels
+            .iter()
+            .map(|(field, child)| (*field, child.df()))
+            .collect();
+        assert_eq!(
+            per_field,
+            vec![(0, 2), (1, 1)],
+            "field dfs sum to 3 ≠ union 2"
+        );
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.version, 2);
+        assert_eq!(trailer.row(0, 0), Some(1), "tid1 title length");
+        assert_eq!(trailer.row(0, 1), Some(1), "tid1 body length");
+        assert_eq!(trailer.rows.len(), 4, "two live docs × two fields");
+        assert!(trailer.df_agg.is_empty());
+        assert!(crate::verify::verify_segment(&merged).is_clean());
+    }
+
+    #[test]
+    fn merge_recounts_union_df_when_fields_overlap() {
+        // A token posting in both fields of one document counts once.
+        let tid1 = Tid::new(0, 1).unwrap();
+        let tid2 = Tid::new(0, 2).unwrap();
+        let tid3 = Tid::new(0, 3).unwrap();
+        let a = fielded_segment(
+            2,
+            &[
+                (tid1, &["needle", "needle"]),
+                (tid2, &["needle", "pad"]),
+                (tid3, &["", "needle"]),
+            ],
+        );
+        let merged = merge(&inputs(&[a], &[BTreeSet::new()]), limits(), || Ok(())).unwrap();
+        let segment = Segment::parse(&merged).unwrap();
+        let needle = segment.term("needle").unwrap().unwrap();
+        assert_eq!(needle.df(), 3, "union df == 3, not 4");
+        let channels = needle.channels(2).unwrap();
+        let per_field: Vec<(u8, u32)> = channels
+            .iter()
+            .map(|(field, child)| (*field, child.df()))
+            .collect();
+        assert_eq!(per_field, vec![(0, 2), (1, 2)]);
+        assert_eq!(per_field.iter().map(|(_, df)| df).sum::<u32>(), 4);
+        assert!(crate::verify::verify_segment(&merged).is_clean());
     }
 
     #[test]
@@ -756,7 +1079,31 @@ pub(crate) mod tests {
         let blob = fielded_segment(2, &[(tid, &["keep", "gone"])]);
         let dead = [BTreeSet::from([tid])];
         let blobs = [blob];
+        let merged = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap();
+        let segment = Segment::parse(&merged).unwrap();
+        assert_eq!(segment.document_count(), 0);
+        let trailer = segment.trailer().unwrap();
+        assert_eq!(trailer.version, 2);
+        assert_eq!(trailer.field_count, 2);
+        assert!(trailer.rows.is_empty());
+        assert!(crate::verify::verify_segment(&merged).is_clean());
+    }
+
+    #[test]
+    fn merge_still_rejects_legacy_v1_fielded_key_segments() {
+        let tid1 = Tid::new(0, 1).unwrap();
+        let tid2 = Tid::new(0, 2).unwrap();
+        let a = legacy_v1_segment(&[(tid1, &["foo", "foo"]), (tid2, &["foo"])]);
+        let b = legacy_v1_segment(&[(tid2, &["foo"])]);
+        let dead = [BTreeSet::from([tid2]), BTreeSet::new()];
+        let blobs = [a, b];
+        // Input validation refuses the v1 extents before any merge logic:
+        // multi-column verify requires FCH1, and the field-count gate inside
+        // merge would refuse the withdrawn version besides.
         let rejected = merge(&inputs(&blobs, &dead), limits(), || Ok(())).unwrap_err();
-        assert!(rejected.to_string().contains("channel magic"), "{rejected}");
+        assert!(
+            rejected.to_string().contains("channel magic"),
+            "v1 extents carry no FCH1 directory: {rejected}"
+        );
     }
 }

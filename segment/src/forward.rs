@@ -300,6 +300,267 @@ pub fn records(mut bytes: &[u8]) -> impl Iterator<Item = Result<ForwardRecord>> 
     })
 }
 
+/// The STN4 multi-column write-buffer discriminator (design §6.3.1): the
+/// first two bytes of every nonempty multi-column buffer stream this version
+/// writes. `0x00` cannot start a well-formed legacy stream — a
+/// `ForwardRecord` body holds at least four varints, so its length prefix is
+/// never zero — and `0x01` names the STN4 record format. Restart, recovery
+/// and WAL replay preserve it because buffer-page WAL logs those bytes.
+pub const STN4_BUFFER_TAG: [u8; 2] = [0x00, 0x01];
+
+/// One surface token's posting inside a [`FieldedGroup`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldedTerm {
+    pub term: String,
+    pub positions: Vec<u32>,
+}
+
+/// One field's tokens for a document: every posting names the field and that
+/// field's raw token count (design §1.3). A field with no tokens is omitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldedGroup {
+    /// 0-based key-column index; `< field_count` of the index.
+    pub field: u8,
+    /// That column's raw token count for this document.
+    pub field_length: u32,
+    /// Sorted by term bytes, unique.
+    pub terms: Vec<FieldedTerm>,
+}
+
+/// One multi-column document as a single STN4 buffer record. The persisted
+/// stream is [`STN4_BUFFER_TAG`] followed by packed records:
+///
+/// ```text
+/// record := len varint, block varint, offset varint, group_count varint,
+///           group*
+/// group  := field u8, field_length varint, term_count varint, term*
+/// term   := shared varint, suffix_len varint, suffix, n varint,
+///           position varint * n
+/// ```
+///
+/// Groups are sorted by field, unique, and each holds at least one term;
+/// the shared-prefix chain restarts per group. There is no document-wide
+/// `doc_len`: per-group `field_length` replaces it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldedRecord {
+    pub tid: Tid,
+    /// Sorted by field, unique.
+    pub groups: Vec<FieldedGroup>,
+}
+
+/// The fixed part of a fielded record, from [`FieldedRecord::peek`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldedHeader {
+    pub tid: Tid,
+    pub group_count: u32,
+}
+
+impl FieldedRecord {
+    fn validate(&self) -> Result<()> {
+        Tid::new(self.tid.block, self.tid.offset)?;
+        let mut previous: Option<u8> = None;
+        for group in &self.groups {
+            if previous.is_some_and(|p| p >= group.field) {
+                return Err(Error::Unordered);
+            }
+            previous = Some(group.field);
+            if group.terms.is_empty() {
+                return Err(Error::Corrupt("fielded group terms"));
+            }
+            let mut prev_term: Option<&[u8]> = None;
+            for term in &group.terms {
+                if term.term.is_empty() {
+                    return Err(Error::EmptyTerm);
+                }
+                if prev_term.is_some_and(|p| p >= term.term.as_bytes()) {
+                    return Err(Error::Unordered);
+                }
+                validate_positions(&term.positions)?;
+                if let Some(&last) = term.positions.last()
+                    && group.field_length < last
+                {
+                    return Err(Error::InvalidPositions);
+                }
+                prev_term = Some(term.term.as_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends the encoded record, including its length prefix. The buffer
+    /// tag is not part of a record; the writer puts it once at stream start.
+    pub fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
+        self.validate()?;
+        let mut body = Vec::new();
+        varint::put(&mut body, u64::from(self.tid.block));
+        varint::put(&mut body, u64::from(self.tid.offset));
+        varint::put(&mut body, self.groups.len() as u64);
+        for group in &self.groups {
+            body.push(group.field);
+            varint::put(&mut body, u64::from(group.field_length));
+            varint::put(&mut body, group.terms.len() as u64);
+            let mut previous: &[u8] = &[];
+            for term in &group.terms {
+                let bytes = term.term.as_bytes();
+                let shared = previous
+                    .iter()
+                    .zip(bytes)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                varint::put(&mut body, shared as u64);
+                varint::put(&mut body, (bytes.len() - shared) as u64);
+                body.extend_from_slice(&bytes[shared..]);
+                encode_positions(&mut body, &term.positions);
+                previous = bytes;
+            }
+        }
+        varint::put(out, body.len() as u64);
+        out.extend_from_slice(&body);
+        Ok(())
+    }
+
+    /// Byte length of the record at the start of `bytes`.
+    pub fn encoded_len(bytes: &[u8]) -> Result<usize> {
+        ForwardRecord::encoded_len(bytes)
+    }
+
+    /// Reads only the fixed part of the record at the start of `bytes`.
+    pub fn peek(bytes: &[u8]) -> Result<FieldedHeader> {
+        let mut reader = Reader::new(bytes);
+        let len = reader.varint()? as usize;
+        let mut body = Reader::new(reader.take(len)?);
+        let block = body.varint_u32()?;
+        let offset = u16::try_from(body.varint_u32()?).map_err(|_| Error::InvalidTid)?;
+        Ok(FieldedHeader {
+            tid: Tid::new(block, offset)?,
+            group_count: body.varint_u32()?,
+        })
+    }
+
+    /// Decodes the record at the start of `bytes`, handing each posting to
+    /// `visit(field, field_length, term, positions)` in group then term
+    /// order. Returns the header and the bytes consumed.
+    pub fn decode_with(
+        bytes: &[u8],
+        mut visit: impl FnMut(u8, u32, &str, &[u32]) -> Result<()>,
+    ) -> Result<(FieldedHeader, usize)> {
+        let total = Self::encoded_len(bytes)?;
+        let mut reader = Reader::new(bytes);
+        let len = reader.varint()? as usize;
+        let mut body = Reader::new(reader.take(len)?);
+        let block = body.varint_u32()?;
+        let offset = u16::try_from(body.varint_u32()?).map_err(|_| Error::InvalidTid)?;
+        let tid = Tid::new(block, offset)?;
+        let group_count = body.varint_u32()?;
+        let mut term: Vec<u8> = Vec::new();
+        let mut positions: Vec<u32> = Vec::new();
+        let mut previous_field: Option<u8> = None;
+        for _ in 0..group_count {
+            let field = body.take(1)?[0];
+            if previous_field.is_some_and(|p| p >= field) {
+                return Err(Error::Corrupt("fielded group order"));
+            }
+            previous_field = Some(field);
+            let field_length = body.varint_u32()?;
+            let term_count = body.varint_u32()?;
+            if term_count == 0 {
+                return Err(Error::Corrupt("fielded group terms"));
+            }
+            term.clear();
+            for _ in 0..term_count {
+                let shared = body.varint_u32()? as usize;
+                if shared > term.len() {
+                    return Err(Error::Corrupt("fielded term prefix"));
+                }
+                let suffix_len = body.varint_u32()? as usize;
+                let suffix = body.take(suffix_len)?;
+                if !term.is_empty() && term[shared..] >= *suffix {
+                    return Err(Error::Corrupt("fielded term order"));
+                }
+                term.truncate(shared);
+                term.extend_from_slice(suffix);
+                if term.is_empty() {
+                    return Err(Error::Corrupt("fielded term order"));
+                }
+                positions.clear();
+                decode_positions(&mut body, &mut positions)?;
+                if positions.is_empty() {
+                    return Err(Error::Corrupt("fielded term positions"));
+                }
+                if let Some(&last) = positions.last()
+                    && field_length < last
+                {
+                    return Err(Error::InvalidPositions);
+                }
+                let text =
+                    std::str::from_utf8(&term).map_err(|_| Error::Corrupt("fielded term UTF-8"))?;
+                visit(field, field_length, text, &positions)?;
+            }
+        }
+        if body.remaining() != 0 {
+            return Err(Error::Corrupt("fielded record length"));
+        }
+        Ok((FieldedHeader { tid, group_count }, total))
+    }
+
+    /// Decodes the record at the start of `bytes`, returning it and the
+    /// bytes consumed.
+    pub fn decode(bytes: &[u8]) -> Result<(Self, usize)> {
+        let mut groups: Vec<FieldedGroup> = Vec::new();
+        let (header, total) = Self::decode_with(bytes, |field, field_length, term, positions| {
+            let group = match groups.last_mut() {
+                Some(group) if group.field == field => group,
+                _ => {
+                    groups.push(FieldedGroup {
+                        field,
+                        field_length,
+                        terms: Vec::new(),
+                    });
+                    groups.last_mut().expect("just pushed")
+                }
+            };
+            group.terms.push(FieldedTerm {
+                term: term.to_owned(),
+                positions: positions.to_vec(),
+            });
+            Ok(())
+        })?;
+        let record = Self {
+            tid: header.tid,
+            groups,
+        };
+        Ok((record, total))
+    }
+
+    /// The document's stock-section length: the sum of its field lengths.
+    pub fn total_length(&self) -> u32 {
+        self.groups
+            .iter()
+            .try_fold(0u32, |sum, group| sum.checked_add(group.field_length))
+            .unwrap_or(u32::MAX)
+    }
+}
+
+/// Iterates STN4 records packed back to back. `bytes` is the stream **after**
+/// [`STN4_BUFFER_TAG`]; the tag is stripped by the caller that checked it.
+pub fn fielded_records(mut bytes: &[u8]) -> impl Iterator<Item = Result<FieldedRecord>> + use<'_> {
+    std::iter::from_fn(move || {
+        if bytes.is_empty() {
+            return None;
+        }
+        match FieldedRecord::decode(bytes) {
+            Ok((record, consumed)) => {
+                bytes = &bytes[consumed..];
+                Some(Ok(record))
+            }
+            Err(error) => {
+                bytes = &[];
+                Some(Err(error))
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +590,129 @@ mod tests {
         let (first, consumed) = ForwardRecord::decode(&bytes).unwrap();
         assert_eq!(first, record);
         assert_eq!(consumed, ForwardRecord::encoded_len(&bytes).unwrap());
+    }
+
+    #[test]
+    fn fielded_records_round_trip_after_the_tag() {
+        let tid = Tid::new(3, 7).unwrap();
+        let record = FieldedRecord {
+            tid,
+            groups: vec![
+                FieldedGroup {
+                    field: 0,
+                    field_length: 3,
+                    terms: vec![
+                        FieldedTerm {
+                            term: "craft".into(),
+                            positions: vec![1],
+                        },
+                        FieldedTerm {
+                            term: "needle".into(),
+                            positions: vec![2, 3],
+                        },
+                    ],
+                },
+                FieldedGroup {
+                    field: 2,
+                    field_length: 1,
+                    terms: vec![FieldedTerm {
+                        term: "craft".into(),
+                        positions: vec![1],
+                    }],
+                },
+            ],
+        };
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&STN4_BUFFER_TAG);
+        record.encode(&mut stream).unwrap();
+        let empty = FieldedRecord {
+            tid: Tid::new(4, 1).unwrap(),
+            groups: Vec::new(),
+        };
+        empty.encode(&mut stream).unwrap();
+        assert_eq!(&stream[..2], &STN4_BUFFER_TAG);
+        let decoded: Vec<FieldedRecord> =
+            fielded_records(&stream[2..]).map(Result::unwrap).collect();
+        assert_eq!(decoded, [record.clone(), empty]);
+        assert_eq!(record.total_length(), 4);
+        let (first, consumed) = FieldedRecord::decode(&stream[2..]).unwrap();
+        assert_eq!(first, record);
+        assert_eq!(consumed, FieldedRecord::encoded_len(&stream[2..]).unwrap());
+        let header = FieldedRecord::peek(&stream[2..]).unwrap();
+        assert_eq!(header.tid, tid);
+        assert_eq!(header.group_count, 2);
+        // A legacy length prefix never starts with the tag's first byte.
+        assert_ne!(stream[2], 0x00, "record lengths are never zero");
+    }
+
+    #[test]
+    fn fielded_records_reject_corruption() {
+        let record = FieldedRecord {
+            tid: Tid::new(1, 1).unwrap(),
+            groups: vec![FieldedGroup {
+                field: 1,
+                field_length: 2,
+                terms: vec![FieldedTerm {
+                    term: "x".into(),
+                    positions: vec![1, 2],
+                }],
+            }],
+        };
+        let mut bytes = Vec::new();
+        record.encode(&mut bytes).unwrap();
+        assert!(FieldedRecord::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut tampered = bytes.clone();
+        tampered[0] += 1;
+        assert!(FieldedRecord::decode(&tampered).is_err());
+        // Unsorted groups, empty groups, and positions past the field length.
+        let unordered = FieldedRecord {
+            tid: Tid::new(1, 1).unwrap(),
+            groups: vec![
+                FieldedGroup {
+                    field: 1,
+                    field_length: 1,
+                    terms: vec![FieldedTerm {
+                        term: "a".into(),
+                        positions: vec![1],
+                    }],
+                },
+                FieldedGroup {
+                    field: 0,
+                    field_length: 1,
+                    terms: vec![FieldedTerm {
+                        term: "b".into(),
+                        positions: vec![1],
+                    }],
+                },
+            ],
+        };
+        assert_eq!(unordered.encode(&mut Vec::new()), Err(Error::Unordered));
+        let empty_group = FieldedRecord {
+            tid: Tid::new(1, 1).unwrap(),
+            groups: vec![FieldedGroup {
+                field: 0,
+                field_length: 1,
+                terms: Vec::new(),
+            }],
+        };
+        // Encoding rejects an empty group outright; a hand-built body with
+        // group_count>0 and zero terms fails decode the same way.
+        assert_eq!(
+            empty_group.encode(&mut Vec::new()),
+            Err(Error::Corrupt("fielded group terms"))
+        );
+        let over = FieldedRecord {
+            tid: Tid::new(1, 1).unwrap(),
+            groups: vec![FieldedGroup {
+                field: 0,
+                field_length: 1,
+                terms: vec![FieldedTerm {
+                    term: "x".into(),
+                    positions: vec![2],
+                }],
+            }],
+        };
+        assert_eq!(over.encode(&mut Vec::new()), Err(Error::InvalidPositions));
     }
 
     #[test]
