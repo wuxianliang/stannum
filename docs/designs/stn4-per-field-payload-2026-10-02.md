@@ -1,6 +1,6 @@
 # STN4: Per-Field Payload in One Term Entry
 
-Status: proposal, oracle-repair · Basis: `stn3@1e1b20b` after the 4.6 mandatory miss · Normative
+Status: proposal, oracle-repair-2 · Basis: `stn3@1e1b20b` after the 4.6 mandatory miss · Normative
 parent: `docs/designs/stn3-tool-layer-2026-09-29.md` (formula, SQL surface,
 migration fence) · 2026-10-02
 
@@ -116,14 +116,15 @@ record :=
 
 Directory size is `5 + 5n` bytes per extent (`"FCH1"` + `n` + `n × (1+4)`),
 not `8 + 5n`. Both extents carry the same directory. A two-channel token is
-30 bytes of directory across the two areas.
+30 bytes of directory across the two areas. `n = 0` is corruption (the entry
+would not exist). `record.len = 0` is corruption: a listed channel has a
+stream. A field listed in the envelope but absent from this token is simply
+omitted from the directory.
 
 `ordinals` records describe stock STN3 ordinal streams (block bounds, 65,536-doc
 chunk folds, sub-block bounds, tf buckets, field-local document lengths).
 `payload` records describe stock STN3 payload streams (position lists, skip
-table). The two directories name the **same** present set in the same order; a
-mismatch is corruption. `n = 0` is corruption (the entry would not exist).
-A field listed in the envelope but absent from this token is simply omitted.
+table).
 
 Each channel is indexed with **that field's raw `u32` length** as STN3's
 document length for the stream — the same rule fielded-terms used, now inside
@@ -147,18 +148,39 @@ an STNF-owned file per parent §3):
 Term::channels(&self, field_count: u8) -> Result<Vec<(u8, Term<'_>)>>
 ```
 
-`field_count` is the envelope's count (`2..=16`). The method validates it:
-`n > field_count`, any `field >= field_count`, duplicate/unsorted fields, or
-`n == 0` is `Error::Corrupt`. Callers branch on the envelope, not on the magic:
+**`field_count` is validated unconditionally inside the method**, not only by
+courtesy of the caller. `field_count < 2` or `field_count > 16` is
+`Error::Corrupt` even if a single-column path should never call it. Envelope
+`field_count == 1` still must **not** call `channels()`: stock `ordinals()` /
+`payload()` / `df()` are the term, and a `FCH1` prefix on a single-column
+segment is corruption at verify/open. Envelope `field_count` in `2..=16`:
+`channels(field_count)` **must** succeed before any score or bound.
 
-- `field_count == 1`: do **not** call `channels()`. Stock `ordinals()` /
-  `payload()` / `df()` are the term. A `FCH1` prefix on a single-column
-  segment is corruption. Scoring and bounding use the stock term.
-- `field_count >= 2`: `channels(field_count)` **must** succeed before any
-  score or bound. Magic absent, or any directory defect, is `Error::Corrupt`
-  — not a silent stock fallback. Treating a missing directory as one
-  mixed-length stream would feed the fused bound the wrong `shortest()` and
-  would fail the 0..1000 / 500 witness.
+**Exact framing.** Both extents are parsed independently, then cross-checked.
+Any failure is `Error::Corrupt`. Arithmetic is **checked** (`checked_add` /
+`checked_mul`); overflow is corruption, not wrap.
+
+1. **Header + records fit.** `extent_len >= 5`. `n` is the byte at offset 4.
+   Directory bytes `dir = 5 + 5n` must not overflow and must satisfy
+   `dir <= extent_len`. Magic is `FCH1`. `n == 0` is corruption.
+   `n > field_count` is corruption.
+2. **Records parse inside `dir`.** Each record is `field: u8` + `len: u32le`
+   at `5 + 5i`. Fields are strictly ascending, unique, and `< field_count`.
+3. **Stream bytes tile the remainder.** `sum = Σ record.len` (checked).
+   `sum == extent_len - dir`. A remainder, a shortfall, or `record.len == 0`
+   is corruption.
+4. **Child decoder consumes the slice exactly.** Absolute child extent is
+   `parent.offset + dir + Σ_{j<i} record[j].len`, length `record[i].len`.
+   The stock ordinals decoder (ordinals extent) or payload decoder (payload
+   extent) must parse that slice and leave **no trailing bytes**. Trailing
+   garbage, a short parse, or a decoder error is corruption of this entry.
+5. **Directories agree.** After both extents parse, their `(field, …)` lists
+   have the same `n`, the same field ordinals in the same order. A present
+   in one extent and absent in the other is corruption.
+6. **Magic absent** on a `field_count` in `2..=16` is corruption — not a
+   silent stock fallback. Treating a missing directory as one mixed-length
+   stream would feed the fused bound the wrong `shortest()` and would fail
+   the 0..1000 / 500 witness.
 
 **Child `TermEntry` fields come from stock stream headers, not from `len`.**
 Unpack caches them on the child so later `Term::df()` / `max_tf_bucket` do
@@ -287,13 +309,32 @@ The adapter owns the count. For every key the window yields:
    the result is `Lookup::Overflow` and the lists are discarded. Tokens
    that failed (2) never increment the cap and never appear in `Terms`.
 
-Implementation may fold (2) into the stock `Fn(&str)` by capturing `&Index`
-and calling `term` + `channels` inside the predicate, then passing
-`limit: max_expansion` so stock overflow matches the in-scope cap. It may
-also walk with `limit: usize::MAX` / a scan cap and apply (2)–(3) after, as
-long as (3) does not count tokens that failed (2). It must not pass
-`limit: max_expansion` to stock expand with a text-only filter on a partial
-mask.
+**Channel opens are fallible and must not live in `Fn(&str) -> bool`.**
+Stock `expand`'s filter cannot return `Result`. Opening `channels()` inside
+that predicate would turn a corrupt directory into `false` (a non-match) or
+into a panic. Both are forbidden. The text filter is **only** step (1).
+
+The adapter walks **outside** the boolean predicate:
+
+- Call `Index::expand(window, text_filter, …)` with a filter that never
+  opens terms. On a partial mask, do not pass `limit: max_expansion` with
+  that text-only filter (that is the P0 cap bug). A scan limit of
+  `usize::MAX`, or an adapter-owned dictionary cursor, is allowed.
+- For each `(token, term)` in dictionary order, `term.channels(field_count)`:
+  - `Err(e)`: keep the **first** error (dictionary order). Do not treat the
+    token as a non-match. Do not increment the cap. Continue only far enough
+    to obey interrupt checks; the walk's result is that error.
+  - `Ok(ch)` with `ch ∩ mask == ∅`: skip; not counted.
+  - `Ok(ch)` with a nonempty intersection: count += 1; keep the token if
+    still under the cap.
+- **After** the walk, inspect the first channel-open error **even if** stock
+  expand also returned `Overflow` or the in-scope count exceeded
+  `max_expansion`. Outcome priority: **error > Overflow > Terms**. An error
+  must never become `Lookup::Overflow` and never become a silent drop.
+
+Query-time channel defects surface as `AdapterError` (index/corrupt), the
+same query-vs-verify split as parent: query is an error, verify of a stored
+directory is corruption.
 
 Unscoped queries use the all-fields mask; a stored token always has ≥1
 channel, so (2) is true for every existing key and the cap counts the window
@@ -512,53 +553,93 @@ norms and the entry dfs.
 Single-column: `total == pages_end`, no trailer, no `FCH1`. A trailer on a
 single-column immutable segment is corruption.
 
-### 6.3 Classification (mutually exclusive)
+### 6.3 Classification (mutually exclusive predicates)
 
 Indexes built on this branch between 4.3 and 4.6 wrote kind-5 + STN3 + STNF v1
 + `~{h}~` keys. STN4 cannot score them without the withdrawn codec. They are
 not 0.4.0, so the §8 migration sentence about LSG1–LSG4 must not fire.
 
-`storage::open_index` classes. Exactly one applies. **Well-formed** means the
-blob parses, lengths sum, CRC matches, and dimensions agree with the envelope.
-Malformed, truncated, unknown version, or a v1 layout with `df_len = 0` / a v2
-layout with a df section is not "valid v1" and not "valid v2".
+**Per-segment labels** (immutable STN3 blobs only; single-column blobs are
+either valid stock or malformed):
 
-| Class | Recognition (first match that is a complete description of the relation) | Guarded callbacks |
+- `ValidV2`: well-formed STNF v2 **and** every dictionary term's extents
+  satisfy §1.3 exact framing (`channels(field_count)` succeeds).
+- `ValidV1`: well-formed STNF v1 (df section present, lengths sum, CRC and
+  dimensions agree). Fielded-terms keys are expected; FCH1 is not required.
+- `Malformed`: missing trailer on a multi-column immutable segment; truncated
+  / bad-CRC / unknown-version STNF; v1 layout with `df_len = 0`; v2 layout
+  with a df section; well-formed STNF v2 whose **any** term fails FCH1
+  framing; mixed envelope/LSG magic; single-column with a trailer or `FCH1`.
+
+A blob is never both `ValidV1` and `ValidV2`. `Malformed` is not a version.
+
+**Relation predicates** — exactly one; evaluate `PreStn3` first, then the
+multiset `S` of immutable multi-column segment labels. Empty `S` is the
+empty/buffer-only rows below, not these four.
+
+| Predicate | Class | Guarded callbacks |
 |---|---|---|
-| `PreStn3` | LSG1–LSG4 segment magic and/or kind-1 0.4.0 meta (existing, including 0.4.0 empty and 0.4.0 buffer-only) | existing migration error, no write |
-| `Current` | kind-5 envelope, and every immutable multi-column segment that exists is **well-formed STNF v2**; single-column immutable segments have no trailer; empty and buffer-only as in the rows below | proceed |
-| `StaleFielded` | kind-5 envelope, and every immutable multi-column segment that exists is **well-formed STNF v1** (df section present and well-formed). Buffer-only fielded-terms: see below. | **rebuild error**, no write |
-| `MixedFielded` | kind-5 envelope, and the immutable multi-column segments include **at least one well-formed v1 and at least one well-formed v2** | **rebuild error**, distinct string from `StaleFielded`, no write |
-| `Corrupt` | everything else: missing trailer on a multi-column **immutable** segment; truncated/bad-CRC/unknown-version STNF; v1/v2 structural mismatch; `FCH1` defects on a Current writer; mixed envelope/LSG segment; single-column with a trailer or `FCH1`; buffer whose terms are neither valid FCH1 nor valid fielded-terms keys | existing corruption, no write |
+| LSG1–LSG4 magic and/or kind-1 0.4.0 meta (incl. 0.4.0 empty / buffer-only) | `PreStn3` | existing migration error, no write |
+| `S` nonempty ∧ every label is `ValidV2` ∧ none `Malformed` | `Current` | proceed |
+| `S` nonempty ∧ every label is `ValidV1` ∧ none `Malformed` | `StaleFielded` | **rebuild error**, no write |
+| `S` nonempty ∧ every label is well-formed (`ValidV1` or `ValidV2`) ∧ `S` contains **both** `ValidV1` and `ValidV2` ∧ none `Malformed` | `MixedFielded` | **rebuild error**, distinct string, no write |
+| any label is `Malformed`, or `S` is nonempty and none of the three rows above hold | `Corrupt` | existing corruption, no write |
 
-`StaleFielded` and `Corrupt` do not overlap. A withdrawn v1 that **parses** is
-`StaleFielded`. A v1-shaped blob that does **not** parse is `Corrupt`. A valid
-v2 is `Current`. Missing or unknown-version is `Corrupt`, never `StaleFielded`.
+`MixedFielded` requires **every** segment well-formed. `v1 + v2 + malformed`
+and `v1 + v2 + missing trailer` are `Corrupt`, not mixed. A well-formed v2
+trailer whose postings fail FCH1 is `Malformed` → `Corrupt`, not `Current`.
 
-**Empty.** Kind-5, no immutable segments, empty insert buffer (zero docs): `Current`.
+**Empty.** Kind-5, `S` empty, empty insert buffer (zero docs): `Current`.
 There is no trailer to be v1 or v2. `search` / `search_count` still answer 0.
 A 0.4.0 empty index is `PreStn3` (kind-1), unchanged.
 
-**Buffer-only.** Kind-5, no immutable segments, nonempty mutable buffer:
+**Buffer-only.** Kind-5, `S` empty, nonempty mutable buffer. There is no
+trailer, so classification may look at dictionary **keys** here only, via a
+**minimal historical shape recognizer** that is not the fielded codec:
+
+```
+storage::legacy_fielded_key_shape(key: &str, field_count: u8) -> bool
+```
+
+It returns true iff `key` is `~` + one lowercase hex nibble + `~` + a nonempty
+escaped token (every payload `~` doubled), and the nibble is `< field_count`.
+It does not produce an encoded key, does not call `Index::term` on an encoded
+key, and does not participate in lookup, expand, scoring, or writing. C.3
+deletes `fields/codec.rs`; this function stays as an isolated classifier.
 
 - `field_count == 1`: `Current` (stock terms, no directory).
-- `field_count >= 2`, every stored term unpacks as `FCH1` under the envelope
-  `field_count`: `Current`.
-- `field_count >= 2`, every stored term is a well-formed fielded-terms key
-  (`~` + one lowercase nibble + `~` + escaped token, ordinal `< field_count`):
-  `StaleFielded`. This is the only place classification looks at dictionary
-  keys, because there is no trailer.
-- Mix of FCH1 and fielded-terms keys, or keys that are neither: `Corrupt`.
+- `field_count` in `2..=16`, every stored term unpacks as valid FCH1 under
+  that `field_count`: `Current`.
+- `field_count` in `2..=16`, every stored term satisfies
+  `legacy_fielded_key_shape`: `StaleFielded`.
+- Mix of FCH1 and legacy-shaped keys, or any key that is neither: `Corrupt`.
 
-Detection of **immutable** segments prefers the trailer version, not a key
-heuristic: a v2 trailer with a stray `~0~` token is a legal token, not
-fielded-terms.
+Immutable classification **never** uses `legacy_fielded_key_shape`. A valid v2
+segment whose surface token is the bytes `~0~foo` is `ValidV2` / `Current`:
+that is a legal analyzed token, not a fielded-terms key.
+
+**Fixtures (A.3 / E.1):**
+
+| Fixture | Class |
+|---|---|
+| all immutable segments well-formed v2 + valid FCH1 | `Current` |
+| all immutable segments well-formed v1 | `StaleFielded` |
+| well-formed v1 + well-formed v2 only | `MixedFielded` |
+| v1 + v2 + one malformed trailer | `Corrupt` |
+| v1 + v2 + one multi-column segment missing a trailer | `Corrupt` |
+| well-formed v2 trailer, one term with malformed FCH1 | `Corrupt` |
+| well-formed v2 + valid FCH1, dictionary contains surface token `~0~foo` | `Current` |
+| empty kind-5 | `Current` |
+| buffer-only, every term valid FCH1 | `Current` |
+| buffer-only, every term `legacy_fielded_key_shape` | `StaleFielded` |
+| buffer-only, mix | `Corrupt` |
+| LSG4 / kind-1 | `PreStn3` |
 
 Rebuild error texts (`StaleFielded` vs `MixedFielded`) are distinct from the
-§8 migration string, so an operator who already `ALTER EXTENSION`d does not
-think they are still on 0.4.0. Exact strings are pinned in pg_tests. `ambuild`
-/ `ambuildempty` remain exempt so `REINDEX` clears every class except `Corrupt`
-that is not rebuildable. `MixedFielded` is rebuildable: `ambuild` reads the heap.
+§8 migration string. Exact strings are pinned in pg_tests. `ambuild` /
+`ambuildempty` remain exempt so `REINDEX` clears rebuildable classes.
+`MixedFielded` is rebuildable: `ambuild` reads the heap. `Corrupt` is not a
+migration class.
 
 These classes exist because 0.5.0 is still unreleased as a product tag. After
 0.5.0 ships STN4, `StaleFielded` / `MixedFielded` are only relevant to
@@ -579,7 +660,8 @@ contract bump without a behavior bump; it is rejected.
 Layer diagram is parent §3. L2 still does not import `IndexScorer`. Owned
 shims (`operator.rs`, `score.rs` `scope_scan_query`, `highlight_udfs.rs`,
 `customscan.rs`, `am.rs`, `options.rs`, `storage/layout.rs`, `tinql/`) do not
-gain STN4 work except the `StaleFielded` / `MixedFielded` classes in the opener.
+gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
+`legacy_fielded_key_shape` in the opener.
 
 ### Carry (math and semantics; tests stay)
 
@@ -589,10 +671,10 @@ gain STN4 work except the `StaleFielded` / `MixedFielded` classes in the opener.
 | `postgres/src/fields/bound.rs` | `fused_bound` / `fused_interval_bound` / `next_interval_end` / envelopes / intersecting-block truncation. Input remains `FieldTerm` streams. |
 | `postgres/src/fields/types.rs` | `FieldTerm`, `LogicalTerm { text, mask, df_agg, streams }`, `Lookup`. `df_agg` is filled from `Term::df()`, not from a sidecar. |
 | `postgres/src/fields/cursor.rs` | `LogicalPostingCursor`, `FieldHit`, advance atomicity, successor peeks. Opened on unpacked channels. |
-| `postgres/src/fields/expand.rs` | `Lookup` outcomes, empty-streams-not-error, overflow plan, scope mask on the logical term, `max_expansion` counted once. Implementation of *how* streams are found is replaced. |
-| `postgres/src/fields/error.rs` | `AdapterError` Index vs key split; query vs verify as distinct kinds. `KeyDefect` header/escape variants become unused on the live path; keep until the codec file dies so old tests can compile during the cut. |
+| `postgres/src/fields/expand.rs` | `Lookup` outcomes, empty-streams-not-error, overflow plan, scope mask on the logical term, `max_expansion` counted only after channel-set ∩ mask. Channel opens are a fallible walk, not `Fn(&str)`. |
+| `postgres/src/fields/error.rs` | `AdapterError` Index vs key split; query vs verify as distinct kinds. Fielded `KeyDefect` header/escape variants die with the codec. Channel framing errors are `segment::Error::Corrupt` / `AdapterError::Index`. |
 | `postgres/src/storage/layout.rs` | `KIND_ENVELOPE = 5`, names/weights/stamp. |
-| `postgres/src/storage/mod.rs` | `Current` / `PreStn3` / `Corrupt` fence; add `StaleFielded` and `MixedFielded`. |
+| `postgres/src/storage/mod.rs` | `Current` / `PreStn3` / `Corrupt` fence; add `StaleFielded` and `MixedFielded`; `legacy_fielded_key_shape` for buffer-only classification only. |
 | `segment/src/dictionary.rs` | Layout of `TermEntry` and prefix-compressed blocks. No new fields. |
 | `segment/src/payload.rs`, `ordinals.rs`, `bound.rs` | Stock stream codecs. Channels are those codecs. |
 
@@ -600,8 +682,8 @@ gain STN4 work except the `StaleFielded` / `MixedFielded` classes in the opener.
 
 | File | Fate |
 |---|---|
-| `postgres/src/fields/codec.rs` | **Dead.** `fielded_key` / `header` / `upper_fence` / tilde escape. No writer, no lookup. Delete once expand/lookup no longer import it and the round-trip fixtures are gone. |
-| `postgres/src/fields/expand.rs` lookup/expand bodies | Decoded `Window`; text `Fn(&str)` first; channel-set ∩ mask before `max_expansion`; drop codec. |
+| `postgres/src/fields/codec.rs` | **Dead as a codec.** `fielded_key` / `header` / `upper_fence` / writers go. C.3 deletes this file. The `~{h}~` **grammar** survives only as `storage::legacy_fielded_key_shape` (§6.3), which never looks up or writes. |
+| `postgres/src/fields/expand.rs` lookup/expand bodies | Decoded `Window`; text `Fn(&str)` only; fallible channel walk; error > Overflow > Terms. |
 | `postgres/src/fields/df.rs` | `query_total_df` reads entry dfs. `union_df_agg` remains a **build-time** helper to compute the stored union (and a verify check). Sidecar reader goes with STNF v1. |
 | `segment/src/trailer.rs` | v2: drop `df_len` / `DfEntry`. v1 parse remains long enough to classify `StaleFielded`. |
 | `segment/src/segment.rs` | `Term::channels()`. `Reader::new` still stops stock checks at `pages_end`; trailer API reads v2. |
@@ -636,16 +718,18 @@ pg-agent; the risk is slip, not a forced cutover date.
 ### Phase A — Representation (≈ 2.5 wks)
 
 - [ ] **A.1 Channel directory + `Term::channels(field_count)`**
-  - Scope: encode/decode `FCH1` in both extents; slice into stock `Term`s;
-    child `df` from ordinals count varint; child `max_tf_bucket` from stream
-    bounds; `field_count` validation; property tests (present-set agreement,
-    nibble-free keys, empty token rejected, field 0..15, `field >= field_count`
-    corrupt, single-field present still writes a directory on multi-column).
-    No SQL.
-  - Done when: unit tests cover the corruption matrix in §1.2–1.3; child.df is
-    posting count not byte `len`; single-column fixtures never write or accept
-    `FCH1`; multi-column missing magic is corruption; stock `term()` still
-    works on 0.5.0 single-column fixtures.
+  - Scope: encode/decode `FCH1`; §1.3 exact framing (header+records fit;
+    checked `5+5n` and `Σ len`; `Σ len == extent_len - (5+5n)`; child decoder
+    consumes the slice exactly; `len == 0` rejected; ordinal/payload field
+    lists equal and ordered; `field_count` not in `2..=16` is Corrupt even on
+    a mistaken call). Child `df` from count varint; `max_tf_bucket` from stream
+    bounds. No SQL.
+  - Done when: unit tests cover that matrix; `channels(1)` and `channels(17)`
+    are Corrupt; trailing bytes in a child slice are Corrupt; mismatched
+    ordinal/payload field sets are Corrupt; child.df is posting count not byte
+    `len`; single-column fixtures never write `FCH1`; missing magic on
+    multi-column is corruption; stock `term()` still works on 0.5.0
+    single-column fixtures.
 - [ ] **A.2 Mutable flush + merge recount**
   - Scope: `add_occurrence(token, field, positions, field_length)`; per-token
     per-field builders; parent `TermEntry.df` = union including dead; merge per
@@ -655,14 +739,16 @@ pg-agent; the risk is slip, not a forced cutover date.
     **and** on insert-after-create; dead ordinal remains in `df` until rewrite;
     merge of two segments recounts; `field_length` is that field's raw count.
 - [ ] **A.3 STNF v2 + classification matrix**
-  - Scope: trailer without df; opener classes in §6.3 (`Current` / `StaleFielded`
-    / `MixedFielded` / `Corrupt` / `PreStn3`); empty and buffer-only rows;
-    rebuild error strings; `ambuild` exempt.
-  - Done when: v2 round-trip; well-formed v1 kind-5 → `StaleFielded` rebuild
-    error, no page dirty; mixed v1+v2 → `MixedFielded` distinct string; missing
-    / malformed / unknown-version trailer on a multi-column immutable →
-    `Corrupt` not `StaleFielded`; empty kind-5 → `Current`; LSG4 still the §8
-    migration string.
+  - Scope: trailer without df; §6.3 predicates (`ValidV1` / `ValidV2` /
+    `Malformed` → relation class); `legacy_fielded_key_shape`; rebuild strings;
+    `ambuild` exempt.
+  - Done when: every fixture row in §6.3 holds, including v1+v2+malformed →
+    `Corrupt`; v1+v2+missing trailer → `Corrupt`; v2 + malformed FCH1 →
+    `Corrupt`; valid v2 with surface token `~0~foo` → `Current`; buffer-only
+    FCH1 → `Current`; buffer-only legacy keys → `StaleFielded`; empty kind-5 →
+    `Current`; well-formed v1-only → `StaleFielded`; well-formed v1+v2 only →
+    `MixedFielded`; LSG4 still the §8 migration string. No page dirty on
+    rebuild/corrupt classes.
 
 ### Phase B — Query wiring (≈ 1.5 wks)
 
@@ -676,6 +762,10 @@ pg-agent; the risk is slip, not a forced cutover date.
     for prefix/wildcard, range, regex, and fuzzy, `title:(…)` with body-only
     hits `> max_expansion` and title hits `≤ max_expansion` returns `Terms`
     of the title tokens, not Overflow; in-scope over cap still Overflows.
+    **Channel-error fixtures:** a window that also contains a corrupt FCH1
+    term returns `AdapterError`, not Overflow and not `Terms` that skipped
+    it; the same error wins when in-scope hits already exceeded the cap;
+    `Fn(&str)` is never the channel-open site.
 - [ ] **B.2 Bound + verify on channels**
   - Scope: wire existing `fused_bound` to unpacked `FieldTerm`s; no parent-nibble
     fallback; verify recomputes per-channel min_len/max bucket and parent `df`.
@@ -706,11 +796,13 @@ pg-agent; the risk is slip, not a forced cutover date.
     labeled, not a gate. A mandatory miss stops and escalates (next fallback
     is a recorded divergence + `contract_version` bump).
 - [ ] **C.3 Dead codec**
-  - Scope: delete `fields/codec.rs` and encoded-key fixtures; `KeyDefect`
-    header/escape either deleted or confined to a historical comment test;
-    `fields/mod.rs` comment matches §7.
-  - Done when: no `fielded_key` / `~0~` writer in `postgres/src` or
-    `segment/src`; workspace tests green.
+  - Scope: delete `fields/codec.rs` and encoded-key **writers** / lookup
+    fixtures; `fields/mod.rs` comment matches §7. **Keep**
+    `storage::legacy_fielded_key_shape` as the only `~{h}~` grammar — buffer
+    classification only, no encode helper, no `Index::term` on encoded keys.
+  - Done when: no `fielded_key` writer in `postgres/src` or `segment/src`;
+    grep for encode/header/upper_fence in `fields/` is empty; classifier tests
+    (buffer-only stale vs current) still compile; workspace tests green.
 
 ### Phase D — Phrases, highlights, planner (old Phase 5) (≈ 2 wks)
 
@@ -724,9 +816,11 @@ Done-when texts of old 5.1–5.5 apply, with "fielded key" read as "channel".
 
 ### Phase E — Packaging + release (old Phase 6) (≈ 3 wks)
 
-- [ ] **E.1** Two-artifact migration CI (old 6.1) — add `StaleFielded` and
-      `MixedFielded` rows: a 4.6-era v1 index must rebuild-error, not
-      migrate-as-LSG4; mixed v1+v2 uses the mixed string.
+- [ ] **E.1** Two-artifact migration CI (old 6.1) — replay the §6.3 fixture
+      table: well-formed v1 rebuild-errors (`StaleFielded`), not LSG4;
+      well-formed v1+v2 → `MixedFielded`; v1+v2+malformed and v1+v2+missing
+      trailer → `Corrupt`; v2+bad FCH1 → `Corrupt`; v2 with token `~0~foo` →
+      `Current`.
 - [ ] **E.2** Runbook + divergence ledger (old 6.2), including STN4 rebuild
       of any development fielded-terms indexes.
 - [ ] **E.3** Wheel alignment (old 6.3)
@@ -772,12 +866,12 @@ may overlap C.3. E.1 may start after A.3 (classification is the new CI row).
   channels. An advisory miss stays only with a named waiver in the results
   file. A follow-up task is not a waiver. Not a formula change and not a
   return to fielded keys.
-- **`StaleFielded` vs `Corrupt` vs `MixedFielded`.** Well-formed v1 is rebuild,
-  not corruption. Missing/malformed/unknown-version is corruption, not stale.
-  Mixed v1+v2 is its own rebuild string. Wrong class on a v1 kind-5 index
-  either blocks `REINDEX` (if treated as unrestorable `Corrupt`) or lies to
-  operators (if treated as LSG4). A.3 pins all three strings plus empty and
-  buffer-only.
+- **`StaleFielded` vs `Corrupt` vs `MixedFielded`.** Predicates in §6.3: mixed
+  requires every segment well-formed. Any malformed member makes the relation
+  `Corrupt`. Buffer-only stale uses `legacy_fielded_key_shape` only. A.3 pins
+  the fixture table.
+- **Channel-open errors in expand.** `Fn(&str)` cannot carry `Result`. A corrupt
+  FCH1 in the window is `AdapterError`, never a non-match and never Overflow.
 - **Channel/parent df confusion.** Channel `Term::df()` is the ordinals count
   varint (field-local). Using it as idf reintroduces the field-local-idf break
   §5.2 case 1 catches. Tests must read the parent entry for `LogicalTerm.df_agg`.
