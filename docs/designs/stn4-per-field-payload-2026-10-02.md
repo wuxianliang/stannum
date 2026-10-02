@@ -1,6 +1,6 @@
 # STN4: Per-Field Payload in One Term Entry
 
-Status: proposal, oracle-repair-4 · Basis: `stn3@1e1b20b` after the 4.6 mandatory miss · Normative
+Status: proposal, oracle-repair-5 · Basis: `stn3@1e1b20b` after the 4.6 mandatory miss · Normative
 parent: `docs/designs/stn3-tool-layer-2026-09-29.md` (formula, SQL surface,
 migration fence) · 2026-10-02
 
@@ -222,6 +222,8 @@ add_occurrence(token: &str, field: u8, positions: &[u32], field_length: u32)
 that column's raw token count for this document — the STN3 `doc_len` written
 into that channel's bounds — not the concatenated length and not another
 field's length. Heap `CREATE INDEX` and subsequent `INSERT` both call this.
+A multi-column write buffer **tags its generation on disk** before the first
+record (§6.3.1) so a restarted backend can decode without the in-memory map.
 Flush writes one `TermEntry`: union `df` counted across the token's field
 ordinals (dead included), parent `max_tf_bucket` the max of the channel
 maxima (dictionary nibble only), extents the two `FCH1` blobs. A field with
@@ -712,48 +714,91 @@ A blob is never both `ValidV1` and `ValidV2`. `Malformed` is not a version.
 
 **Buffer labels** — computed on **every** kind-5 relation, including when
 immutable segments exist. Skipping the buffer when `S` is nonempty is how a
-stale or corrupt buffer would classify as `Current`. Exactly one label;
-the tree below is the definition (no overlapping vacuous universals).
+stale or corrupt buffer would classify as `Current`. Exactly one label.
+Generation of a **persisted** buffer is **not** the in-memory value shape
+(per-field map vs single-stream `TermData`): a fresh backend has only the
+KIND_BUFFER bytes. Kind-5 / STNM / `field_count` are shared across 4.3–4.6
+and STN4. STNF v1 vs v2 on immutable segments **must not** select the buffer
+decoder (mixed generations beside each other must be detected).
+
+#### 6.3.1 Durable buffer generation (normative)
+
+A multi-column write buffer carries a persisted discriminator that:
+
+- distinguishes a 4.3–4.6 fielded-terms buffer from an STN4 buffer on disk;
+- is part of the KIND_BUFFER byte stream, so restart, recovery, and WAL replay
+  preserve it (existing buffer-page WAL already logs those bytes);
+- cannot be forged by a legal surface token (`~0~foo` lives inside a record
+  body, never at stream offset 0);
+- is read **before** any conversion into `add_occurrence` builders. The stored
+  generation is preserved. Loading a legacy stream into STN4 maps and then
+  asking the map shape is forbidden.
+
+**Sufficient construction** (A.2 may substitute another prefix only with the
+same disjointness proof):
+
+```
+STN4_BUFFER_TAG := 0x00 0x01     # 0x00: not a legal ForwardRecord len
+                                 # 0x01: STN4 buffer format 1
+```
+
+`ForwardRecord::encode` writes `varint(body.len())` then a body of at least
+four varints (`block`, `offset`, `doc_len`, `term_count`), so `len >= 4`.
+A well-formed legacy stream's first byte is therefore never `0x00`. A stream
+starting `0x00 0x01` cannot be a legal 4.3–4.6 buffer. Unknown `0x00` +
+version, or `0x00` alone, is `BufferMalformed`, not legacy.
+
+The **record body after the tag** (how each posting names `field` and
+`field_length` without a `~{h}~` key) is an A.2 layout detail. The tag and
+the decoding order are not.
+
+**Decoding order** — `field_count` from the envelope; `docs` / `bytes` from
+`BufferState`; `stream` is the concatenated KIND_BUFFER payload. Do not visit
+term text until the branch is chosen:
+
+1. `docs == 0` ∧ `bytes == 0` → `BufferEmpty` (generation-neutral; no tag).
+2. `docs == 0` ∧ `bytes > 0` → `BufferMalformed`.
+3. `docs > 0` ∧ `bytes == 0` → `BufferMalformed`.
+4. `field_count == 1`: stock `ForwardRecord` stream, **no tag**. Success →
+   `BufferCurrent` if `terms > 0`, else `BufferNoTerms`. Failure →
+   `BufferMalformed`. Never `BufferStale`. A stock key `~0~foo` is Current.
+5. `field_count` not in `1..=16` → `BufferMalformed`.
+6. `field_count` in `2..=16` ∧ `docs > 0` ∧ `bytes > 0`:
+   1. If `stream` starts with `STN4_BUFFER_TAG`: decode the **remainder** with
+      the STN4 record grammar (A.2). Failure → `BufferMalformed`. Success and
+      `terms == 0` → `BufferNoTerms`. Success and `terms > 0` →
+      `BufferCurrent` even when some surface tokens match `~{h}~…`.
+      `legacy_fielded_key_shape` is **not consulted**.
+   2. Else: decode the **entire** stream as legacy `ForwardRecord`. Do **not**
+      call `add_occurrence`. Failure → `BufferMalformed`. Success and
+      `terms == 0` → `BufferNoTerms`. Success and `terms > 0` and every key
+      satisfies `legacy_fielded_key_shape(key, field_count)` → `BufferStale`.
+      Success with any other key → `BufferMalformed`.
+
+`legacy_fielded_key_shape` is only the **legacy-stream validator** on arm 6.2,
+and only for `field_count` in `2..=16` (outside that range it returns `false`;
+`0 < 1` would otherwise make `~0~foo` match). It does not produce an encoded
+key, does not call `Index::term` on an encoded key, and does not participate
+in lookup, expand, scoring, or writing.
 
 ```
 storage::legacy_fielded_key_shape(key: &str, field_count: u8) -> bool
 ```
 
-**Restricted to `field_count` in `2..=16`.** Outside that range it returns
-`false`. Inside: true iff `key` is `~` + one lowercase hex nibble + `~` + a
-nonempty escaped token (every payload `~` doubled), and the nibble is
-`< field_count`. `field_count == 1` does **not** make `~0~foo` match: `0 < 1`
-would have been true, so the range guard is load-bearing. It does not produce
-an encoded key, does not call `Index::term` on an encoded key, and does not
-participate in lookup, expand, scoring, or writing. C.3 deletes
-`fields/codec.rs`; this function stays as an isolated classifier and **runs
-even when immutable segments exist**.
-
-Decision tree (`docs` = buffer document count, `terms` = stored term count):
-
-1. `docs == 0` ∧ `terms == 0` → `BufferEmpty` (generation-neutral).
-2. `docs == 0` ∧ `terms > 0` → `BufferMalformed` (inconsistent buffer state).
-3. `docs > 0` ∧ `terms == 0` → `BufferNoTerms` (generation-neutral: empty or
-   discarded text; token-less records). Not `BufferEmpty`, not vacuously
-   Current, not vacuously Stale.
-4. `terms > 0` ∧ `field_count == 1` → `BufferCurrent` if every term is stock
-   `TermData`; else `BufferMalformed`. The legacy recognizer is **not**
-   consulted (`false` by the range guard). A stock key whose bytes equal
-   `~0~foo` is Current.
-5. `terms > 0` ∧ `field_count` in `2..=16`:
-   - every term is the STN4 in-memory shape (surface key + per-field
-     occurrence map from `add_occurrence`) → `BufferCurrent`. Value shape
-     decides; `~0~foo` as analyzed text is still Current.
-   - else every term's key satisfies `legacy_fielded_key_shape(key,
-     field_count)` **and** the value is the withdrawn single-stream `TermData`
-     → `BufferStale`.
-   - else → `BufferMalformed` (mix; neither shape; broken in-memory channel).
-6. `field_count` outside `1..=16` → `BufferMalformed` (envelope already
-   corrupt; this arm is defensive).
+True iff `field_count` is in `2..=16` and `key` is `~` + one lowercase hex
+nibble + `~` + a nonempty escaped token (every payload `~` doubled), and the
+nibble is `< field_count`.
 
 `BufferCurrent` and `BufferStale` require `terms > 0`. They are never both
 true. Immutable classification **never** uses the recognizer on immutable
-dictionary keys: a ValidV2 surface token `~0~foo` stays `ValidV2`.
+dictionary keys: a ValidV2 surface token `~0~foo` stays `ValidV2`. A tagged
+STN4 buffer with that same surface token stays `BufferCurrent` after restart.
+
+Writers: the first `INSERT` / heap build that puts bytes in a multi-column
+buffer writes `STN4_BUFFER_TAG` then records, in the same WAL-logged append.
+Later appends add records only. Folding reads records **after** the tag. A
+backend that reopens, recovers, or replays WAL must emit the same label as
+the live relation that wrote the stream.
 
 **Relation predicates** — exactly one. **Kind-first** (parent §8), not
 segment-magic-first:
@@ -819,8 +864,11 @@ is `PreStn3` (kind-1), unchanged.
 | v1 + v2 + one multi-column segment missing a trailer | `Corrupt` |
 | well-formed v2 trailer, one term with malformed FCH1 | `Corrupt` |
 | well-formed v2 + valid FCH1, dictionary contains surface token `~0~foo` | `Current` |
+| **tagged STN4 buffer** (after restart/WAL replay) whose surface tokens include `~0~foo` | `Current` (`BufferCurrent`) |
+| **untagged** well-formed legacy fielded-terms buffer (`docs > 0`, terms match `legacy_fielded_key_shape`) | `StaleFielded` |
+| well-formed v2 segments + **untagged** legacy buffer | `MixedFielded` |
+| generation-neutral zero-term buffer (`docs > 0`, `terms == 0`; tagged or untagged) | `BufferNoTerms` → `Current` if `S` empty or all ValidV2; `StaleFielded` if all ValidV1 |
 | empty kind-5 (`docs == 0`, no terms) | `Current` |
-| kind-5, `S` empty, `docs > 0`, zero terms (`BufferNoTerms`) | `Current` |
 | buffer-only `BufferCurrent` | `Current` |
 | buffer-only `BufferStale` | `StaleFielded` |
 | buffer-only `BufferMalformed` / mix | `Corrupt` |
@@ -853,7 +901,7 @@ Layer diagram is parent §3. L2 still does not import `IndexScorer`. Owned
 shims (`operator.rs`, `score.rs` `scope_scan_query`, `highlight_udfs.rs`,
 `customscan.rs`, `am.rs`, `options.rs`, `storage/layout.rs`, `tinql/`) do not
 gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
-`legacy_fielded_key_shape` in the opener (always, not only buffer-only).
+`legacy_fielded_key_shape` (untagged-legacy validator only) in the opener.
 
 ### Carry (math and semantics; tests stay)
 
@@ -865,8 +913,8 @@ gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
 | `postgres/src/fields/cursor.rs` | `LogicalPostingCursor`, `FieldHit`, advance atomicity, successor peeks. Opened on unpacked channels. |
 | `postgres/src/fields/expand.rs` | `Lookup` outcomes, empty-streams-not-error, overflow plan, scope mask on the logical term, `max_expansion` counted only after channel-set ∩ mask. Two `scan_window` consumers: capped candidates vs uncapped scoring (`expand_in`). Channel opens are a fallible walk, not `Fn(&str)` and not `Index::expand`. |
 | `postgres/src/fields/error.rs` | `AdapterError` Index vs key split; query vs verify as distinct kinds. Fielded `KeyDefect` header/escape variants die with the codec. Channel framing errors are `segment::Error::Corrupt` / `AdapterError::Index`. |
-| `postgres/src/storage/layout.rs` | `KIND_ENVELOPE = 5`, names/weights/stamp. |
-| `postgres/src/storage/mod.rs` | `Current` / `PreStn3` / `Corrupt` fence; add `StaleFielded` and `MixedFielded`; kind-first: kind-1 → `PreStn3`, kind-5+LSG → `Corrupt`; buffer labels `BufferEmpty` / `BufferNoTerms` / `BufferCurrent` / `BufferStale` / `BufferMalformed`; `legacy_fielded_key_shape` only for `field_count` in `2..=16`, on every kind-5 buffer. |
+| `postgres/src/storage/layout.rs` | `KIND_ENVELOPE = 5`, names/weights/stamp. KIND_BUFFER chain; STN4 multi-column streams begin with `STN4_BUFFER_TAG`. |
+| `postgres/src/storage/mod.rs` | `Current` / `PreStn3` / `Corrupt` fence; add `StaleFielded` and `MixedFielded`; kind-first: kind-1 → `PreStn3`, kind-5+LSG → `Corrupt`; buffer labels from §6.3.1 tag (`STN4_BUFFER_TAG` then STN4 records vs untagged legacy `ForwardRecord`); `legacy_fielded_key_shape` only validates the untagged arm, `field_count` in `2..=16`. |
 | `segment/src/dictionary.rs` | Layout of `TermEntry` and prefix-compressed blocks. No new fields. |
 | `segment/src/payload.rs`, `ordinals.rs`, `bound.rs` | Stock stream codecs. Channels are those codecs. |
 
@@ -874,12 +922,12 @@ gain STN4 work except the `StaleFielded` / `MixedFielded` classes and
 
 | File | Fate |
 |---|---|
-| `postgres/src/fields/codec.rs` | **Dead as a codec.** `fielded_key` / `header` / `upper_fence` / writers go. C.3 deletes this file. The `~{h}~` **grammar** survives only as `storage::legacy_fielded_key_shape` (§6.3), `field_count` in `2..=16`, which never looks up or writes. |
+| `postgres/src/fields/codec.rs` | **Dead as a codec.** `fielded_key` / `header` / `upper_fence` / writers go. C.3 deletes this file. The `~{h}~` **grammar** survives only as `storage::legacy_fielded_key_shape` (§6.3.1), which validates the **untagged** arm and never looks up or writes. |
 | `postgres/src/fields/expand.rs` lookup/expand bodies | Decoded `Window`; `Index::scan_window`; two consumers (a) capped candidates O(`max_expansion`) continue-past-overflow (b) uncapped scoring of every applicable term, independent of the discarded retrieval list; text `Fn(&str)` only; error > Overflow > Terms for (a); error and never Overflow for (b). Must not call `Index::expand` when `field_count` in `2..=16`. |
 | `postgres/src/fields/df.rs` | `query_total_df` reads entry dfs. `union_df_agg` remains a **build-time** helper to compute the stored union (and a verify check). Sidecar reader goes with STNF v1. |
 | `segment/src/trailer.rs` | v2: drop `df_len` / `DfEntry`. v1 parse remains long enough to classify `StaleFielded`. |
 | `segment/src/segment.rs` | `Term::channels()`. `Reader::new` still stops stock checks at `pages_end`; trailer API reads v2. |
-| `segment/src/index.rs` | `Index::scan_window` streaming cursor. Mutable: `add_occurrence(token, field, positions, field_length)`; per-token per-field builders; flush writes `FCH1` and omits zero-posting fields. |
+| `segment/src/index.rs` | `Index::scan_window` streaming cursor. Mutable: `add_occurrence(token, field, positions, field_length)` **after** the buffer tag is selected; per-token per-field builders; flush writes `FCH1` and omits zero-posting fields. Never convert an untagged stream into those builders. |
 | `segment/src/merge.rs`, `verify.rs` | Per-channel stock merge/verify; recount union into `TermEntry.df`; no df sidecar add. Multi-column verify unpacks `channels()` (including `child.df > 0`). Single-column verify is stock-only: no `FCH1` prefix sniff. |
 
 `fields/mod.rs` L1 comment updates: it owns the channel unpack, the fused
@@ -927,32 +975,39 @@ pg-agent; the risk is slip, not a forced cutover date.
     `channels()`, not a prefix test shared with single-column; stock `term()`
     still works on 0.5.0 single-column fixtures.
 - [ ] **A.2 Mutable flush + merge recount**
-  - Scope: `add_occurrence(token, field, positions, field_length)`; per-token
-    per-field builders; parent `TermEntry.df` = union including dead; merge per
-    channel then recount; forbid add of channel dfs. **Both** heap `CREATE
-    INDEX` (SQL build) **and** incremental `INSERT` after the index exists.
+  - Scope: `add_occurrence` only **after** §6.3.1 selects the STN4 tag;
+    `STN4_BUFFER_TAG` (`0x00 0x01`) as the first two bytes of every nonempty
+    multi-column KIND_BUFFER stream (or an A.2 substitute with the same
+    disjointness proof); per-token per-field builders; parent `TermEntry.df` =
+    union including dead; merge per channel then recount; forbid add of channel
+    dfs. **Both** heap `CREATE INDEX` (SQL build) **and** incremental `INSERT`
+    after the index exists. Record body after the tag is this step's layout.
   - Done when: two-field fixture with overlap counts union 3 not 4 on SQL build
     **and** on insert-after-create; dead ordinal remains in `df` until rewrite;
     merge of two segments recounts; `field_length` is that field's raw count;
-    a token posted in title only does not write a body directory record.
+    a token posted in title only does not write a body directory record;
+    a fresh backend reopening a tagged buffer with surface token `~0~foo` is
+    `BufferCurrent` (not Stale); reopening an untagged 4.3–4.6 buffer is
+    `BufferStale`; WAL replay matches the live label; fold reads records after
+    the tag; single-column buffers never write the tag.
 - [ ] **A.3 STNF v2 + classification matrix**
   - Scope: trailer without df; §6.3 predicates (`ValidV1` / `ValidV2` /
     `Malformed` plus `BufferEmpty` / `BufferNoTerms` / `BufferCurrent` /
     `BufferStale` / `BufferMalformed` → relation class); kind-first precedence;
-    `legacy_fielded_key_shape` only for `field_count` in `2..=16` on every
-    kind-5 buffer; rebuild strings; `ambuild` exempt.
-  - Done when: every fixture row in §6.3 holds, including v1+v2+malformed →
-    `Corrupt`; v1+v2+missing trailer → `Corrupt`; v2 + malformed FCH1 →
-    `Corrupt`; valid v2 with surface token `~0~foo` → `Current`; valid v2
-    segments + `BufferStale` → `MixedFielded`; valid v2 + `BufferMalformed` →
-    `Corrupt`; valid v1 + `BufferCurrent` → `MixedFielded`; buffer-only
-    `BufferCurrent` → `Current`; buffer-only `BufferStale` → `StaleFielded`;
-    empty kind-5 → `Current`; kind-5 `BufferNoTerms` alone → `Current`; v2 +
-    `BufferNoTerms` → `Current`; v1 + `BufferNoTerms` → `StaleFielded`;
-    well-formed v1-only → `StaleFielded`; well-formed v1+v2 only →
-    `MixedFielded`; kind-1 + LSG → `PreStn3` (the §8 migration string);
-    kind-5 + LSG → `Corrupt` (not that string). No page dirty on
-    rebuild/corrupt classes.
+    §6.3.1 tag decoding order; `legacy_fielded_key_shape` only validates the
+    untagged arm (`field_count` in `2..=16`); rebuild strings; `ambuild` exempt.
+  - Done when: every fixture row in §6.3 holds, including a **restarted** tagged
+    buffer whose tokens include `~0~foo` → `Current`; untagged valid legacy
+    buffer → `StaleFielded`; valid v2 segments + untagged legacy buffer →
+    `MixedFielded`; generation-neutral zero-term buffer → `BufferNoTerms`;
+    v1+v2+malformed → `Corrupt`; v1+v2+missing trailer → `Corrupt`; v2 +
+    malformed FCH1 → `Corrupt`; valid v2 with surface token `~0~foo` → `Current`;
+    valid v2 + `BufferMalformed` → `Corrupt`; valid v1 + `BufferCurrent` →
+    `MixedFielded`; empty kind-5 → `Current`; v2 + `BufferNoTerms` → `Current`;
+    v1 + `BufferNoTerms` → `StaleFielded`; well-formed v1-only → `StaleFielded`;
+    well-formed v1+v2 only → `MixedFielded`; kind-1 + LSG → `PreStn3` (the §8
+    migration string); kind-5 + LSG → `Corrupt` (not that string). No page dirty
+    on rebuild/corrupt classes. STNF version is never the buffer decoder.
 
 ### Phase B — Query wiring (≈ 1.5 wks)
 
@@ -1014,14 +1069,14 @@ pg-agent; the risk is slip, not a forced cutover date.
 - [ ] **C.3 Dead codec**
   - Scope: delete `fields/codec.rs` and encoded-key **writers** / lookup
     fixtures; `fields/mod.rs` comment matches §7. **Keep**
-    `storage::legacy_fielded_key_shape` as the only `~{h}~` grammar — buffer
-    classification on every kind-5 buffer (including beside immutable
-    segments); `field_count` not in `2..=16` returns false; no encode helper,
-    no `Index::term` on encoded keys.
+    `storage::legacy_fielded_key_shape` as the untagged-legacy **validator**
+    (`field_count` in `2..=16`); generation comes from `STN4_BUFFER_TAG`, not
+    from key spelling or in-memory maps. No encode helper, no `Index::term` on
+    encoded keys.
   - Done when: no `fielded_key` writer in `postgres/src` or `segment/src`;
     grep for encode/header/upper_fence in `fields/` is empty; classifier tests
-    (buffer-only stale vs current; v2 segments + stale buffer → MixedFielded;
-    `BufferNoTerms` alone and beside v1/v2; `legacy_fielded_key_shape("~0~foo",
+    (tagged current with `~0~foo` after reopen; untagged legacy → StaleFielded;
+    v2 + untagged legacy → MixedFielded; `BufferNoTerms`; `legacy_fielded_key_shape("~0~foo",
     1) == false`) still compile; workspace tests green.
 
 ### Phase D — Phrases, highlights, planner (old Phase 5) (≈ 2 wks)
@@ -1040,11 +1095,12 @@ Done-when texts of old 5.1–5.5 apply, with "fielded key" read as "channel".
       table: well-formed v1 rebuild-errors (`StaleFielded`), not LSG4;
       well-formed v1+v2 → `MixedFielded`; v1+v2+malformed and v1+v2+missing
       trailer → `Corrupt`; v2+bad FCH1 → `Corrupt`; v2 with token `~0~foo` →
-      `Current`; valid v2 + stale buffer → `MixedFielded`; valid v2 +
-      malformed buffer → `Corrupt`; kind-5 + LSG → `Corrupt` (not the §8
-      migration string); kind-1 + LSG → `PreStn3`; `BufferNoTerms` alone →
-      `Current`; v2 + `BufferNoTerms` → `Current`; v1 + `BufferNoTerms` →
-      `StaleFielded`.
+      `Current`; tagged buffer with token `~0~foo` after restart → `Current`;
+      untagged legacy buffer → `StaleFielded`; valid v2 + untagged legacy buffer
+      → `MixedFielded`; valid v2 + malformed buffer → `Corrupt`; kind-5 + LSG →
+      `Corrupt` (not the §8 migration string); kind-1 + LSG → `PreStn3`;
+      `BufferNoTerms` alone → `Current`; v2 + `BufferNoTerms`
+      → `Current`; v1 + `BufferNoTerms` → `StaleFielded`.
 - [ ] **E.2** Runbook + divergence ledger (old 6.2), including STN4 rebuild
       of any development fielded-terms indexes.
 - [ ] **E.3** Wheel alignment (old 6.3)
@@ -1092,9 +1148,9 @@ may overlap C.3. E.1 may start after A.3 (classification is the new CI row).
   return to fielded keys.
 - **`StaleFielded` vs `Corrupt` vs `MixedFielded`.** Kind-first: kind-1 is
   `PreStn3`; kind-5 + LSG is `Corrupt`. Mixed requires every segment **and the
-  buffer** well-formed. Buffer labels are an exclusive tree (`BufferNoTerms`
-  for `docs > 0` with no terms). The legacy recognizer is `2..=16` only. A.3
-  pins the fixture table.
+  buffer** well-formed. Buffer generation is the persisted tag (§6.3.1), never
+  in-memory maps, never STNF, never `~0~foo` key spelling. A.3 pins the fixture
+  table, including restart.
 - **Channel-open errors in expand.** `Fn(&str)` cannot carry `Result`. Multi-column
   expansion is `scan_window` only. Candidate (a): O(`max_expansion`) retained
   terms, continue past overflow. Scoring (b): every applicable term, independent
