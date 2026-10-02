@@ -278,7 +278,7 @@ decision (design §5.2) — do not silently proceed.
     conjunction); pruned vs exhaustive top-k identical.
   - Review focus: invariant, not prune-count.
 
-- [ ] **4.5 STNM kind-5 envelope + classification**
+- [x] **4.5 STNM kind-5 envelope + classification** (d5fa6f9)
   - Scope: kind 5 = upstream meta image + one framed STNM record (exact
     tuple grammar, conditional stamp inside body, every matrix row);
     `classify_meta_page` pure parser + `storage::open_index` live wrapper
