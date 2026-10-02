@@ -296,7 +296,8 @@ decision (design §5.2) — do not silently proceed.
 - [x] **4.6 Latency benchmark + decision — GATE** (b49ad94) — **RED: MANDATORY MISS**.
   Dictionary 3.34×, build 1.95× (threshold 1.8×); p50 5.61× (advisory
   1.3×, no waiver). Semantic smoke stays green — the fused scorer is
-  exact. Decision recorded: **STN4**. Escalated to the user.
+  exact. **User decision (2026-10-02): STN4 re-plan.** Phase 4 stops
+  here; 4.7–6.5 await the STN4 design.
   - Scope: §5.2 protocol (paired ratios, PG17, concurrency 1, 20 runs,
     nearest-rank quantiles, corpus checksummed, results to
     `docs/benchmarks/stn3-fielded-poc.json`); Chinese half gated on Phase 3.
