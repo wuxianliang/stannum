@@ -67,10 +67,12 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
   representation, STNF v2, classification, buffer generation, and expansion
   walk. The old STN3 *plan* is format-only for this document.
 - **pgembed checkpoints.** pgembed is a separate repo (loaded workspace root
-  `pgembed/`). Its build pins `STANNUM_COMMIT` in `pgbuild/Makefile`. At every
-  phase-end checkpoint: bump the pin to the step's commit, build the wheel
-  (`python3 tools/build_standalone_extension_wheel.py --extension stannum` /
-  `make -C pgbuild all`), run the named pgembed tests, record pass/fail here.
+  `pgembed/`, filesystem `/Users/wxl/Projects/pgembed`). Pin/build/pytest run
+  **from that repo root**, not from stannum. Its build pins `STANNUM_COMMIT`
+  in `pgbuild/Makefile`. At every phase-end checkpoint: bump the pin to the
+  step's commit, build the wheel (`python3 tools/build_standalone_extension_wheel.py
+  --extension stannum` / `make -C pgbuild all`), run the named pgembed tests,
+  record pass/fail here.
   **The 0.5.0 lineage must stay installable into pgembed.** C.2 is the
   representation gate: D's full multi-column wheel (D.5) does not waive a red
   C.2 (design §8).
@@ -78,6 +80,8 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
   while writers land before readers. **Single-column cases must stay PASS
   from A.1 onward.** C.1 restores the 4.5 multi-column greens on STN4
   indexes. Record every full-suite Summary in the census ledger below.
+  `--check` exits 1 while `FAIL > 0`; census gates parse the `Summary:`
+  line (and FAIL ids), they do not require exit 0 until D.4.
 - **Upstream pin.** Base is `upstream/main@d57ef58`. Record any re-pin here.
   Monthly upstream-merge dry-run stays enabled (STN3 P2).
 - **External dependency.** pg-agent v13 lives at `~/Projects/pg-agent`.
@@ -260,8 +264,9 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
       decode arm)
     - `rg -n 'fielded_key\(|header\(|upper_fence\(' postgres/src/storage`
       is empty
-    - `cargo test -p stannum --lib storage` (or the pg_test module that owns
-      the fn) green
+    - `cargo test -p stannum --lib legacy_fielded_key_shape` green (filter is
+      the function/test name; there is no `storage` crate). pg_tests that
+      call it: `script/pgrx-lock.py -- cargo pgrx test pg18 -p stannum`
   - Review focus: design §6.3.1 (`storage::legacy_fielded_key_shape`), §7
     Replace (`codec.rs` fate — keep the file until C.3).
 
@@ -419,12 +424,16 @@ D.\* after C.2. E.1 may already have started after A.4.
     - JSON exists; English corpus sha256 equals
       `52775c8a17077f09f028f5758eb53df65f94dc37c5a1f3e800990f5a39f0bbeb`.
     - Chinese corpus checksum committed; jieba snapshot/fingerprint recorded.
-    - On **each** corpus: `dict_ratio <= 1.8` and `build_ratio <= 1.8`
-      (`jq '.mandatory_gate.pass == true'` or equivalent per-corpus objects).
-      `stnf_df_len == 0` on the STN4 system.
-    - Ranked p50: `advisory_p50_gate.pass == true` **or**
-      `advisory_p50_gate.waiver` names the workload, the ratio, and why
-      staying is cheaper than another cut. **No waiver, no pass.** A
+    - On **each** corpus (English and Chinese): `dict_ratio <= 1.8` and
+      `build_ratio <= 1.8`. Do not copy 4.6's single top-level
+      `.mandatory_gate` unless the STN4 JSON keeps that shape for one
+      corpus; if both corpora live in one file, each corpus object must
+      carry its own `mandatory_gate.pass == true` (or `dict_ratio` /
+      `build_ratio` fields the harness tests assert). `stnf_df_len == 0`
+      on the STN4 system.
+    - Ranked p50 per corpus: `advisory_p50_gate.pass == true` **or** that
+      corpus's `advisory_p50_gate.waiver` names the workload, the ratio, and
+      why staying is cheaper than another cut. **No waiver, no pass.** A
       follow-up ticket is not a waiver. p99 labeled, not a gate.
     - A mandatory miss **stops and escalates** (design §9 next fallback:
       recorded divergence + `contract_version` bump). Do not start D.\*.
