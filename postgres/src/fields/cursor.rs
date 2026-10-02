@@ -27,7 +27,8 @@ struct FieldStream<'a> {
 }
 
 /// `current_ordinal`, `advance` (every stream to ≥ target; equal ordinals
-/// coalesce), `field_hits`, `next_bound_interval` (skeleton hook for 4.4).
+/// coalesce), `field_hits`, `next_bound_interval` (fused block/chunk/sub
+/// truncation for plan 4.4).
 pub(crate) struct LogicalPostingCursor<'a> {
     fields: Vec<FieldStream<'a>>,
     current: Option<u32>,
@@ -124,21 +125,20 @@ impl<'a> LogicalPostingCursor<'a> {
 
     /// Exclusive end of the fused bound interval covering `current_ordinal`.
     ///
-    /// Design §5.1 intersecting-blocks truncation: the fused interval ends at
-    /// the earlier of (1) the end of the blocks that currently cover the
-    /// pivot and (2) the start of the next block, chunk, or sub-block of any
-    /// mask-internal stream, including a stream that does not yet cover the
-    /// pivot. Witness: a title block covering 0..1000 with a body block that
-    /// starts at 500 must truncate at 500 — a body posting there raises
-    /// `tf*`, and holding the title-only bound across that start breaks
-    /// `exact_score ≤ fused_bound`. Plan 4.4 implements that rule; this hook
-    /// currently returns the earliest stream successor.
+    /// Design §5.1: the earlier of the covering-block exclusive ends and the
+    /// next block, chunk, or sub-block start of any mask-internal stream,
+    /// including a stream that does not yet cover the pivot. A list's
+    /// not-yet-covering start is its first ordinal. `max_tf*` / `min_len*`
+    /// over the interval account for every intersecting block.
     #[must_use]
     pub(crate) fn next_bound_interval(&self) -> Option<u32> {
-        self.fields
+        let pivot = self.current?;
+        let streams: Vec<&segment::ordinals::Ordinals<'_>> = self
+            .fields
             .iter()
-            .filter_map(|stream| stream.successor)
-            .min()
+            .map(|stream| stream.ordinals.stream())
+            .collect();
+        super::bound::next_interval_end(&streams, pivot)
     }
 }
 
@@ -258,6 +258,28 @@ mod tests {
         assert!(cursor.field_hits().unwrap().is_empty());
         assert_eq!(cursor.next_bound_interval(), None);
         assert_eq!(collect(&mut cursor), Vec::<(u32, Vec<u8>)>::new());
+    }
+
+    #[test]
+    fn next_bound_interval_is_list_block_end_not_posting_successor() {
+        let index = MutableIndex::default();
+        let title0 = fielded_key(0, "foo", FIELDS).unwrap();
+        add(&index, 0, &[(title0.as_str(), 1)]);
+        add(&index, 1, &[(title0.as_str(), 1)]);
+        let Lookup::Term(term) = lookup(&index, "foo", MASK, FIELDS).unwrap() else {
+            panic!("foo");
+        };
+        assert_eq!(
+            term.streams.iter().map(|s| s.field).collect::<Vec<_>>(),
+            vec![0]
+        );
+        let cursor = term.cursor().unwrap();
+        assert_eq!(cursor.current_ordinal(), Some(0));
+        assert_eq!(
+            cursor.next_bound_interval(),
+            Some(2),
+            "list [0, 1] is one block whose exclusive end is last+1, not the next posting"
+        );
     }
 
     #[test]

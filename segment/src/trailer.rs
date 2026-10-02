@@ -197,6 +197,13 @@ fn decode_norms(bytes: &[u8], document_count: u32) -> Result<(u8, Vec<u64>, Vec<
 fn decode_df_agg(bytes: &[u8]) -> Result<Vec<DfEntry>> {
     let mut reader = Reader::new(bytes);
     let count = take_u32le(&mut reader)?;
+    // token_len u32le + nonempty token + df u64le. Cap before allocating so a
+    // huge count with a tiny remaining section is Corrupt, not an abort.
+    const MIN_ENTRY: usize = 13;
+    let max_count = reader.remaining() / MIN_ENTRY;
+    if count as usize > max_count {
+        return Err(Error::Corrupt("STNF df_agg"));
+    }
     let mut entries = Vec::with_capacity(count as usize);
     let mut prev: Option<&[u8]> = None;
     for _ in 0..count {
@@ -521,6 +528,20 @@ mod tests {
         let norms_len = u32::from_le_bytes(crc[5..9].try_into().unwrap()) as usize;
         crc[PREFIX_LEN + norms_len - 1] ^= 1;
         assert_eq!(decode(&crc, 2).err(), Some(Error::Corrupt("STNF crc32")));
+    }
+
+    #[test]
+    fn huge_df_agg_count_with_tiny_section_is_corrupt() {
+        let mut bytes = encode(&[0, 0], &[], &[]).unwrap();
+        let norms_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+        let df_at = PREFIX_LEN + norms_len;
+        assert_eq!(
+            bytes.len() - df_at,
+            4,
+            "empty df_agg is the count word only"
+        );
+        bytes[df_at..df_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode(&bytes, 0).err(), Some(Error::Corrupt("STNF df_agg")));
     }
 
     #[test]
