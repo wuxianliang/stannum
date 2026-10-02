@@ -106,7 +106,7 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
 Channel directory, tagged buffers, STNF v2, classification. No query-path
 rewrite yet except what flush/open must do. SQL surface unchanged.
 
-- [ ] **A.1 Channel directory + `Term::channels(field_count)`**
+- [x] **A.1 Channel directory + `Term::channels(field_count)`** (40377d8)
   - Goal: every multi-column `TermEntry` multiplexes F unmodified STN3
     ordinal/payload streams behind an `FCH1` directory; unpack is a segment
     seam; single-column stays stock.
