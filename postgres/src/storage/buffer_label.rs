@@ -258,6 +258,15 @@ pub fn write_path(field_count: usize, docs: u32, bytes: u32, stream: &[u8]) -> B
     BufferWritePath::Stale
 }
 
+/// A.4.1 runtime isolation counter: thread-local so parallel libtest
+/// threads cannot pollute each other's assertions (a global atomic would
+/// be racy; one test at a time runs per thread). Only the isolation
+/// fixture reads it; production builds never compile it.
+#[cfg(test)]
+thread_local! {
+    static VALIDATOR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The 4.3–4.6 `~{h}~` fielded-key grammar, surviving only as the
 /// **untagged** legacy-stream validator (design §6.3.1). It encodes nothing,
 /// looks nothing up, and never participates in lookup, expand, scoring, or
@@ -267,6 +276,8 @@ pub fn write_path(field_count: usize, docs: u32, bytes: u32, stream: &[u8]) -> B
 /// hex nibble + `~` + a nonempty escaped token (every payload `~` doubled)
 /// whose nibble is `< field_count`.
 pub fn legacy_fielded_key_shape(key: &str, field_count: u8) -> bool {
+    #[cfg(test)]
+    VALIDATOR_CALLS.with(|calls| calls.set(calls.get() + 1));
     if !(2..=16).contains(&field_count) {
         return false;
     }
@@ -520,6 +531,7 @@ mod tests {
         assert!(legacy_fielded_key_shape("~0~foo~~bar", 2));
         // Out-of-range field counts reject everything (`0 < 1` would
         // otherwise make `~0~foo` match).
+        assert!(!legacy_fielded_key_shape("~0~foo", 0));
         assert!(!legacy_fielded_key_shape("~0~foo", 1));
         assert!(!legacy_fielded_key_shape("~0~foo", 17));
         // Nonempty token required.
@@ -564,6 +576,123 @@ mod tests {
                 &stream[..stream.len().min(12)]
             );
         }
+    }
+
+    #[test]
+    fn legacy_fielded_key_shape_tagged_arms_never_consult_it() {
+        // A.4.1 isolation, pinned on code structure + grep of the tagged
+        // decode arm (plan A.4.1): inside `classify_buffer` and
+        // `write_path`, the call form `legacy_fielded_key_shape(` may
+        // appear only after the untagged fallthrough begins. The count
+        // arms, the single-column arm, and the tagged arm above it must
+        // not contain it; the untagged region must (positive control, so
+        // a refactor that moves the markers fails loudly instead of
+        // passing vacuously).
+        let src = include_str!("buffer_label.rs");
+        for fn_name in ["classify_buffer", "write_path"] {
+            let rest = src
+                .split(&format!("pub fn {fn_name}"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{fn_name} missing from source"));
+            let body = rest.split("\npub fn ").next().unwrap();
+            let tagged_at = body
+                .find("stream.starts_with(&forward::STN4_BUFFER_TAG)")
+                .unwrap_or_else(|| panic!("tagged-arm marker missing in {fn_name}"));
+            let untagged_at = body
+                .find("stream.first() == Some(&0x00)")
+                .unwrap_or_else(|| panic!("untagged marker missing in {fn_name}"));
+            assert!(
+                tagged_at < untagged_at,
+                "arm markers out of order in {fn_name}"
+            );
+            assert!(
+                !body[..untagged_at].contains("legacy_fielded_key_shape("),
+                "{fn_name} calls the legacy validator before the untagged arm"
+            );
+            assert!(
+                body[untagged_at..].contains("legacy_fielded_key_shape("),
+                "{fn_name} lost the untagged-arm validation (positive control)"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_fielded_key_shape_never_invoked_by_tagged_arms_at_runtime() {
+        // Runtime supplement to the structural fence above (review P2): a
+        // validator call hidden in a same-file helper reachable from the
+        // tagged or single-column arm — `fielded_terms`, `stock_terms` —
+        // would evade the source-slice check but cannot evade this
+        // counter. Count arms decide before any decode helper runs.
+        VALIDATOR_CALLS.with(|calls| calls.set(0));
+        let tagged = fielded_stream(&[vec![("~0~foo", 1), ("~1~bar", 1)]]);
+        assert_eq!(
+            classify_buffer(2, 1, tagged.len() as u32, &tagged),
+            BufferLabel::Current
+        );
+        assert_eq!(
+            write_path(2, 1, tagged.len() as u32, &tagged),
+            BufferWritePath::Append
+        );
+        let stock = stock_stream(&[("~0~foo", 1)]);
+        assert_eq!(
+            classify_buffer(1, 1, stock.len() as u32, &stock),
+            BufferLabel::Current
+        );
+        assert_eq!(
+            write_path(1, 1, stock.len() as u32, &stock),
+            BufferWritePath::Append
+        );
+        assert_eq!(classify_buffer(2, 0, 0, &[]), BufferLabel::Empty);
+        assert_eq!(
+            VALIDATOR_CALLS.with(std::cell::Cell::get),
+            0,
+            "tagged, single-column, and count arms must never invoke the validator"
+        );
+        // Positive control: the untagged arm invokes it once per term.
+        let legacy = stock_stream(&[("~0~needle", 1), ("~1~pad", 2)]);
+        assert_eq!(
+            classify_buffer(2, 1, legacy.len() as u32, &legacy),
+            BufferLabel::Stale
+        );
+        assert!(VALIDATOR_CALLS.with(std::cell::Cell::get) >= 2);
+    }
+
+    #[test]
+    fn legacy_fielded_key_shape_has_no_call_sites_outside_buffer_label() {
+        // A.4.1 isolation, repo-wide: the validator must never run on a
+        // query or write path, so the call form `legacy_fielded_key_shape(`
+        // may exist only in this exact file (the two untagged arms pinned
+        // above and these fixtures) — exempted by full path, not basename,
+        // so a same-named file elsewhere still fails (review P2).
+        let allowed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("storage")
+            .join("buffer_label.rs");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in
+                std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            {
+                let path = entry
+                    .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+                    .path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                    if text.contains("legacy_fielded_key_shape(") && path != allowed {
+                        offenders.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "legacy_fielded_key_shape escaped buffer_label.rs: {offenders:?}"
+        );
     }
 
     #[test]

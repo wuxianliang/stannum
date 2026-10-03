@@ -3696,8 +3696,8 @@ unsafe fn persisted_buffer_label(
 
 /// The full §6.3 classification of a kind-5 relation: every immutable
 /// segment parsed and the buffer labeled from persisted bytes. Heavy —
-/// error fences, VACUUM, and tests only; the insert happy path uses the
-/// [`segment_mix`] probe and pays the full walk only on its error path.
+/// error fences, VACUUM, and tests only; the insert happy path pays the
+/// full walk only on its error path.
 /// `PreStn3` and the meta-page corruption classes have already errored
 /// kind-first in [`read_meta`]; an LSG segment under kind-5 in
 /// [`live_check_meta`].
@@ -4221,6 +4221,19 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
             } else {
                 None
             };
+            // The §6.3.1 grammar walk for an untagged multi-column buffer,
+            // taken while the meta guard still covers it: such a buffer
+            // always fences, so the label is needed whatever the segments
+            // say, and after the guard is released a concurrent append or
+            // fold could replace the run under the walk.
+            let untagged_fence_label = if meta.fields.len() >= 2
+                && meta.buffer.docs > 0
+                && buffer.as_ref().is_some_and(|(_, fielded)| !*fielded)
+            {
+                Some(unsafe { persisted_buffer_label(index, &meta) })
+            } else {
+                None
+            };
             // The meta page is released before the segment readers load:
             // segment runs are freed only past every snapshot that could
             // read them, not under this lock, and loading eighteen readers'
@@ -4290,13 +4303,11 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
             // kind-first in read_meta, the LSG-under-kind-5 corruption in
             // live_check_meta, and `Current` relations pass through untouched.
             if envelope_fields >= 2 {
-                let v1_segments = segment_labels
-                    .iter()
-                    .any(|label| matches!(label, classify::SegmentLabel::ValidV1));
                 // docs == 0 means `buffer` is None: the counts decide arms
                 // 1–3 without a stream read. docs > 0 means buffer_index
-                // decoded the stream (its own corruption errors fired there)
-                // and reports the persisted generation.
+                // decoded the stream under the snapshot's meta guard (its
+                // own corruption errors fired there) — so no fence path
+                // rereads buffer bytes the guard no longer covers.
                 let buffer_label = if meta.buffer.docs == 0 {
                     if meta.buffer.bytes == 0 {
                         buffer_label::BufferLabel::Empty
@@ -4306,26 +4317,36 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                         )
                     }
                 } else if buffer.as_ref().is_some_and(|(_, fielded)| *fielded) {
-                    // Tagged: `Current` or `NoTerms`, and both proceed unless
-                    // the segments carry v1. On that error path the persisted
-                    // label names the precise class (`NoTerms` is neutral, so
-                    // v1-only is StaleFielded, not mixed).
-                    if v1_segments {
-                        persisted_buffer_label(index, &meta)
+                    // Tagged: `Current` here for the fold — except beside v1
+                    // segments, where the buffer's own generation decides
+                    // StaleFielded vs MixedFielded and the counts cannot
+                    // tell Current from NoTerms. That error path rereads
+                    // the label under a fresh guard: the snapshot's guard is
+                    // long released, and the bytes it classified could have
+                    // been folded away since.
+                    if segment_labels
+                        .iter()
+                        .any(|label| matches!(label, classify::SegmentLabel::ValidV1))
+                    {
+                        let (guard, fresh) = read_meta(index, false);
+                        let label = unsafe { persisted_buffer_label(index, &fresh) };
+                        drop(guard);
+                        label
                     } else {
                         buffer_label::BufferLabel::Current
                     }
                 } else {
-                    // Untagged multi-column always fences, so the persisted
-                    // walk is error-path-only: it decides Stale vs the
-                    // Malformed of arm 6.2's legacy-key grammar (a decodable
-                    // stock record with a non-legacy key is corruption, not
-                    // a generation).
+                    // Untagged multi-column always fences: the §6.3.1 walk
+                    // ran under the snapshot's guard and is carried in — it
+                    // decides Stale vs the Malformed of arm 6.2's legacy-key
+                    // grammar (a decodable stock record with a non-legacy
+                    // key is corruption, not a generation).
                     debug_assert!(
                         buffer.is_some(),
                         "docs > 0 with no buffer: the recovery race continued the loop"
                     );
-                    persisted_buffer_label(index, &meta)
+                    untagged_fence_label
+                        .expect("computed under the snapshot guard before the readers loaded")
                 };
                 fence_relation(classify::relation_class(&segment_labels, buffer_label));
             }

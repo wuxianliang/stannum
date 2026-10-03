@@ -333,7 +333,12 @@ struct MetaHeader {
     dir_at: usize,
 }
 
-fn parse_meta_header(bytes: &[u8]) -> std::result::Result<MetaHeader, &'static str> {
+// Named `parse_meta_prefix` — not `parse_meta_header` — so the A.4.1
+// leak fence (the storage-tree grep for the retired fields/codec.rs
+// entry-point names: fielded_key, header, upper_fence, each with a call
+// paren) stays empty: no storage-side call of the codec's `header`
+// function may exist for the fence to hide behind.
+fn parse_meta_prefix(bytes: &[u8]) -> std::result::Result<MetaHeader, &'static str> {
     if bytes.len() < META_HEADER {
         return Err("truncated Stannum meta page");
     }
@@ -383,7 +388,7 @@ fn legacy_image_len(header: &MetaHeader) -> usize {
 /// leftover ANALYSIS_TAG tails. Length of the recognizable prefix is enough;
 /// extra bytes after it do not make the page Current.
 fn recognizable_040_layout(bytes: &[u8]) -> bool {
-    let Ok(header) = parse_meta_header(bytes) else {
+    let Ok(header) = parse_meta_prefix(bytes) else {
         return false;
     };
     let current_len = current_image_len(&header);
@@ -573,7 +578,7 @@ fn decode_stnm(
 }
 
 fn decode_envelope(bytes: &[u8]) -> std::result::Result<Meta, &'static str> {
-    let header = parse_meta_header(bytes)?;
+    let header = parse_meta_prefix(bytes)?;
     let image_len = current_image_len(&header);
     if bytes.len() < image_len {
         return Err("invalid Stannum meta page");
