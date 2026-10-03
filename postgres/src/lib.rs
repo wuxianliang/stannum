@@ -1007,6 +1007,13 @@ mod tests {
         out
     }
 
+    /// Directory metadata of a pristine blob, for planting patched copies
+    /// whose bytes may no longer parse.
+    fn segment_metadata(blob: &[u8]) -> (u32, u64) {
+        let reader = segment::segment::Segment::parse(blob).unwrap();
+        (reader.document_count(), reader.total_length())
+    }
+
     /// Demotes the first `demote` immutable segments to well-formed v1
     /// (keeping any later ones ValidV2) and empties the buffer.
     unsafe fn plant_v1_segments(rel: pg_sys::Relation, demote: usize) {
@@ -1017,15 +1024,17 @@ mod tests {
                 "fixture demotes {demote} of {} built segments",
                 blobs.len()
             );
-            let planted: Vec<Vec<u8>> = blobs
+            let planted: Vec<(Vec<u8>, u32, u64)> = blobs
                 .iter()
                 .enumerate()
                 .map(|(at, blob)| {
-                    if at < demote {
+                    let (docs, total_length) = segment_metadata(blob);
+                    let bytes = if at < demote {
                         demoted_v1(blob)
                     } else {
                         blob.clone()
-                    }
+                    };
+                    (bytes, docs, total_length)
                 })
                 .collect();
             crate::storage::test_replace_segments(rel, &planted);
@@ -1116,10 +1125,16 @@ mod tests {
             )
             .unwrap();
             assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+            let generation = crate::storage::next_generation(rel);
             assert_eq!(
                 crate::storage::test_segment_blobs(rel),
                 blobs,
                 "the directory is unchanged"
+            );
+            assert_eq!(
+                crate::storage::next_generation(rel),
+                generation,
+                "no entry was published either"
             );
             // BufferStale (untagged legacy beside the v1 segments).
             let legacy = legacy_fielded_stream(&[("~0~needle", 1)]);
@@ -1162,20 +1177,21 @@ mod tests {
     #[pg_test]
     fn v1_beside_v2_is_mixedfielded() {
         overlap_fixture("mixedseg");
-        // A second ValidV2 segment: one fold past the CREATE INDEX flush.
-        Spi::run(
-            "SET LOCAL stannum.write_buffer_bytes = 1024;
-             INSERT INTO mixedseg_docs VALUES (4, 'zzz', repeat('filler ', 400));",
-        )
-        .unwrap();
+        // One pristine ValidV2 segment from the CREATE INDEX flush; the
+        // mixed directory is planted as two entries — a demoted v1 copy and
+        // the pristine v2 original — because a natural second fold would be
+        // merged away by the deferred maintenance merge.
         let rel = open_rel("mixedseg_idx");
         unsafe {
-            assert_eq!(
-                crate::storage::test_segment_blobs(rel).len(),
-                2,
-                "CREATE INDEX flush + one fold"
-            );
-            plant_v1_segments(rel, 1);
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 1, "the CREATE INDEX flush");
+            let (docs, total_length) = segment_metadata(&blobs[0]);
+            let planted = vec![
+                (demoted_v1(&blobs[0]), docs, total_length),
+                (blobs[0].clone(), docs, total_length),
+            ];
+            crate::storage::test_replace_segments(rel, &planted);
+            crate::storage::test_replace_buffer(rel, &[], 0);
             let (stream, blobs) = (
                 crate::storage::test_buffer_stream(rel),
                 crate::storage::test_segment_blobs(rel),
@@ -1223,7 +1239,13 @@ mod tests {
                 "the buffer is live before the demotion"
             );
             let blobs = crate::storage::test_segment_blobs(rel);
-            let planted: Vec<Vec<u8>> = blobs.iter().map(|blob| demoted_v1(blob)).collect();
+            let planted: Vec<(Vec<u8>, u32, u64)> = blobs
+                .iter()
+                .map(|blob| {
+                    let (docs, total_length) = segment_metadata(blob);
+                    (demoted_v1(blob), docs, total_length)
+                })
+                .collect();
             crate::storage::test_replace_segments(rel, &planted);
             let stream = crate::storage::test_buffer_stream(rel);
             Spi::run(
@@ -1261,17 +1283,19 @@ mod tests {
     #[pg_test]
     fn v1_v2_plus_malformed_or_missing_trailer_is_corrupt() {
         overlap_fixture("cormix");
-        Spi::run(
-            "SET LOCAL stannum.write_buffer_bytes = 1024;
-             INSERT INTO cormix_docs VALUES (4, 'zzz', repeat('filler ', 400));",
-        )
-        .unwrap();
         let rel = open_rel("cormix_idx");
         unsafe {
             let blobs = crate::storage::test_segment_blobs(rel);
-            assert_eq!(blobs.len(), 2);
-            // v1 beside v2 beside an unknown-version trailer.
-            let malformed = vec![demoted_v1(&blobs[0]), with_unknown_version(&blobs[1])];
+            assert_eq!(blobs.len(), 1, "the CREATE INDEX flush");
+            let (docs, total_length) = segment_metadata(&blobs[0]);
+            // v1, then a pristine v2, then a malformed trailer — both valid
+            // generations present when M fires, so dominance is exercised
+            // over the real reader traversal, in the design's order.
+            let malformed = vec![
+                (demoted_v1(&blobs[0]), docs, total_length),
+                (blobs[0].clone(), docs, total_length),
+                (with_unknown_version(&blobs[0]), docs, total_length),
+            ];
             crate::storage::test_replace_segments(rel, &malformed);
             crate::storage::test_replace_buffer(rel, &[], 0);
             Spi::run(
@@ -1290,7 +1314,11 @@ mod tests {
             )
             .unwrap();
             // v1 beside v2 beside a multi-column segment with no trailer.
-            let missing = vec![demoted_v1(&blobs[0]), without_trailer(&blobs[1])];
+            let missing = vec![
+                (demoted_v1(&blobs[0]), docs, total_length),
+                (blobs[0].clone(), docs, total_length),
+                (without_trailer(&blobs[0]), docs, total_length),
+            ];
             crate::storage::test_replace_segments(rel, &missing);
             Spi::run(
                 "DO $$
@@ -1331,7 +1359,8 @@ mod tests {
         let rel = open_rel("corfch_idx");
         unsafe {
             let blobs = crate::storage::test_segment_blobs(rel);
-            let planted = vec![with_broken_fch1(&blobs[0])];
+            let (docs, total_length) = segment_metadata(&blobs[0]);
+            let planted = vec![(with_broken_fch1(&blobs[0]), docs, total_length)];
             crate::storage::test_replace_segments(rel, &planted);
             Spi::run(
                 "DO $$
@@ -1348,6 +1377,30 @@ mod tests {
                  END $$;",
             )
             .unwrap();
+            // The insert fence validates through the same reader open pass,
+            // so the guarded callback refuses before any write too — the
+            // deep-corruption carve-out the prefix probe would have had is
+            // closed.
+            let (stream, blobs_now) = (
+                crate::storage::test_buffer_stream(rel),
+                crate::storage::test_segment_blobs(rel),
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO corfch_docs VALUES (9, 'a', 'b');
+                     RAISE EXCEPTION 'the insert fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'channel magic'
+                        OR SQLERRM ~ 'mixes'
+                        OR SQLERRM ~ 'holds a pre-STN4' THEN
+                         RAISE EXCEPTION 'wrong insert error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+            assert_eq!(crate::storage::test_segment_blobs(rel), blobs_now);
         }
         close_rel(rel);
     }
@@ -1388,40 +1441,32 @@ mod tests {
 
     /// §6.3 fixture row: a ValidV2 dictionary containing the surface token
     /// `~0~foo` stays `Current` — the immutable classification never runs
-    /// the recognizer on dictionary keys, and a fold keeps the token
-    /// FCH1-framed and scoreable.
+    /// the recognizer on dictionary keys, and the flushed segment keeps
+    /// the token FCH1-framed and scoreable.
     #[pg_test]
     fn v2_dictionary_surface_token_stays_current() {
+        // The rows exist before CREATE INDEX, so the build flushes the
+        // shaped token straight into an immutable ValidV2 segment — no
+        // write-buffer GUC games: the build is the deterministic producer.
         Spi::run(
             "CREATE TABLE surf_docs (id int, title text, body text);
+             INSERT INTO surf_docs VALUES (1, '~0~foo filler', 'x'), (2, 'zzz', 'y');
              CREATE INDEX surf_idx ON surf_docs USING stannum(title, body)
-               WITH (tokenizer = 'whitespace');
-             INSERT INTO surf_docs VALUES (1, '~0~foo filler', 'x');",
-        )
-        .unwrap();
-        // Fold the shaped token into an immutable segment.
-        Spi::run(
-            "SET LOCAL stannum.write_buffer_bytes = 1024;
-             INSERT INTO surf_docs VALUES (2, 'zzz', repeat('filler ', 400));",
+               WITH (tokenizer = 'whitespace');",
         )
         .unwrap();
         let rel = open_rel("surf_idx");
         unsafe {
             let blobs = crate::storage::test_segment_blobs(rel);
-            let folded = blobs
-                .iter()
-                .find(|blob| {
-                    segment::segment::Segment::parse(blob)
-                        .unwrap()
-                        .term("~0~foo")
-                        .unwrap()
-                        .is_some()
-                })
-                .expect("the folded segment holds the surface token");
-            let segment = segment::segment::Segment::parse(folded).unwrap();
-            let token = segment.term("~0~foo").unwrap().unwrap();
+            assert_eq!(blobs.len(), 1, "the CREATE INDEX flush");
+            let segment = segment::segment::Segment::parse(&blobs[0]).unwrap();
+            assert_eq!(segment.trailer().unwrap().version, 2);
+            let token = segment
+                .term("~0~foo")
+                .unwrap()
+                .expect("the dictionary holds the surface token verbatim");
             assert_eq!(token.channels(2).unwrap().len(), 1, "still FCH1-framed");
-            assert!(segment::verify::verify_segment(folded).is_clean());
+            assert!(segment::verify::verify_segment(&blobs[0]).is_clean());
         }
         close_rel(rel);
         // The relation stays Current: queries answer through it.
@@ -1468,10 +1513,11 @@ mod tests {
         close_rel(rel);
     }
 
-    /// The insert fence decides from persisted state, the view a restarted
-    /// backend reconstructs — cold (no cache in this backend) and warm (a
-    /// scan already read the relation) both refuse the stale relation
-    /// without writing.
+    /// The insert fence decides from persisted state — the view a restarted
+    /// backend or WAL replay reconstructs; within one test backend this is
+    /// the cold/warm cache distinction (a pg_test cannot restart its
+    /// backend; E.1 repeats the rejected operations from fresh backends).
+    /// Both orders refuse the stale relation without writing.
     #[pg_test]
     fn insert_after_restart_on_stale_errors_without_writing() {
         // Cold: no prior read of this index in the backend.
@@ -1500,8 +1546,9 @@ mod tests {
         }
         close_rel(rel);
 
-        // Warm: a fenced scan first (populating the reader, buffer, and mix
-        // caches), then the insert.
+        // Warm: a fenced scan first (populating the reader and buffer
+        // caches this backend holds), then the insert — its label walk
+        // sees the warm reader cache rather than a cold open.
         overlap_fixture("warmstale");
         let rel = open_rel("warmstale_idx");
         unsafe {
@@ -1564,6 +1611,39 @@ mod tests {
         }
         // Not reached: the fence errors first.
         close_rel(rel);
+    }
+
+    /// The `ambuild` exemption is load-bearing: every rebuild error says
+    /// REINDEX, so the build path must terminate a planted rebuild class in
+    /// `Current`, not fence against itself.
+    #[pg_test]
+    fn reindex_clears_a_planted_stale_class() {
+        overlap_fixture("reidx");
+        let rel = open_rel("reidx_idx");
+        unsafe {
+            plant_v1_segments(rel, 1);
+        }
+        close_rel(rel);
+        Spi::run("REINDEX INDEX reidx_idx").unwrap();
+        let rel = open_rel("reidx_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert!(!blobs.is_empty(), "the rebuild flushed a fresh segment");
+            assert!(blobs.iter().all(|blob| {
+                segment::segment::Segment::parse(blob)
+                    .unwrap()
+                    .trailer()
+                    .unwrap()
+                    .version
+                    == 2
+            }));
+        }
+        close_rel(rel);
+        let found = Spi::get_one::<i64>("SELECT count(*) FROM reidx_docs WHERE title ==> 'needle'")
+            .unwrap();
+        assert_eq!(found, Some(2), "the rebuilt Current relation answers");
+        // And writes flow again.
+        Spi::run("INSERT INTO reidx_docs VALUES (9, 'needle', 'pad')").unwrap();
     }
 
     #[pg_test(error = "stannum: field syntax requires a multi-column index")]

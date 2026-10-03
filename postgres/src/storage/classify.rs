@@ -34,8 +34,6 @@
 //! page is dirtied.
 
 use crate::storage::buffer_label::BufferLabel;
-use segment::segment::Segment;
-use segment::trailer;
 
 /// The §6.3 label of one immutable segment blob, judged against the
 /// envelope's field count.
@@ -56,42 +54,11 @@ pub(crate) enum SegmentLabel {
     Malformed(String),
 }
 
-/// Labels one immutable segment blob against the envelope's `field_count`.
-pub(crate) fn segment_label(field_count: usize, blob: &[u8]) -> SegmentLabel {
-    let reader = match Segment::parse(blob) {
-        Ok(reader) => reader,
-        // A parse failure is corruption whatever its shape — including
-        // the withdrawn-codec failures (v1 df_len 0, v2 with a df section,
-        // unknown version, bad CRC) and an LSG magic under kind-5.
-        Err(error) => return SegmentLabel::Malformed(error.to_string()),
-    };
-    match reader.trailer() {
-        None => {
-            if field_count >= 2 {
-                SegmentLabel::Malformed(
-                    "multi-column segment is missing the STNF field-norms trailer".to_owned(),
-                )
-            } else {
-                SegmentLabel::Stock
-            }
-        }
-        Some(parsed) => {
-            if field_count == 1 {
-                SegmentLabel::Malformed("single-column segment carries an STNF trailer".to_owned())
-            } else if usize::from(parsed.field_count) != field_count {
-                SegmentLabel::Malformed(format!(
-                    "STNF field_count {} does not match the envelope's {field_count}",
-                    parsed.field_count
-                ))
-            } else if parsed.version == trailer::VERSION {
-                SegmentLabel::ValidV2
-            } else {
-                // decode rejects every version but 1 and 2.
-                SegmentLabel::ValidV1
-            }
-        }
-    }
-}
+/// The reader-open Malformed reason for a multi-column segment whose blob
+/// carries no trailer at all (it may still parse — STN4 keys are plain —
+/// so the label, not the open pass, names it).
+pub(crate) const MISSING_TRAILER: &str =
+    "multi-column segment is missing the STNF field-norms trailer";
 
 /// The §6.3 relation class. Exactly one; kind-first `PreStn3` and the
 /// meta-page corruption classes fire upstream in `read_meta`.
@@ -110,7 +77,6 @@ pub(crate) enum RelationClass {
 }
 
 impl RelationClass {}
-
 /// Folds the immutable labels and the buffer label into the one relation
 /// class. `segments` holds one label per immutable segment; single-column
 /// relations pass `Stock`/`Malformed` labels only.
