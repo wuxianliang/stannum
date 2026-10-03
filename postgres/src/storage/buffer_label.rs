@@ -258,10 +258,11 @@ pub fn write_path(field_count: usize, docs: u32, bytes: u32, stream: &[u8]) -> B
     BufferWritePath::Stale
 }
 
-/// A.4.1 runtime isolation counter: thread-local so parallel libtest
-/// threads cannot pollute each other's assertions (a global atomic would
-/// be racy; one test at a time runs per thread). Only the isolation
-/// fixture reads it; production builds never compile it.
+// A.4.1 runtime isolation counter: thread-local so parallel libtest
+// threads cannot pollute each other's assertions (a global atomic would
+// be racy; one test at a time runs per thread). Only the isolation
+// fixture reads it; production builds never compile it. (Plain `//`, not
+// `///`: rustdoc does not document macro invocations.)
 #[cfg(test)]
 thread_local! {
     static VALIDATOR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

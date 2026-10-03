@@ -4230,7 +4230,9 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 && meta.buffer.docs > 0
                 && buffer.as_ref().is_some_and(|(_, fielded)| !*fielded)
             {
-                Some(unsafe { persisted_buffer_label(index, &meta) })
+                // No inner `unsafe` block: the enclosing view_inner unsafe
+                // scope already covers persisted_buffer_label.
+                Some(persisted_buffer_label(index, &meta))
             } else {
                 None
             };
@@ -4329,7 +4331,8 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                         .any(|label| matches!(label, classify::SegmentLabel::ValidV1))
                     {
                         let (guard, fresh) = read_meta(index, false);
-                        let label = unsafe { persisted_buffer_label(index, &fresh) };
+                        // The enclosing view_inner unsafe scope covers it.
+                        let label = persisted_buffer_label(index, &fresh);
                         drop(guard);
                         label
                     } else {
