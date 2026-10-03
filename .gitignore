@@ -19,3 +19,4 @@
 **/__pycache__/
 /artifacts/
 .venv/
+prompt-exports/
