@@ -276,7 +276,7 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
   - Review focus: design §6.3.1 (`storage::legacy_fielded_key_shape`), §7
     Replace (`codec.rs` fate — keep the file until C.3).
 
-- [ ] **A.5 pgembed checkpoint + census snapshot**
+- [x] **A.5 pgembed checkpoint + census snapshot** (pgembed e4caf84)
   - Goal: 0.5.0 stays installable after the representation cut; record the
     contract ledger so C.1 has a before/after.
   - Scope: pgembed `pgbuild/Makefile` pin → this step's `stn3` SHA only. No
