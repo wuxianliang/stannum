@@ -309,7 +309,7 @@ wheel still installs; single-column contract green.
 Replace fielded-key lookup with `Index::term(text)` + `channels()`. Formula
 and bound functions stay. Parallel with A.3–A.4 after A.2 (design graph).
 
-- [ ] **B.1 Lookup / expand / cursor on channels**
+- [x] **B.1 Lookup / expand / cursor on channels** (0555857)
   - Goal: query opens one dictionary key per logical token; two
     `scan_window` consumers (capped candidates vs uncapped scoring);
     `df_agg` from parent `Term::df()`.
