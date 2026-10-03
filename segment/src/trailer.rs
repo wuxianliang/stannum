@@ -544,6 +544,64 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_overlap_keeps_per_field_cells() {
+        // One document posted in both fields: the cells stay per-field
+        // (2 and 1), never a union count, and each total sums its own column.
+        let totals = vec![2, 1];
+        let rows = vec![2, 1];
+        let bytes = encode(&totals, &rows).unwrap();
+        let trailer = decode(&bytes, 1).unwrap();
+        assert_eq!(trailer.row(0, 0), Some(2));
+        assert_eq!(trailer.row(0, 1), Some(1));
+        assert_ne!(trailer.row(0, 0), trailer.row(0, 1));
+        assert_eq!(trailer.field_totals, totals);
+        assert_eq!(trailer.rows, rows);
+    }
+
+    #[test]
+    fn roundtrip_all_dead_rows_survive() {
+        // Dead ordinals keep their rows until rewrite: three documents, only
+        // ordinal 0 ever posted, ordinals 1 and 2 still carry zero cells so
+        // doc-major addressing stays stable.
+        let rows = vec![4, 0, 0, 0, 0, 0];
+        let bytes = encode(&[4, 0], &rows).unwrap();
+        let trailer = decode(&bytes, 3).unwrap();
+        assert_eq!(trailer.rows, rows);
+        assert_eq!(trailer.row(2, 0), Some(0));
+        assert_eq!(trailer.row(2, 1), Some(0));
+        assert_eq!(trailer.field_totals, [4, 0]);
+    }
+
+    #[test]
+    fn roundtrip_merged_recount_shape() {
+        // Merge-product shape: several documents with mixed field presence
+        // and totals large enough that only the recounted u64 sums express
+        // them. Row addressing is doc-major: (o * field_count + f).
+        let totals = vec![7, 4];
+        let rows = vec![3, 2, 4, 2, 0, 0];
+        let bytes = encode(&totals, &rows).unwrap();
+        let trailer = decode(&bytes, 3).unwrap();
+        assert_eq!(trailer.field_count, 2);
+        assert_eq!(trailer.field_totals, totals);
+        assert_eq!(trailer.rows, rows);
+        assert_eq!(trailer.row(1, 0), Some(4));
+        assert_eq!(trailer.row(1, 1), Some(2));
+        assert_eq!(trailer.row(2, 1), Some(0));
+    }
+
+    #[test]
+    fn norms_dims_disagreeing_with_document_count_is_corrupt() {
+        // The rows block must hold exactly field_count * document_count
+        // cells: decoding a two-document trailer against any other document
+        // count is corruption, in either direction.
+        let (totals, rows) = sample();
+        let bytes = encode(&totals, &rows).unwrap();
+        assert_eq!(decode(&bytes, 2).unwrap().rows, rows);
+        assert_eq!(decode(&bytes, 1).err(), Some(Error::Corrupt("STNF norms")));
+        assert_eq!(decode(&bytes, 3).err(), Some(Error::Corrupt("STNF norms")));
+    }
+
+    #[test]
     fn field_count_one_is_corruption() {
         assert_eq!(encode(&[1], &[1]).err(), Some(field_count_error()));
         let mut bytes = encode(&[0, 0], &[]).unwrap();

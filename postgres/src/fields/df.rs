@@ -4,10 +4,11 @@
 
 //! `df_agg` union cardinality over term-stream ordinals.
 //!
-//! Index-time: distinct document ordinals that contain the token in any
-//! field, inside one segment, including dead ordinals. Query-time
-//! `total_df` is the sum of per-segment `df_agg`. Merge recounts from the
-//! merged streams; addition is not a substitute for that recount.
+//! STN4 keeps the aggregate df on each `TermEntry` (`Term::df`), written at
+//! build/flush and recounted at merge; the STNF v2 trailer carries norms only
+//! and no query path reads a df sidecar — none exists. The helpers here are
+//! build-time and verify-time ground truth (the union of a token's channel
+//! ordinals). Query-time `total_df` is the sum of per-segment dfs.
 
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
@@ -16,9 +17,9 @@ use super::types::FieldTerm;
 
 /// Distinct document ordinals across field streams of one token, one segment.
 ///
-/// Dead ordinals the segment still stores are members of this union. Query-time
-/// `total_docs` includes dead until rewrite; this cardinality is the matching
-/// `df_agg` until the STNF sidecar (plan 4.3) persists it.
+/// Dead ordinals the segment still stores are members of this union, the
+/// same rule as the stored `TermEntry.df` it recounts. Build and verify use
+/// this as ground truth; the STNF v2 sidecar carries norms only.
 #[must_use]
 pub(crate) fn union_df_agg<I, S>(field_ordinals: I) -> u64
 where
@@ -37,8 +38,9 @@ where
 
 /// [`union_df_agg`] over the ordinal streams of a logical term.
 ///
-/// Interim 4.2 bridge: lookup/expand fill `LogicalTerm.df_agg` from this, not
-/// a stored sidecar value and not a silent `0`. Dead ordinals count until
+/// Interim bridge until B.1 rewires `LogicalTerm.df_agg` to the stored
+/// `TermEntry.df`: lookup/expand fill it from the streams, never a sidecar
+/// value (v2 carries none) and never a silent `0`. Dead ordinals count until
 /// rewrite, the same rule as [`union_df_agg`].
 pub(crate) fn union_df_agg_from_streams(streams: &[FieldTerm<'_>]) -> segment::Result<u64> {
     let mut field_ordinals = Vec::with_capacity(streams.len());
