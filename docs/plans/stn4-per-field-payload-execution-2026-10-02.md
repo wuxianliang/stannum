@@ -727,7 +727,8 @@ work.
 | after step | SHA | FAIL | GAP | PASS | notes |
 |------------|-----|-----:|----:|-----:|-------|
 | 4.5 baseline | d5fa6f9 | 5 | 2 | 32 | phrase/span/patterns FAIL; catalog.gucs + catalog.functions GAP |
-| A.5 | | | | | snapshot; single-column 0 FAIL required |
+| A.5 | 6e797fb | 11 | | 26 | STN4 writer; multi-col query reds expected until B.1 |
+| B.1 | 0555857 | 6 | 1 | 32 | arithmetic+expansion recovered; phrase/span/patterns still `search()` unsupported |
 | B.3 | | | | | informational |
 | C.1 | | 5 | 2 | 32 | **required** — restore 4.5 greens on STN4 |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
