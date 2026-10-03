@@ -219,7 +219,7 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
     - `script/test-all quick` green.
   - Review focus: design §6.2, §1.4, §7 Replace (`trailer.rs`).
 
-- [ ] **A.4 Classification matrix**
+- [x] **A.4 Classification matrix** (a99a6e4)
   - Goal: leftover 4.3–4.6 indexes classify as `StaleFielded` /
     `MixedFielded` / `Corrupt` under kind-first predicates. Guarded callbacks
     rebuild-error with **distinct** strings; no page dirty. `ambuild` /
