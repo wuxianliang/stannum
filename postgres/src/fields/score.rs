@@ -154,12 +154,10 @@ pub(crate) fn fused_score(
 #[cfg(test)]
 mod tests {
     use segment::Tid;
-    use segment::forward::ForwardRecord;
     use segment::index::MutableIndex;
 
     use super::*;
     use crate::bm25::{TermScorer, bm25_idf};
-    use crate::fields::codec::fielded_key;
     use crate::fields::df::{union_df_agg, union_df_agg_from_streams};
     use crate::fields::expand::lookup;
     use crate::fields::types::Lookup;
@@ -412,21 +410,27 @@ mod tests {
         );
     }
 
-    fn add_columns(index: &MutableIndex, id: u32, columns: &[&str], field_count: u8) {
-        let mut keys = Vec::new();
+    fn add_columns(index: &MutableIndex, id: u32, columns: &[&str], _field_count: u8) {
+        index
+            .begin_fielded_document(Tid::new(id, 1).unwrap())
+            .unwrap();
         for (field, text) in columns.iter().enumerate() {
-            for token in text.split_whitespace() {
-                keys.push(fielded_key(field as u8, token, field_count).unwrap());
+            let mut by_term: std::collections::BTreeMap<&str, Vec<u32>> =
+                std::collections::BTreeMap::new();
+            let mut len = 0u32;
+            for (i, token) in text.split_whitespace().enumerate() {
+                len += 1;
+                by_term.entry(token).or_default().push(i as u32 + 1);
+            }
+            if len == 0 {
+                continue;
+            }
+            for (token, positions) in by_term {
+                index
+                    .add_occurrence(token, field as u8, &positions, len)
+                    .unwrap();
             }
         }
-        let tokens: Vec<(&str, u32)> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, key)| (key.as_str(), i as u32))
-            .collect();
-        index
-            .add_record(ForwardRecord::from_tokens(Tid::new(id, 1).unwrap(), tokens).unwrap())
-            .unwrap();
     }
 
     fn stream_ordinals(term: &crate::fields::types::LogicalTerm<'_>) -> Vec<(u8, Vec<u32>)> {
@@ -495,7 +499,7 @@ mod tests {
     #[test]
     fn arithmetic_row1_unweighted_tie_bits_match_0_4_0() {
         const FIELDS: u8 = 2;
-        let index = MutableIndex::default();
+        let index = MutableIndex::with_field_count(FIELDS).unwrap();
         add_columns(&index, 1, &["needle", "pad"], FIELDS);
         add_columns(&index, 2, &["pad", "needle"], FIELDS);
         add_columns(&index, 3, &["needle needle", "pad"], FIELDS);
@@ -553,7 +557,7 @@ mod tests {
     #[test]
     fn arithmetic_row2_field_weights_bits_match_0_4_0() {
         const FIELDS: u8 = 2;
-        let index = MutableIndex::default();
+        let index = MutableIndex::with_field_count(FIELDS).unwrap();
         add_columns(&index, 1, &["needle", "pad"], FIELDS);
         add_columns(&index, 2, &["pad", "needle needle needle"], FIELDS);
 

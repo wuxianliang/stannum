@@ -161,37 +161,46 @@ fn peek_successor(ordinals: &mut OrdinalCursor<'_>) -> segment::Result<Option<u3
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use segment::Tid;
-    use segment::forward::ForwardRecord;
     use segment::index::MutableIndex;
 
     use super::*;
     use crate::fields::expand::lookup;
     use crate::fields::score::all_fields_mask;
     use crate::fields::types::Lookup;
-    use crate::fields::{FieldTerm, fielded_key};
 
     const FIELDS: u8 = 2;
     const MASK: u16 = 0b11;
 
-    fn add(index: &MutableIndex, id: u32, tokens: &[(&str, u32)]) {
+    fn add_fielded(index: &MutableIndex, id: u32, columns: &[&str]) {
         index
-            .add_record(
-                ForwardRecord::from_tokens(Tid::new(id, 1).unwrap(), tokens.iter().copied())
-                    .unwrap(),
-            )
+            .begin_fielded_document(Tid::new(id, 1).unwrap())
             .unwrap();
+        for (field, text) in columns.iter().enumerate() {
+            let mut by_term: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
+            let mut len = 0u32;
+            for (i, word) in text.split_whitespace().enumerate() {
+                len += 1;
+                by_term.entry(word).or_default().push(i as u32 + 1);
+            }
+            if len == 0 {
+                continue;
+            }
+            for (word, positions) in by_term {
+                index
+                    .add_occurrence(word, field as u8, &positions, len)
+                    .unwrap();
+            }
+        }
     }
 
     fn fixture() -> MutableIndex {
-        let index = MutableIndex::default();
-        let both0 = fielded_key(0, "foo", FIELDS).unwrap();
-        let both1 = fielded_key(1, "foo", FIELDS).unwrap();
-        add(&index, 0, &[(both0.as_str(), 1), (both1.as_str(), 2)]);
-        let one = fielded_key(0, "foo", FIELDS).unwrap();
-        add(&index, 1, &[(one.as_str(), 1)]);
-        let other = fielded_key(1, "bar", FIELDS).unwrap();
-        add(&index, 2, &[(other.as_str(), 1)]);
+        let index = MutableIndex::with_field_count(FIELDS).unwrap();
+        add_fielded(&index, 0, &["foo", "foo"]);
+        add_fielded(&index, 1, &["foo", ""]);
+        add_fielded(&index, 2, &["", "bar"]);
         index
     }
 
@@ -229,7 +238,7 @@ mod tests {
         assert_eq!(hits0[0].field, 0);
         assert_eq!(hits0[0].positions, vec![1]);
         assert_eq!(hits0[1].field, 1);
-        assert_eq!(hits0[1].positions, vec![2]);
+        assert_eq!(hits0[1].positions, vec![1]);
         assert_eq!(cursor.next_bound_interval(), Some(1));
 
         let walked = collect(&mut both.cursor().unwrap());
@@ -262,10 +271,9 @@ mod tests {
 
     #[test]
     fn next_bound_interval_is_list_block_end_not_posting_successor() {
-        let index = MutableIndex::default();
-        let title0 = fielded_key(0, "foo", FIELDS).unwrap();
-        add(&index, 0, &[(title0.as_str(), 1)]);
-        add(&index, 1, &[(title0.as_str(), 1)]);
+        let index = MutableIndex::with_field_count(FIELDS).unwrap();
+        add_fielded(&index, 0, &["foo", ""]);
+        add_fielded(&index, 1, &["foo", ""]);
         let Lookup::Term(term) = lookup(&index, "foo", MASK, FIELDS).unwrap() else {
             panic!("foo");
         };
@@ -285,7 +293,7 @@ mod tests {
     #[test]
     fn unscoped_mask_opens_every_field_and_empty_streams_are_not_an_error() {
         assert_eq!(all_fields_mask(FIELDS), MASK);
-        let index = MutableIndex::default();
+        let index = MutableIndex::with_field_count(FIELDS).unwrap();
         let Lookup::Term(missing) = lookup(&index, "foo", all_fields_mask(FIELDS), FIELDS).unwrap()
         else {
             panic!("empty index lookup is Term with empty streams");

@@ -31,7 +31,27 @@ use crate::trailer::{MAX_FIELD_COUNT, MIN_FIELD_COUNT};
 use crate::{Error, Result, varint};
 
 /// Field CHannels, version 1. The four bytes `46 43 48 31`.
-pub(crate) const MAGIC: &[u8; 4] = b"FCH1";
+pub const MAGIC: &[u8; 4] = b"FCH1";
+
+/// Assemble a channel extent from directory records, including illegal ones.
+///
+/// A.1 framing tests and B.1 query-time channel-error fixtures plant FCH1
+/// this way. `records` is `(field, claimed_len, stream_bytes)`; `claimed_len`
+/// need not match `stream_bytes.len()`.
+#[must_use]
+pub fn frame(records: &[(u8, u32, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(MAGIC);
+    out.push(u8::try_from(records.len()).expect("at most 255 directory records"));
+    for (field, len, _) in records {
+        out.push(*field);
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+    for (_, _, bytes) in records {
+        out.extend_from_slice(bytes);
+    }
+    out
+}
 
 /// One field's already-encoded stock ordinal and payload streams.
 ///
@@ -494,21 +514,6 @@ mod tests {
             Error::Corrupt(message),
             "ordinals {ordinals:?} payload {payload:?}"
         );
-    }
-
-    /// Directory written in the given order, including illegal records.
-    fn frame(records: &[(u8, u32, &[u8])]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        out.push(u8::try_from(records.len()).unwrap());
-        for (field, len, _) in records {
-            out.push(*field);
-            out.extend_from_slice(&len.to_le_bytes());
-        }
-        for (_, _, bytes) in records {
-            out.extend_from_slice(bytes);
-        }
-        out
     }
 
     fn child_postings(mem: &Mem, child: TermEntry) -> (Vec<u32>, Vec<u8>, Vec<Vec<u32>>) {

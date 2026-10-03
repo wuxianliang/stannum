@@ -20,8 +20,51 @@ pub(crate) struct LogicalTerm<'a> {
     pub(crate) streams: Vec<FieldTerm<'a>>,
 }
 
+impl<'a> LogicalTerm<'a> {
+    pub(crate) fn absent(text: String, mask: u16) -> Self {
+        Self {
+            text,
+            mask,
+            df_agg: 0,
+            streams: Vec::new(),
+        }
+    }
+
+    /// Opens the parent entry's channels (or the stock stream when
+    /// `field_count == 1`) and keeps those whose field bit is in `mask`.
+    /// `df_agg` is the parent `Term::df()` and does not change with the mask.
+    pub(crate) fn from_entry(
+        text: String,
+        mask: u16,
+        field_count: u8,
+        term: Term<'a>,
+    ) -> segment::Result<Self> {
+        let df_agg = u64::from(term.df());
+        let streams = if field_count == 1 {
+            if mask & 1 != 0 {
+                vec![FieldTerm { field: 0, term }]
+            } else {
+                Vec::new()
+            }
+        } else {
+            term.channels(field_count)?
+                .into_iter()
+                .filter(|(field, _)| mask & (1u16 << field) != 0)
+                .map(|(field, child)| FieldTerm { field, term: child })
+                .collect()
+        };
+        Ok(Self {
+            text,
+            mask,
+            df_agg,
+            streams,
+        })
+    }
+}
+
 /// Direct lookup yields [`Lookup::Term`] (empty streams if absent). Expansion
 /// yields [`Lookup::Terms`] or [`Lookup::Overflow`].
+#[derive(Debug)]
 pub(crate) enum Lookup<'a> {
     Term(LogicalTerm<'a>),
     Terms(Vec<LogicalTerm<'a>>),

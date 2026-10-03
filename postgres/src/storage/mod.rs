@@ -1990,6 +1990,14 @@ impl Index for MemoizedSegment {
         Index::expand(&*self.reader, window, filter, limit)
     }
 
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> segment::Result<segment::index::ScanWindow<'a>> {
+        Index::scan_window(&*self.reader, window, filter)
+    }
+
     fn documents(&self) -> segment::Result<DocCursor<'_>> {
         self.reader.documents()
     }

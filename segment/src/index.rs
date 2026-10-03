@@ -39,6 +39,11 @@ pub enum Expanded<'a> {
     Overflow,
 }
 
+/// One `(decoded text, term)` from [`Index::scan_window`].
+pub type ScanItem<'a> = Result<(String, Term<'a>)>;
+/// Streaming dictionary cursor returned by [`Index::scan_window`].
+pub type ScanWindow<'a> = Box<dyn Iterator<Item = ScanItem<'a>> + 'a>;
+
 pub trait Index {
     fn document_count(&self) -> u32;
     fn total_length(&self) -> u64;
@@ -50,6 +55,17 @@ pub trait Index {
         filter: &dyn Fn(&str) -> bool,
         limit: usize,
     ) -> Result<Expanded<'_>>;
+    /// Dictionary-order cursor over `window` after `filter`.
+    ///
+    /// Yields one `(decoded text, term)` at a time. Applies interrupt checks
+    /// every [`crate::INTERRUPT_INTERVAL`] dictionary entries, like
+    /// [`Index::expand`]. Does not apply `max_expansion`, does not open
+    /// `channels()`, and does not collect the window.
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> Result<ScanWindow<'a>>;
     /// Every document in the index, in TID order.
     fn documents(&self) -> Result<DocCursor<'_>>;
     /// The document table: ordinals to locations and back.
@@ -64,6 +80,91 @@ pub trait Index {
     /// keep the pages they read pinned (see [`Source::hold`]).
     fn hold(&self, open: bool) {
         let _ = open;
+    }
+}
+
+struct ReaderScanWindow<'a, 'f, S: Source> {
+    reader: &'a Reader<S>,
+    inner: Box<dyn Iterator<Item = Result<(String, TermEntry)>> + 'a>,
+    filter: &'f dyn Fn(&str) -> bool,
+    scanned: usize,
+}
+
+impl<'a, 'f, S: Source> Iterator for ReaderScanWindow<'a, 'f, S> {
+    type Item = Result<(String, Term<'a>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let item = self.inner.next()?;
+            self.scanned += 1;
+            if self.scanned.is_multiple_of(crate::INTERRUPT_INTERVAL) {
+                crate::check_interrupts("expand:scan");
+            }
+            let (term, entry) = match item {
+                Ok(pair) => pair,
+                Err(error) => return Some(Err(error)),
+            };
+            if !(self.filter)(&term) {
+                continue;
+            }
+            return Some(self.reader.resolve(entry).map(|resolved| (term, resolved)));
+        }
+    }
+}
+
+fn window_bounds(sorted: &[String], window: Window<'_>) -> (usize, usize) {
+    match window {
+        Window::Prefix(prefix) => {
+            let start = sorted.partition_point(|k| k.as_str() < prefix);
+            let end = start + sorted[start..].partition_point(|k| k.starts_with(prefix));
+            (start, end)
+        }
+        Window::Range(lower, upper) => {
+            let start = lower.map_or(0, |lower| sorted.partition_point(|k| k.as_str() < lower));
+            let end = upper.map_or(sorted.len(), |upper| {
+                sorted.partition_point(|k| k.as_str() <= upper)
+            });
+            (start, end.max(start))
+        }
+        Window::All => (0, sorted.len()),
+    }
+}
+
+struct MutableScanWindow<'a, 'f> {
+    index: &'a MutableIndex,
+    filter: &'f dyn Fn(&str) -> bool,
+    end: usize,
+    pos: usize,
+    scanned: usize,
+}
+
+impl<'a, 'f> Iterator for MutableScanWindow<'a, 'f> {
+    type Item = Result<(String, Term<'a>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.pos >= self.end {
+                return None;
+            }
+            self.scanned += 1;
+            if self.scanned.is_multiple_of(crate::INTERRUPT_INTERVAL) {
+                crate::check_interrupts("expand:scan");
+            }
+            let name = {
+                let sorted = self.index.sorted.borrow();
+                let sorted = sorted.as_ref()?;
+                let name = sorted.get(self.pos)?.clone();
+                self.pos += 1;
+                name
+            };
+            if !(self.filter)(&name) {
+                continue;
+            }
+            let Some(entry) = self.index.entry(&name) else {
+                return Some(Err(Error::Corrupt("scan_window missing term")));
+            };
+            return Some(Ok((name, self.index.term_view(entry))));
+        }
     }
 }
 
@@ -125,6 +226,25 @@ impl<S: Source> Index for Reader<S> {
         Ok(Expanded::Terms(found))
     }
 
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> Result<ScanWindow<'a>> {
+        let dictionary = self.dictionary()?;
+        let inner: Box<dyn Iterator<Item = Result<(String, TermEntry)>> + 'a> = match window {
+            Window::Prefix(prefix) => Box::new(dictionary.prefix(prefix)),
+            Window::Range(lower, upper) => Box::new(dictionary.range(lower, upper)),
+            Window::All => Box::new(dictionary.iter()),
+        };
+        Ok(Box::new(ReaderScanWindow {
+            reader: self,
+            inner,
+            filter,
+            scanned: 0,
+        }))
+    }
+
     fn documents(&self) -> Result<DocCursor<'_>> {
         Reader::documents(self)
     }
@@ -151,6 +271,13 @@ impl<I: Index + ?Sized> Index for &I {
         limit: usize,
     ) -> Result<Expanded<'_>> {
         (**self).expand(window, filter, limit)
+    }
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> Result<ScanWindow<'a>> {
+        (**self).scan_window(window, filter)
     }
     fn documents(&self) -> Result<DocCursor<'_>> {
         (**self).documents()
@@ -191,6 +318,13 @@ impl<I: Index + ?Sized> Index for Box<I> {
     ) -> Result<Expanded<'_>> {
         (**self).expand(window, filter, limit)
     }
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> Result<ScanWindow<'a>> {
+        (**self).scan_window(window, filter)
+    }
     fn documents(&self) -> Result<DocCursor<'_>> {
         (**self).documents()
     }
@@ -229,6 +363,13 @@ impl<I: Index + ?Sized> Index for std::rc::Rc<I> {
         limit: usize,
     ) -> Result<Expanded<'_>> {
         (**self).expand(window, filter, limit)
+    }
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> Result<ScanWindow<'a>> {
+        (**self).scan_window(window, filter)
     }
     fn documents(&self) -> Result<DocCursor<'_>> {
         (**self).documents()
@@ -549,6 +690,41 @@ impl MutableIndex {
         }
         Ok(())
     }
+
+    /// Installs pre-encoded ordinal/payload extents for an existing fielded
+    /// token. B.1 plants a malformed FCH1 here so `Term::channels` fails at
+    /// query time; the dictionary walk still sees the surface token.
+    pub fn install_term_extents(
+        &self,
+        token: &str,
+        ordinals: Vec<u8>,
+        payload: Vec<u8>,
+        df: u32,
+        max_tf_bucket: u8,
+    ) -> Result<()> {
+        if !self.fielded.get() {
+            return Err(Error::Corrupt(
+                "install_term_extents requires a fielded index",
+            ));
+        }
+        if !self.fielded_terms.borrow().contains_key(token) {
+            return Err(Error::Corrupt("install_term_extents unknown token"));
+        }
+        let mut encoded = self.encoded.borrow_mut();
+        let ordinals = encoded.push(ordinals);
+        let payload = encoded.push(payload);
+        encoded.terms.insert(
+            token.to_owned(),
+            TermEntry {
+                df,
+                max_tf_bucket,
+                ordinals,
+                payload,
+            },
+        );
+        Ok(())
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn field_norms(&self) -> Result<Option<(u8, Vec<u64>, Vec<u32>)>> {
         match self.sidecar_tables()? {
@@ -1050,6 +1226,38 @@ impl Index for MutableIndex {
         Ok(Expanded::Terms(found))
     }
 
+    fn scan_window<'a>(
+        &'a self,
+        window: Window<'_>,
+        filter: &'a dyn Fn(&str) -> bool,
+    ) -> Result<ScanWindow<'a>> {
+        let (start, end) = {
+            let mut sorted = self.sorted.borrow_mut();
+            let sorted = sorted.get_or_insert_with(|| {
+                let source = if self.fielded.get() {
+                    self.fielded_terms
+                        .borrow()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    self.terms.borrow().keys().cloned().collect::<Vec<_>>()
+                };
+                let mut names = source;
+                names.sort_unstable();
+                names
+            });
+            window_bounds(sorted, window)
+        };
+        Ok(Box::new(MutableScanWindow {
+            index: self,
+            filter,
+            end,
+            pos: start,
+            scanned: 0,
+        }))
+    }
+
     fn documents(&self) -> Result<DocCursor<'_>> {
         AreaFetch::doc_table(self)?.into_cursor()
     }
@@ -1142,6 +1350,15 @@ mod tests {
             let x = names(a.expand(window, &|_| true, 1000).unwrap());
             let y = names(b.expand(window, &|_| true, 1000).unwrap());
             assert_eq!(x, y);
+            let scan = |index: &dyn Index| {
+                index
+                    .scan_window(window, &|_| true)
+                    .unwrap()
+                    .map(|item| item.unwrap().0)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(scan(a), x, "scan_window matches expand");
+            assert_eq!(scan(b), y, "scan_window matches expand");
         }
     }
 
@@ -1380,6 +1597,37 @@ mod tests {
         let segment = Reader::parse(&bytes).unwrap();
         assert_eq!(segment.term("needle").unwrap().unwrap().df(), 3);
         assert!(crate::verify::verify_segment(&bytes).is_clean());
+    }
+
+    #[test]
+    fn fielded_scan_window_yields_surface_tokens_one_at_a_time() {
+        let mutable = MutableIndex::with_field_count(2).unwrap();
+        add_fielded(&mutable, 1, &["beer wine", "beer"]).unwrap();
+        add_fielded(&mutable, 2, &["cider", "wine"]).unwrap();
+        let names: Vec<String> = mutable
+            .scan_window(Window::All, &|_| true)
+            .unwrap()
+            .map(|item| item.unwrap().0)
+            .collect();
+        assert_eq!(names, vec!["beer", "cider", "wine"]);
+        assert!(
+            names.iter().all(|name| !name.contains('~')),
+            "fielded keys are surface tokens"
+        );
+        let prefix: Vec<String> = mutable
+            .scan_window(Window::Prefix("w"), &|_| true)
+            .unwrap()
+            .map(|item| item.unwrap().0)
+            .collect();
+        assert_eq!(prefix, vec!["wine"]);
+        let bytes = mutable.flush().unwrap();
+        let segment = Reader::parse(&bytes).unwrap();
+        let from_reader: Vec<String> = segment
+            .scan_window(Window::All, &|_| true)
+            .unwrap()
+            .map(|item| item.unwrap().0)
+            .collect();
+        assert_eq!(from_reader, names);
     }
 
     #[test]

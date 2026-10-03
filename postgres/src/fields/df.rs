@@ -38,10 +38,10 @@ where
 
 /// [`union_df_agg`] over the ordinal streams of a logical term.
 ///
-/// Interim bridge until B.1 rewires `LogicalTerm.df_agg` to the stored
-/// `TermEntry.df`: lookup/expand fill it from the streams, never a sidecar
-/// value (v2 carries none) and never a silent `0`. Dead ordinals count until
-/// rewrite, the same rule as [`union_df_agg`].
+/// Build- and verify-time ground truth: the union of channel ordinals.
+/// Query lookup/expand fill `LogicalTerm.df_agg` from the stored parent
+/// `Term::df()` (B.1); they do not call this helper. Dead ordinals count
+/// until rewrite, the same rule as [`union_df_agg`].
 pub(crate) fn union_df_agg_from_streams(streams: &[FieldTerm<'_>]) -> segment::Result<u64> {
     let mut field_ordinals = Vec::with_capacity(streams.len());
     for stream in streams {
