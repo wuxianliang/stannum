@@ -18,6 +18,7 @@ use segment::ordinals::{CHUNK, ChunkBound, Ordinals, SUB, SUBS};
 use segment::tf_bucket::TfBucket;
 
 use super::score::saturate;
+use super::types::LogicalTerm;
 use crate::bm25::Bm25Params;
 
 /// One field's envelope over blocks that intersect a fused interval.
@@ -353,6 +354,54 @@ pub(crate) fn fused_interval_bound(
     }
 }
 
+/// Multi-column bound from a parent `Term`. Unpacks `channels()`; never reads
+/// the parent nibble / stock `Term::ordinals()`. Unpack or bound-read failure
+/// is unprunable `INFINITY` (design §3).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fused_interval_bound_from_term(
+    term: &segment::segment::Term<'_>,
+    field_count: u8,
+    mask: u16,
+    weights: &[f32],
+    start: u32,
+    end: u32,
+    avgdl_star: f32,
+    idf_f32: f32,
+    boost: f32,
+    params: Bm25Params,
+) -> f32 {
+    if !(2..=16).contains(&field_count) {
+        return f32::INFINITY;
+    }
+    let logical = match LogicalTerm::from_entry(String::new(), mask, field_count, *term) {
+        Ok(logical) => logical,
+        Err(_) => return f32::INFINITY,
+    };
+    let mut opened = Vec::with_capacity(logical.streams.len());
+    for stream in &logical.streams {
+        match stream.term.ordinals() {
+            Ok(ordinals) => opened.push((stream.field, ordinals)),
+            Err(_) => return f32::INFINITY,
+        }
+    }
+    let pairs: Vec<(u8, &Ordinals<'_>)> = opened
+        .iter()
+        .map(|(field, stream)| (*field, stream))
+        .collect();
+    fused_interval_bound(
+        &pairs,
+        mask,
+        weights,
+        start,
+        end,
+        field_count,
+        avgdl_star,
+        idf_f32,
+        boost,
+        params,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -362,12 +411,119 @@ mod tests {
 
     use super::*;
     use crate::fields::score::{fused_avgdl, fused_idf, fused_len, fused_score, fused_tf};
+    use crate::fields::types::LogicalTerm;
+    use segment::index::Index;
 
     const ITERATIONS: u32 = 512;
     const TOP_K: usize = 5;
 
     fn open(bytes: &[u8]) -> Ordinals<'_> {
         Ordinals::open(bytes, bytes.len() as u64, true).expect("scored stream")
+    }
+
+    struct ChannelMem {
+        ordinals: Vec<u8>,
+        payload: Vec<u8>,
+    }
+
+    impl segment::segment::AreaFetch for ChannelMem {
+        fn ordinals_bytes(&self, offset: u64, len: usize) -> segment::Result<&[u8]> {
+            let at = usize::try_from(offset).map_err(|_| segment::Error::Truncated)?;
+            self.ordinals
+                .get(at..at.checked_add(len).ok_or(segment::Error::Truncated)?)
+                .ok_or(segment::Error::Truncated)
+        }
+
+        fn payload_bytes(&self, extent: segment::dictionary::Extent) -> segment::Result<&[u8]> {
+            let at = usize::try_from(extent.offset).map_err(|_| segment::Error::Truncated)?;
+            let len = extent.len as usize;
+            self.payload
+                .get(at..at.checked_add(len).ok_or(segment::Error::Truncated)?)
+                .ok_or(segment::Error::Truncated)
+        }
+
+        fn doc_table(&self) -> segment::Result<segment::docs::DocTable<'_>> {
+            Err(segment::Error::Corrupt("channel documents"))
+        }
+
+        fn length(&self, _ordinal: u32) -> segment::Result<u32> {
+            Ok(1)
+        }
+
+        fn length_class(&self, ordinal: u32) -> segment::Result<u8> {
+            Ok(segment::length_class::class_of(self.length(ordinal)?))
+        }
+    }
+
+    fn payload_for(tfs: &[u32]) -> Vec<u8> {
+        let mut builder = segment::payload::PayloadBuilder::default();
+        for &tf in tfs {
+            let n = tf.max(1);
+            let positions: Vec<u32> = (1..=n).collect();
+            builder.push(&positions).expect("positions");
+        }
+        builder.finish()
+    }
+
+    fn unpack_channel_streams<R>(
+        term: &TermFixture,
+        f: impl FnOnce(&[(u8, Ordinals<'_>)]) -> R,
+    ) -> R {
+        let records_ord: Vec<(u8, u32, &[u8])> = term
+            .fields
+            .iter()
+            .zip(&term.bytes)
+            .map(|(&field, bytes)| {
+                (
+                    field,
+                    u32::try_from(bytes.len()).expect("stream fits u32"),
+                    bytes.as_slice(),
+                )
+            })
+            .collect();
+        let records_pay: Vec<(u8, u32, &[u8])> = term
+            .fields
+            .iter()
+            .zip(&term.payloads)
+            .map(|(&field, bytes)| {
+                (
+                    field,
+                    u32::try_from(bytes.len()).expect("stream fits u32"),
+                    bytes.as_slice(),
+                )
+            })
+            .collect();
+        let mem = ChannelMem {
+            ordinals: segment::channels::frame(&records_ord),
+            payload: segment::channels::frame(&records_pay),
+        };
+        assert_eq!(&mem.ordinals[..4], b"FCH1", "multi-column fixture is FCH1");
+        let entry = segment::dictionary::TermEntry {
+            df: u32::try_from(term.df_agg).unwrap_or(u32::MAX),
+            max_tf_bucket: term.parent_max_tf_bucket,
+            ordinals: segment::dictionary::Extent {
+                offset: 0,
+                len: u32::try_from(mem.ordinals.len()).expect("extent fits u32"),
+            },
+            payload: segment::dictionary::Extent {
+                offset: 0,
+                len: u32::try_from(mem.payload.len()).expect("extent fits u32"),
+            },
+        };
+        let parent = segment::segment::Term::new(entry, &mem);
+        let logical = LogicalTerm::from_entry("bound".into(), term.mask, term.field_count, parent)
+            .expect("Term::channels unpack");
+        let opened: Vec<(u8, Ordinals<'_>)> = logical
+            .streams
+            .iter()
+            .map(|stream| {
+                (
+                    stream.field,
+                    stream.term.ordinals().expect("channel ordinals"),
+                )
+            })
+            .collect();
+        f(&opened)
     }
 
     fn bucket_of(raw: u32) -> u8 {
@@ -410,12 +566,14 @@ mod tests {
         mask: u16,
         weights: Vec<f32>,
         bytes: Vec<Vec<u8>>,
+        payloads: Vec<Vec<u8>>,
         fields: Vec<u8>,
         raw: BTreeMap<(u8, u32), u32>,
         lengths: BTreeMap<u32, Vec<u32>>,
         field_totals: Vec<u64>,
         total_docs: u64,
         df_agg: u64,
+        parent_max_tf_bucket: u8,
         boost: f32,
         params: Bm25Params,
     }
@@ -457,13 +615,16 @@ mod tests {
         }
 
         fn with_streams<R>(&self, f: impl FnOnce(&[(u8, Ordinals<'_>)]) -> R) -> R {
-            let opened: Vec<(u8, Ordinals<'_>)> = self
-                .fields
-                .iter()
-                .zip(&self.bytes)
-                .map(|(&field, bytes)| (field, open(bytes)))
-                .collect();
-            f(&opened)
+            if self.field_count == 1 {
+                let opened: Vec<(u8, Ordinals<'_>)> = self
+                    .fields
+                    .iter()
+                    .zip(&self.bytes)
+                    .map(|(&field, bytes)| (field, open(bytes)))
+                    .collect();
+                return f(&opened);
+            }
+            unpack_channel_streams(self, f)
         }
     }
 
@@ -511,14 +672,20 @@ mod tests {
         let docs: Vec<u32> = docs.into_iter().collect();
         let (lengths, field_totals) = sidecar_and_totals(field_count, postings, &docs);
         let mut bytes = Vec::new();
+        let mut payloads = Vec::new();
         let mut fields = Vec::new();
+        let mut parent_max_tf_bucket = 0u8;
         for (field, mut rows) in by_field {
             rows.sort_by_key(|(ordinal, _, _)| *ordinal);
             rows.dedup_by_key(|(ordinal, _, _)| *ordinal);
             let ordinals: Vec<u32> = rows.iter().map(|(o, _, _)| *o).collect();
             let tfs: Vec<u32> = rows.iter().map(|(_, tf, _)| *tf).collect();
             let lens: Vec<u32> = rows.iter().map(|(_, _, len)| *len).collect();
+            for &tf in &tfs {
+                parent_max_tf_bucket = parent_max_tf_bucket.max(bucket_of(tf));
+            }
             bytes.push(scored(&ordinals, &tfs, &lens));
+            payloads.push(payload_for(&tfs));
             fields.push(field);
         }
         let df_agg = docs.len() as u64;
@@ -527,12 +694,14 @@ mod tests {
             mask,
             weights,
             bytes,
+            payloads,
             fields,
             raw,
             lengths,
             field_totals,
             total_docs: df_agg.max(1),
             df_agg,
+            parent_max_tf_bucket,
             boost,
             params: Bm25Params::default(),
         }
@@ -1212,5 +1381,115 @@ mod tests {
             Bm25Params::default(),
         );
         assert!(exact <= bound, "exact {exact} > unprunable bound {bound}");
+    }
+
+    #[test]
+    fn two_unit_weight_channels_fuse_tf_star_two_parent_nibble_is_not_a_bound() {
+        let term =
+            fixture_from_postings(2, 0b11, vec![1.0, 1.0], &[(0, 0, 1, 8), (1, 0, 1, 8)], 1.0);
+        assert_eq!(
+            term.parent_max_tf_bucket, 0,
+            "parent nibble is max(1,1) → bucket 0"
+        );
+        term.with_streams(|opened| {
+            assert_eq!(opened.len(), 2, "two channel streams from one FCH1 term");
+            let pairs: Vec<(u8, &Ordinals<'_>)> = opened.iter().map(|(f, s)| (*f, s)).collect();
+            let env = interval_envelopes(&pairs, 0, 1, 2).expect("readable bounds");
+            let fused = fused_bound(
+                term.mask,
+                &term.weights,
+                &env,
+                term.avgdl(),
+                term.idf(),
+                term.boost,
+                term.params,
+            );
+            let parent_nibble = fused_bound(
+                0b1,
+                &[1.0],
+                &[Some(FieldEnvelope {
+                    max_tf_bucket: term.parent_max_tf_bucket,
+                    shortest: 8,
+                })],
+                term.avgdl(),
+                term.idf(),
+                term.boost,
+                term.params,
+            );
+            let tf_star = fused_tf(0b11, &term.weights, &[Some(1), Some(1)]);
+            assert_eq!(tf_star.to_bits(), 2.0_f32.to_bits());
+            let exact = term.exact_at(0);
+            assert!(exact <= fused, "exact {exact} > fused {fused}");
+            assert!(
+                fused > parent_nibble,
+                "parent nibble bound {parent_nibble} underestimates fused {fused} (tf*=2)"
+            );
+            assert!(
+                exact > parent_nibble,
+                "consulting parent max=1 would prune a document whose fused score {exact} exceeds it"
+            );
+        });
+    }
+
+    #[test]
+    fn missing_channels_on_multi_column_bound_is_infinity() {
+        let index = segment::index::MutableIndex::with_field_count(2).unwrap();
+        index
+            .begin_fielded_document(segment::Tid::new(1, 1).unwrap())
+            .unwrap();
+        index.add_occurrence("foo", 0, &[1], 1).unwrap();
+        let empty = segment::channels::frame(&[]);
+        index
+            .install_term_extents("foo", empty.clone(), empty, 1, 0)
+            .unwrap();
+        let parent = index.term("foo").unwrap().unwrap();
+        let bound = fused_interval_bound_from_term(
+            &parent,
+            2,
+            0b11,
+            &[1.0, 1.0],
+            0,
+            1,
+            1.0,
+            fused_idf(1, 1),
+            1.0,
+            Bm25Params::default(),
+        );
+        assert!(
+            bound.is_infinite(),
+            "bound without channels() must not prune: got {bound}"
+        );
+    }
+
+    #[test]
+    fn missing_channels_on_multi_column_score_is_error() {
+        let index = segment::index::MutableIndex::with_field_count(2).unwrap();
+        index
+            .begin_fielded_document(segment::Tid::new(1, 1).unwrap())
+            .unwrap();
+        index.add_occurrence("foo", 0, &[1], 1).unwrap();
+        let empty = segment::channels::frame(&[]);
+        index
+            .install_term_extents("foo", empty.clone(), empty, 1, 0)
+            .unwrap();
+        let err = crate::fields::score::fused_score_from_term(
+            &index,
+            "foo",
+            0b11,
+            2,
+            &[1.0, 1.0],
+            0,
+            &[1, 1],
+            &[1, 1],
+            1,
+            1,
+            1.0,
+            Bm25Params::default(),
+        )
+        .expect_err("score without channels() is an error");
+        match err {
+            crate::fields::error::AdapterError::Index(_) => {}
+            other => panic!("expected Index error, got {other:?}"),
+        }
     }
 }

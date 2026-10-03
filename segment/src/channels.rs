@@ -53,6 +53,22 @@ pub fn frame(records: &[(u8, u32, &[u8])]) -> Vec<u8> {
     out
 }
 
+/// Field ordinals listed in an ordinals-extent directory whose stock count
+/// varint is 0. Flush omits empty fields; a listed zero-df channel is
+/// corruption. `channels()` also rejects this (`child.df > 0`); verify names
+/// the field before that unpack fails.
+pub fn listed_zero_df_fields(field_count: u8, ordinal_bytes: &[u8]) -> Result<Vec<u8>> {
+    let (dir, records) = parse_directory(ordinal_bytes, field_count)?;
+    let streams = slices(ordinal_bytes, dir, &records)?;
+    let mut zeros = Vec::new();
+    for (record, bytes) in records.iter().zip(streams) {
+        if stream_count(bytes, "channel ordinals")? == 0 {
+            zeros.push(record.field);
+        }
+    }
+    Ok(zeros)
+}
+
 /// One field's already-encoded stock ordinal and payload streams.
 ///
 /// A.2's flush is the production caller. Until then the tests are the writer,

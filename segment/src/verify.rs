@@ -229,7 +229,7 @@ fn check_page_table(found: &[u8], documents: &[Tid], findings: &mut Findings) {
 pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
     let mut report = SegmentReport::default();
     let mut findings = Findings::default();
-    let segment = match Segment::parse(bytes) {
+    let segment = match Segment::parse_for_verify(bytes) {
         Ok(segment) => segment,
         Err(error) => {
             findings.error("header", error);
@@ -416,6 +416,30 @@ pub fn verify_segment(bytes: &[u8]) -> SegmentReport {
             // `field_count` selects the codec. Single-column stays on the stock
             // decoders and does not inspect an FCH1 prefix.
             let multi = trailer.is_some();
+            if let Some(t) = trailer.as_ref() {
+                match segment
+                    .ordinals_bytes(entry.ordinals.offset, entry.ordinals.len as usize)
+                    .and_then(|bytes| crate::channels::listed_zero_df_fields(t.field_count, bytes))
+                {
+                    Ok(zeros) => {
+                        if !zeros.is_empty() {
+                            for f in zeros {
+                                findings.error(
+                                    location(),
+                                    format!("field {f} is listed with no documents"),
+                                );
+                            }
+                            complete = false;
+                            continue;
+                        }
+                    }
+                    Err(error) => {
+                        findings.error(location(), error);
+                        complete = false;
+                        continue;
+                    }
+                }
+            }
             let channels = if let Some(t) = trailer.as_ref() {
                 match resolved.channels(t.field_count) {
                     Ok(channels) => channels,
@@ -914,6 +938,86 @@ mod tests {
         assert_eq!(&bytes[range.start..range.start + 4], b"FCH1");
         let report = verify_segment(&bytes);
         assert!(report.is_clean(), "{}", messages(&report.findings));
+    }
+
+    fn two_column_one_hit() -> Vec<u8> {
+        let mut builder = SegmentBuilder::default();
+        builder.set_field_count(2).unwrap();
+        builder.begin_fielded_document(tid(0, 1)).unwrap();
+        builder.add_occurrence("hit", 0, &[1], 1).unwrap();
+        builder.finish()
+    }
+
+    fn replace_term_streams(
+        bytes: &[u8],
+        term: &str,
+        ordinals: Vec<u8>,
+        payload: Vec<u8>,
+    ) -> Vec<u8> {
+        let segment = Segment::parse(bytes).unwrap();
+        let sections = segment.sections();
+        let ordinals_at = sections.header + sections.dictionary;
+        let payload_at = ordinals_at + sections.ordinals;
+        let rest_at = payload_at + sections.payload;
+        let new_ord_off = sections.ordinals as u64;
+        let new_pay_off = sections.payload as u64;
+        let mut ordinals_area = bytes[ordinals_at..payload_at].to_vec();
+        ordinals_area.extend_from_slice(&ordinals);
+        let mut payload_area = bytes[payload_at..rest_at].to_vec();
+        payload_area.extend_from_slice(&payload);
+        let mut dictionary = crate::dictionary::DictionaryBuilder::default();
+        for item in segment.dictionary().unwrap().iter() {
+            let (name, mut entry) = item.unwrap();
+            if name == term {
+                entry.ordinals = crate::dictionary::Extent {
+                    offset: new_ord_off,
+                    len: u32::try_from(ordinals.len()).unwrap(),
+                };
+                entry.payload = crate::dictionary::Extent {
+                    offset: new_pay_off,
+                    len: u32::try_from(payload.len()).unwrap(),
+                };
+            }
+            dictionary.push(&name, entry).unwrap();
+        }
+        let dictionary = dictionary.finish();
+        let mut out = crate::segment::header(
+            segment.document_count(),
+            segment.total_length(),
+            dictionary.len(),
+            ordinals_area.len(),
+            payload_area.len(),
+            sections.pages,
+        );
+        out.extend_from_slice(&dictionary);
+        out.extend_from_slice(&ordinals_area);
+        out.extend_from_slice(&payload_area);
+        out.extend_from_slice(&bytes[rest_at..]);
+        out
+    }
+
+    #[test]
+    fn listed_child_df_zero_is_rejected() {
+        let good = two_column_one_hit();
+        assert!(
+            verify_segment(&good).is_clean(),
+            "{}",
+            messages(&verify_segment(&good).findings)
+        );
+        let empty_ord = ordinals::encode_scored(&[], &[]);
+        let empty_pay = crate::payload::PayloadBuilder::default().finish();
+        let ordinals = crate::channels::frame(&[(0, empty_ord.len() as u32, empty_ord.as_slice())]);
+        let payload = crate::channels::frame(&[(0, empty_pay.len() as u32, empty_pay.as_slice())]);
+        let bytes = replace_term_streams(&good, "hit", ordinals, payload);
+        let report = verify_segment(&bytes);
+        assert!(!report.is_clean(), "listed child.df == 0 must fail verify");
+        assert!(
+            report.findings.iter().any(|f| {
+                f.message.contains("listed with no documents") && f.location.contains("hit")
+            }),
+            "{}",
+            messages(&report.findings)
+        );
     }
 
     #[test]

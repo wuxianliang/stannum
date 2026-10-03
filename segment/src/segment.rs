@@ -886,10 +886,22 @@ impl<'a> Reader<&'a [u8]> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         Self::new(bytes)
     }
+
+    /// Decode the blob and STNF sidecar without the once-per-cache-entry
+    /// [`Reader::validate_trailer`] pass. Verify walks directory/child
+    /// consistency itself so a listed `child.df == 0` is a per-term finding
+    /// rather than a header-only open failure.
+    pub fn parse_for_verify(bytes: &'a [u8]) -> Result<Self> {
+        Self::from_source(bytes, false)
+    }
 }
 
 impl<S: Source> Reader<S> {
     pub fn new(source: S) -> Result<Self> {
+        Self::from_source(source, true)
+    }
+
+    fn from_source(source: S, validate_trailer: bool) -> Result<Self> {
         let total = source.len();
         let head = source.read(0, (total.min(64)) as usize)?;
         let mut reader = crate::reader::Reader::new(&head);
@@ -948,7 +960,7 @@ impl<S: Source> Reader<S> {
             held: Default::default(),
         };
         if total > pages_end {
-            reader.open_trailer(total)?;
+            reader.open_trailer(total, validate_trailer)?;
         } else {
             reader.reject_fielded_keys_without_trailer()?;
         }
@@ -970,14 +982,16 @@ impl<S: Source> Reader<S> {
     /// path). Structural CRC lives in [`crate::trailer::decode`]; the rest of
     /// the open-time pass — positions, field totals, union df, bounds,
     /// fielded-key grammar — runs here, not on every lookup.
-    fn open_trailer(&self, total: u64) -> Result<()> {
+    fn open_trailer(&self, total: u64, validate: bool) -> Result<()> {
         let len = usize::try_from(total - self.header.pages_end)
             .map_err(|_| Error::Corrupt("STNF trailer"))?;
         let parsed = {
             let bytes = self.load(self.header.pages_end, len)?;
             crate::trailer::decode(bytes, self.header.doc_count)?
         };
-        self.validate_trailer(&parsed)?;
+        if validate {
+            self.validate_trailer(&parsed)?;
+        }
         let _ = self.trailer.set(parsed);
         Ok(())
     }
@@ -1020,9 +1034,17 @@ impl<S: Source> Reader<S> {
                 return Err(Error::Corrupt("STNF df"));
             }
             let resolved = self.resolve(entry)?;
+            let ordinal_bytes =
+                self.ordinals_bytes(entry.ordinals.offset, entry.ordinals.len as usize)?;
+            if !crate::channels::listed_zero_df_fields(field_count, ordinal_bytes)?.is_empty() {
+                return Err(Error::Corrupt("channel df"));
+            }
             let channels = resolved.channels(field_count)?;
             let mut union = BTreeSet::new();
             for (field, child) in channels {
+                if child.df() == 0 {
+                    return Err(Error::Corrupt("channel df"));
+                }
                 let mut cursor = child.ordinals()?.cursor()?;
                 let mut payload = child.payload()?.cursor();
                 while let Some(ordinal) = cursor.current() {

@@ -4,8 +4,8 @@
 // See LICENSE in the repository root for license terms.
 
 use crate::bm25::{
-    Bm25Overrides, DenseRatio, ScoreStopWords, ScoringTermInput, TermScorer, TermSetEdit,
-    compile_scoring_terms, sum_scores_in_order,
+    Bm25Overrides, Bm25Params, DenseRatio, ScoreStopWords, ScoringTermInput, TermScorer,
+    TermSetEdit, compile_scoring_terms, sum_scores_in_order,
 };
 use pgrx::iter::TableIterator;
 use pgrx::{
@@ -33,6 +33,7 @@ use tinql::runtime::{
 };
 use tokenizer::Tokenizer;
 
+use crate::fields::{all_fields_mask, fused_interval_bound_from_term, fused_score_from_term};
 use crate::storage::View;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +68,15 @@ pub(crate) struct IndexScorer {
     view: View,
     dead: Vec<crate::storage::DeadSet>,
     terms: Vec<(String, TermScorer)>,
+    /// Parent `df` per scoring term (union across channels). Used by fused
+    /// multi-column scoring; stock `TermScorer` already folded the same idf.
+    term_dfs: Vec<u64>,
+    term_boosts: Vec<f32>,
+    field_count: u8,
+    weights: Vec<f32>,
+    field_totals: Vec<u64>,
+    total_docs: u64,
+    params: Bm25Params,
     query: Query,
     /// Computed on first request: the maximum over matching documents.
     max: Option<f32>,
@@ -91,6 +101,8 @@ struct SourceReader {
     /// One per scoring term, once opened: the term's streams in this
     /// source, if present.
     terms: Vec<Option<Option<TermReader>>>,
+    /// Envelope field count. `2..=16` must not read parent `Term::ordinals()`.
+    field_count: u8,
 }
 
 struct TermReader {
@@ -136,7 +148,7 @@ impl SourceReader {
     /// # Safety
     /// `segment` must stay alive and unmoved for as long as this reader exists:
     /// the owning `IndexScorer` keeps it in `view` and drops readers first.
-    unsafe fn new(segment: &dyn Index, terms: &[(String, TermScorer)]) -> Self {
+    unsafe fn new(segment: &dyn Index, terms: &[(String, TermScorer)], field_count: u8) -> Self {
         let segment: &'static (dyn Index + 'static) =
             unsafe { std::mem::transmute::<&dyn Index, &'static (dyn Index + 'static)>(segment) };
         Self {
@@ -144,6 +156,7 @@ impl SourceReader {
             docs: None,
             lengths: None,
             terms: (0..terms.len()).map(|_| None).collect(),
+            field_count,
         }
     }
 
@@ -167,6 +180,11 @@ impl SourceReader {
     /// The bucket of `ordinal` in scoring term `n`, named `name`, if the
     /// term lists it here.
     fn bucket(&mut self, n: usize, name: &str, ordinal: u32, label: &str) -> Option<u8> {
+        if (2..=16).contains(&self.field_count) {
+            crate::storage::corrupt(format!(
+                "Stannum {label}: multi-column score requires channels()"
+            ));
+        }
         let segment = self.segment;
         let reader = self.terms[n].get_or_insert_with(|| {
             segment_error_in(segment.term(name), label).map(|term| TermReader {
@@ -518,6 +536,9 @@ impl IndexScorer {
 
     /// Score of the document at `tid` in the first source listing it live.
     fn score_listed(&mut self, tid: Tid) -> Option<f32> {
+        if (2..=16).contains(&self.field_count) {
+            return self.score_listed_channels(tid);
+        }
         for i in 0..self.view.sources.len() {
             let label = self.view.labels[i].as_str();
             let reader = &mut self.sources[i];
@@ -553,6 +574,56 @@ impl IndexScorer {
                 total += scorer.score_bucket(bucket, length);
             }
             return Some(total);
+        }
+        None
+    }
+
+    /// Fused BM25F for a multi-column index: unpack `channels()` per term.
+    /// Parent `Term::ordinals()` / the parent nibble are never a score.
+    fn score_listed_channels(&mut self, tid: Tid) -> Option<f32> {
+        let mask = all_fields_mask(self.field_count);
+        for i in 0..self.view.sources.len() {
+            let label = self.view.labels[i].as_str();
+            let reader = &mut self.sources[i];
+            let Some(ordinal) = reader.ordinal_of(tid, label) else {
+                continue;
+            };
+            if self.dead[i].contains(ordinal) {
+                continue;
+            }
+            let lengths = self.view.field_norms[i]
+                .as_ref()
+                .and_then(|norms| norms.lengths(ordinal))
+                .unwrap_or_else(|| pgrx::error!("stannum: STNF row missing for ordinal {ordinal}"));
+            let source = &*self.view.sources[i].0;
+            let mut total = 0.0_f32;
+            let mut any = false;
+            for (term_index, (name, _)) in self.terms.iter().enumerate() {
+                let score = fused_score_from_term(
+                    source,
+                    name,
+                    mask,
+                    self.field_count,
+                    &self.weights,
+                    ordinal,
+                    &lengths,
+                    &self.field_totals,
+                    self.total_docs,
+                    self.term_dfs[term_index],
+                    self.term_boosts[term_index],
+                    self.params,
+                )
+                .unwrap_or_else(|_| {
+                    pgrx::error!("Stannum {label}: multi-column score requires channels()")
+                });
+                if score != 0.0 {
+                    any = true;
+                }
+                total += score;
+            }
+            if any {
+                return Some(total);
+            }
         }
         None
     }
@@ -1252,6 +1323,12 @@ impl IndexScorer {
     /// its terms, or a source carries no block bounds; the caller then
     /// scores every candidate.
     pub(crate) fn top_k(&self, k: usize) -> Option<TopK> {
+        if (2..=16).contains(&self.field_count) {
+            // Parent nibble / stock Term::ordinals() is not a multi-column
+            // bound (design §3). Exhaustive fused_score is exact; WAND stays
+            // on single-column stock streams.
+            return None;
+        }
         let (combine, leaves, check, mixed) = match prunable_shape(&self.query) {
             Some((combine, leaves, check)) => (combine, leaves, check, None),
             None => {
@@ -1459,6 +1536,9 @@ impl IndexScorer {
         check: Option<&SpanCheck<'_>>,
         mixed: Option<&Shape<'_>>,
     ) -> Option<WalkParts<'_>> {
+        if (2..=16).contains(&self.field_count) {
+            return None;
+        }
         let started = blocks_used();
         let (source, _) = &self.view.sources[i];
         let label = &self.view.labels[i];
@@ -1482,6 +1562,7 @@ impl IndexScorer {
                 Some(scorer),
                 label,
                 key.map(|k| (k, name.as_str())),
+                self.field_count,
             ));
         }
         // A mixed shape is tested per candidate unless every document
@@ -1511,6 +1592,7 @@ impl IndexScorer {
                         None,
                         label,
                         key.map(|k| (k, *name)),
+                        self.field_count,
                     ));
                     filter_names.push(*name);
                 }
@@ -1726,7 +1808,28 @@ impl IndexScorer {
         scorer: Option<&TermScorer>,
         label: &str,
         cached: Option<((u64, u32), &str)>,
+        field_count: u8,
     ) -> OrdinalTerm<'a> {
+        if (2..=16).contains(&field_count) {
+            // Stock Term::ordinals() on a FCH1 parent is not a bound. The
+            // fused helper is INFINITY when unpack fails; this call is a
+            // tripwire because open_walk returns None for multi-column.
+            let _ = fused_interval_bound_from_term(
+                term,
+                field_count,
+                all_fields_mask(field_count),
+                &[],
+                0,
+                u32::MAX,
+                1.0,
+                1.0,
+                1.0,
+                Bm25Params::default(),
+            );
+            crate::storage::corrupt(format!(
+                "Stannum {label}: multi-column bound requires channels()"
+            ));
+        }
         let ordinals = segment_error_in(term.ordinals(), label);
         let list = ordinals.list().map(<[u32]>::to_vec);
         let bounds = match cached {
@@ -4560,7 +4663,9 @@ pub(crate) fn scorer_for_scan(
                 .view
                 .sources
                 .iter()
-                .map(|(index, _)| unsafe { SourceReader::new(&**index, &scorer.terms) })
+                .map(|(index, _)| unsafe {
+                    SourceReader::new(&**index, &scorer.terms, scorer.field_count)
+                })
                 .collect();
             scorer
         }
@@ -4714,6 +4819,8 @@ fn build_index_scorer_inner(
         total_length as f32 / total_docs as f32
     };
     let mut scorers = Vec::new();
+    let mut term_dfs = Vec::new();
+    let mut term_boosts = Vec::new();
     for term in terms {
         // A term costs a dictionary lookup per source, and an expansion can
         // bring thousands of them.
@@ -4735,12 +4842,29 @@ fn build_index_scorer_inner(
             TermScorer::from_statistics(total_docs, total_df, term.boost(), params, average_length)
                 .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}"));
         scorers.push((term.text().to_owned(), scorer));
+        term_dfs.push(total_df);
+        term_boosts.push(term.boost());
     }
     drop(segments);
+    let field_meta = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    let field_count = field_meta
+        .as_ref()
+        .map(|meta| u8::try_from(meta.weights.len()).unwrap_or(16))
+        .unwrap_or(1);
+    let weights = field_meta
+        .as_ref()
+        .map(|meta| meta.weights.clone())
+        .unwrap_or_else(|| vec![1.0]);
+    let mut field_totals = vec![0u64; weights.len()];
+    for norms in view.field_norms.iter().flatten() {
+        for (total, extra) in field_totals.iter_mut().zip(&norms.field_totals) {
+            *total += extra;
+        }
+    }
     let sources = view
         .sources
         .iter()
-        .map(|(index, _)| unsafe { SourceReader::new(&**index, &scorers) })
+        .map(|(index, _)| unsafe { SourceReader::new(&**index, &scorers, field_count) })
         .collect();
     crate::dict::check_analysis(index.oid(), &unsafe {
         crate::storage::analysis_meta(index.as_ptr())
@@ -4751,6 +4875,13 @@ fn build_index_scorer_inner(
         view,
         dead,
         terms: scorers,
+        term_dfs,
+        term_boosts,
+        field_count,
+        weights,
+        field_totals,
+        total_docs,
+        params,
         query,
         max: None,
         known: FxHashMap::default(),
@@ -4796,7 +4927,7 @@ impl IndexScorer {
             .view
             .sources
             .iter()
-            .map(|(index, _)| unsafe { SourceReader::new(&**index, &self.terms) })
+            .map(|(index, _)| unsafe { SourceReader::new(&**index, &self.terms, self.field_count) })
             .collect();
         self.max = Some(max);
         max

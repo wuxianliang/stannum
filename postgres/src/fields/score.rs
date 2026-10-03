@@ -151,6 +151,54 @@ pub(crate) fn fused_score(
     )
 }
 
+/// Multi-column score from a parent dictionary entry. Unpacks `channels()`;
+/// never reads stock `Term::ordinals()` / the parent nibble. Unpack failure
+/// is an error (design §3).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fused_score_from_term(
+    index: &dyn segment::index::Index,
+    name: &str,
+    mask: u16,
+    field_count: u8,
+    weights: &[f32],
+    ordinal: u32,
+    lengths: &[u32],
+    field_totals: &[u64],
+    total_docs: u64,
+    df_agg: u64,
+    boost: f32,
+    params: Bm25Params,
+) -> Result<f32, super::error::AdapterError> {
+    if !(2..=16).contains(&field_count) {
+        return Err(segment::Error::Corrupt("field_count").into());
+    }
+    let Some(term) = index.term(name)? else {
+        return Ok(0.0);
+    };
+    let logical = super::types::LogicalTerm::from_entry(name.to_owned(), mask, field_count, term)?;
+    if logical.streams.is_empty() {
+        return Ok(0.0);
+    }
+    let mut cursor = logical.cursor()?;
+    cursor.advance(ordinal)?;
+    if cursor.current_ordinal() != Some(ordinal) {
+        return Ok(0.0);
+    }
+    let hits = cursor.field_hits()?;
+    let raw = raw_tf_from_hits(&hits, field_count);
+    Ok(fused_score(
+        mask,
+        weights,
+        &raw,
+        lengths,
+        field_totals,
+        total_docs,
+        df_agg,
+        boost,
+        params,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use segment::Tid;

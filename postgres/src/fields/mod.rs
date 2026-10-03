@@ -29,14 +29,16 @@ mod expand;
 mod score;
 mod types;
 
-pub(crate) use bound::{fused_bound, fused_interval_bound, next_interval_end};
+pub(crate) use bound::{
+    fused_bound, fused_interval_bound, fused_interval_bound_from_term, next_interval_end,
+};
 pub(crate) use codec::{decode, fielded_key, header, upper_fence};
 pub(crate) use cursor::{FieldHit, LogicalPostingCursor};
 pub(crate) use df::{query_total_df, union_df_agg, union_df_agg_from_streams};
 pub(crate) use error::{AdapterError, FieldKeyError, KeyDefect, ReportMode};
 pub(crate) use expand::{SurfaceWindow, expand, expand_in, lookup};
 pub(crate) use score::{
-    all_fields_mask, fused_avgdl, fused_idf, fused_len, fused_score, fused_tf, raw_tf_from_hits,
-    saturate,
+    all_fields_mask, fused_avgdl, fused_idf, fused_len, fused_score, fused_score_from_term,
+    fused_tf, raw_tf_from_hits, saturate,
 };
 pub(crate) use types::{FieldTerm, LogicalTerm, Lookup, fields_in_mask};
