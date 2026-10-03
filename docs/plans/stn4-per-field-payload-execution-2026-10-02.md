@@ -732,7 +732,7 @@ work.
 | A.5 | 6e797fb | 11 | | 26 | STN4 writer; multi-col query reds expected until B.1 |
 | B.1 | 0555857 | 6 | 1 | 32 | arithmetic+expansion recovered; phrase/span/patterns still `search()` unsupported |
 | B.3 | | | | | informational |
-| C.1 | | 5 | 2 | 32 | **required** — restore 4.5 greens on STN4 |
+| C.1 | 547f080 | 5 | 2 | 32 | five §5.2 rows bit-exact vs 0.4.0; FAIL = phrase/span/patterns (Phase D); GAP = catalog.gucs + catalog.functions |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
 | E.4 | | 0 | ≤2 | | release gate |
 
