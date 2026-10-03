@@ -165,7 +165,7 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
   - Review focus: design §1.3 build/insert caller, §6.3.1 write path, §7
     Replace (`index.rs`, `merge.rs`).
 
-- [ ] **A.2.1 Buffer discriminator fixtures**
+- [x] **A.2.1 Buffer discriminator fixtures** (bd73b7a)
   - Goal: persisted generation is the KIND_BUFFER tag, not in-memory maps,
     not STNF version, not `~0~foo` key spelling. Restart / recovery / WAL
     replay emit the same label as the live writer.
