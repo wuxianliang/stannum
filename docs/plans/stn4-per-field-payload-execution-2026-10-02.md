@@ -348,7 +348,7 @@ and bound functions stay. Parallel with A.3–A.4 after A.2 (design graph).
   - Review focus: design §2 (walk, two consumers, scoped cap, over-limit
     scoring, channel errors).
 
-- [ ] **B.2 Bound + verify on channels**
+- [x] **B.2 Bound + verify on channels** (4fb2f2f)
   - Goal: existing `fused_bound` consumes unpacked `FieldTerm`s; parent
     nibble is never a multi-column bound; verify unpacks first.
   - Scope: `postgres/src/fields/bound.rs` (wire only — formula stays);
