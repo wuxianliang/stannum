@@ -368,7 +368,7 @@ and bound functions stay. Parallel with A.3–A.4 after A.2 (design graph).
       no `FCH1` sniff.
   - Review focus: design §3, §9 (parent nibble, verify must unpack).
 
-- [ ] **B.3 pgembed checkpoint**
+- [x] **B.3 pgembed checkpoint** (pgembed f15bb18)
   - Goal: keep the wheel green while query wiring lands. C.2 has not yet
     gated a full multi-column product wheel.
   - Scope: pgembed pin bump only.
