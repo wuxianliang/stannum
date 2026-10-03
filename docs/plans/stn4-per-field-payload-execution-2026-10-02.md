@@ -192,7 +192,7 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
       is never `0x00`.
   - Review focus: design §6.3.1 (tag, decoding order, write path).
 
-- [ ] **A.3 STNF v2 reader/writer**
+- [x] **A.3 STNF v2 reader/writer** (83dc178)
   - Goal: new multi-column trailers are version 2, norms only. v1 parse
     remains long enough to classify `StaleFielded`. Query still must not
     depend on the sidecar for `df_agg` once B.1 lands; this step only changes
