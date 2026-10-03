@@ -10,6 +10,11 @@ authors.workspace = true
 license.workspace = true
 description = "Byte codecs for immutable search-index segments: dictionary, document-ordinal streams, document table, positions, forward records"
 
+[features]
+# Selected by the stannum crate's pg_test build: classification fixtures in
+# the extension's tests encode withdrawn v1 trailers. No production code.
+pg_test = []
+
 [dependencies]
 crc32fast = "1.5"
 rustc-hash.workspace = true

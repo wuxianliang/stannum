@@ -108,7 +108,7 @@ pub fn encode(field_totals: &[u64], rows: &[u32]) -> Result<Vec<u8>> {
 
 /// Encodes a withdrawn **v1** trailer (norms plus the df sidecar). No
 /// production writer emits this; classification fixtures need the bytes.
-#[cfg(test)]
+#[cfg(any(test, feature = "pg_test"))]
 pub fn encode_v1(field_totals: &[u64], rows: &[u32], df_agg: &[(&str, u64)]) -> Result<Vec<u8>> {
     let field_count = u8::try_from(field_totals.len()).map_err(|_| field_count_error())?;
     check_field_count(field_count)?;
@@ -276,7 +276,7 @@ fn decode_df_agg(bytes: &[u8]) -> Result<Vec<DfEntry>> {
     Ok(entries)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "pg_test"))]
 fn check_df_agg(df_agg: &[(&str, u64)]) -> Result<()> {
     let mut prev: Option<&str> = None;
     for &(token, df) in df_agg {

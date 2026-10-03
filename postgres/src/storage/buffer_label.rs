@@ -47,9 +47,13 @@ pub enum BufferLabel {
 /// Classifies a write buffer by the §6.3.1 decoding order.
 ///
 /// `field_count` comes from the STNM envelope, `docs` / `bytes` from
-/// [`BufferState`](crate::storage::layout::BufferState), and `stream` is the
-/// concatenated KIND_BUFFER payload (`stream.len() == bytes`). No term text
-/// is visited until the branch is chosen.
+/// [`BufferState`](crate::storage::layout::BufferState), and `stream` is
+/// the concatenated KIND_BUFFER payload (`stream.len() == bytes`). No term
+/// text is visited until the branch is chosen.
+///
+/// Every record-walking arm cross-checks the decoded record count against
+/// `docs`: the stream and the meta counts are written as one append, so a
+/// disagreement names corruption, not a generation.
 pub fn classify_buffer(field_count: usize, docs: u32, bytes: u32, stream: &[u8]) -> BufferLabel {
     // Arms 1–3: the counts decide before any stream byte is read.
     match (docs, bytes) {
@@ -65,10 +69,13 @@ pub fn classify_buffer(field_count: usize, docs: u32, bytes: u32, stream: &[u8])
     if field_count == 1 {
         // Arm 4: single-column stock records, no tag, never Stale. A stock
         // key `~0~foo` is Current: this arm has no fielded-key validator.
-        let terms = match stock_terms(stream) {
-            Ok(terms) => terms,
+        let (terms, records) = match stock_terms(stream) {
+            Ok(counts) => counts,
             Err(malformed) => return malformed,
         };
+        if records != docs {
+            return BufferLabel::Malformed("write buffer document count disagrees with the stream");
+        }
         return if terms > 0 {
             BufferLabel::Current
         } else {
@@ -80,10 +87,13 @@ pub fn classify_buffer(field_count: usize, docs: u32, bytes: u32, stream: &[u8])
         // Surface tokens are never inspected for the `~{h}~` shape here —
         // `legacy_fielded_key_shape` is not consulted on this arm.
         let body = &stream[forward::STN4_BUFFER_TAG.len()..];
-        let terms = match fielded_terms(body) {
-            Ok(terms) => terms,
+        let (terms, records) = match fielded_terms(body) {
+            Ok(counts) => counts,
             Err(malformed) => return malformed,
         };
+        if records != docs {
+            return BufferLabel::Malformed("write buffer document count disagrees with the stream");
+        }
         return if terms > 0 {
             BufferLabel::Current
         } else {
@@ -99,6 +109,7 @@ pub fn classify_buffer(field_count: usize, docs: u32, bytes: u32, stream: &[u8])
     // Arm 6.2: untagged legacy. Do not call `add_occurrence`; never load
     // into STN4 builders. With terms, every key must satisfy the legacy
     // fielded-key grammar; anything else is malformed, not stale.
+    let mut records = 0u32;
     for record in forward::records(stream) {
         match record {
             Ok(record) => {
@@ -109,21 +120,26 @@ pub fn classify_buffer(field_count: usize, docs: u32, bytes: u32, stream: &[u8])
                         );
                     }
                 }
+                records += 1;
             }
             Err(_) => {
                 return BufferLabel::Malformed("untagged write buffer fails the legacy grammar");
             }
         }
     }
+    if records != docs {
+        return BufferLabel::Malformed("write buffer document count disagrees with the stream");
+    }
     // Stale even with zero terms: choice 3 classifies the untagged
     // zero-term buffer as stale, the design's chosen transition.
     BufferLabel::Stale
 }
 
-/// Arm 4's stock term count, or [`BufferLabel::Malformed`] on the first
-/// record that fails the stock grammar.
-fn stock_terms(stream: &[u8]) -> Result<usize, BufferLabel> {
+/// Arm 4's stock term and record counts, or [`BufferLabel::Malformed`] on
+/// the first record that fails the stock grammar.
+fn stock_terms(stream: &[u8]) -> Result<(usize, u32), BufferLabel> {
     let mut terms = 0usize;
+    let mut records = 0u32;
     for record in forward::records(stream) {
         terms += match record {
             Ok(record) => record.terms.len(),
@@ -133,14 +149,16 @@ fn stock_terms(stream: &[u8]) -> Result<usize, BufferLabel> {
                 ));
             }
         };
+        records += 1;
     }
-    Ok(terms)
+    Ok((terms, records))
 }
 
-/// Arm 6.1's STN4 term count, or [`BufferLabel::Malformed`] on the first
-/// record that fails the fielded grammar.
-fn fielded_terms(body: &[u8]) -> Result<usize, BufferLabel> {
+/// Arm 6.1's STN4 term and record counts, or [`BufferLabel::Malformed`] on
+/// the first record that fails the fielded grammar.
+fn fielded_terms(body: &[u8]) -> Result<(usize, u32), BufferLabel> {
     let mut terms = 0usize;
+    let mut records = 0u32;
     for record in forward::fielded_records(body) {
         terms += match record {
             Ok(record) => record
@@ -154,8 +172,9 @@ fn fielded_terms(body: &[u8]) -> Result<usize, BufferLabel> {
                 ));
             }
         };
+        records += 1;
     }
-    Ok(terms)
+    Ok((terms, records))
 }
 
 /// The §6.3.1 write-path decision, read from persisted state at the stock
@@ -429,6 +448,36 @@ mod tests {
         let stream = stock_stream(&[]);
         assert_eq!(
             classify_buffer(2, 1, stream.len() as u32, &stream),
+            BufferLabel::Stale
+        );
+    }
+
+    #[test]
+    fn record_count_disagreeing_with_docs_is_malformed() {
+        // One well-formed record — each grammar's own — against a `docs`
+        // count the stream does not hold: corruption on every arm, never a
+        // generation class (the A.3 review's caller-invariant, made a
+        // predicate: the stream and the meta counts are written as one
+        // append, so they cannot legally disagree).
+        let stock = stock_stream(&[("foo", 1)]);
+        assert_eq!(
+            classify_buffer(1, 2, stock.len() as u32, &stock),
+            BufferLabel::Malformed("write buffer document count disagrees with the stream")
+        );
+        let tagged = fielded_stream(&[vec![("foo", 1)]]);
+        assert_eq!(
+            classify_buffer(2, 2, tagged.len() as u32, &tagged),
+            BufferLabel::Malformed("write buffer document count disagrees with the stream")
+        );
+        let legacy = stock_stream(&[("~0~foo", 1)]);
+        assert_eq!(
+            classify_buffer(2, 2, legacy.len() as u32, &legacy),
+            BufferLabel::Malformed("write buffer document count disagrees with the stream")
+        );
+        // A stream that holds more records than `docs` names the same
+        // corruption, and a matching count still classifies normally.
+        assert_eq!(
+            classify_buffer(2, 1, legacy.len() as u32, &legacy),
             BufferLabel::Stale
         );
     }

@@ -1,1357 +1,1361 @@
 {
-  "version": 1,
-  "lead_revision": "6007456d659dc83411bb177385d16921f07391e4",
-  "shared_ancestor": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-  "stannum_start": "9bc663ac5d84082a04ae1ff0578be824dd2018d3",
-  "files": {
-    ".cargo/config.toml": {
-      "owner": "planetscale",
-      "upstream_path": ".cargo/config.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    ".github/workflows/ci.yml": {
-      "owner": "mixed",
-      "upstream_path": ".github/workflows/ci.yml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "Cargo.toml": {
-      "owner": "mixed",
-      "upstream_path": "Cargo.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "README.md": {
-      "owner": "mixed",
-      "upstream_path": "README.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "benchmarks/Dockerfile": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/aws/build-image.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum temporary AWS benchmark setup; no upstream source copied."
-    },
-    "benchmarks/aws/count-probe.sh": {
-      "owner": "ben",
-      "evidence": "New Stannum diagnostic or test code; not copied from Lead."
-    },
-    "benchmarks/aws/crossover.sh": {
-      "owner": "ben",
-      "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
-    },
-    "benchmarks/aws/crossover_campaign.py": {
-      "owner": "ben",
-      "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
-    },
-    "benchmarks/aws/database_snapshot.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum benchmark snapshot capture, restore, and validation implementation."
-    },
-    "benchmarks/aws/start-postgres.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum temporary AWS benchmark setup; no upstream source copied."
-    },
-    "benchmarks/baselines.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/campaign.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/contention.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in e0fe96d06f4378ba3c88cf3a0633d3f2739cb6be."
-    },
-    "benchmarks/count_crossover.py": {
-      "owner": "ben",
-      "evidence": "New Stannum metadata-based COUNT crossover experiment and held-out policy evaluation; not copied from Lead."
-    },
-    "benchmarks/count_crossover_report.py": {
-      "owner": "ben",
-      "evidence": "New Stannum metadata-based COUNT crossover experiment and held-out policy evaluation; not copied from Lead."
-    },
-    "benchmarks/count_fuzz.py": {
-      "owner": "ben",
-      "evidence": "New Stannum seeded Boolean and concurrent-snapshot correctness harness; not copied from Lead."
-    },
-    "benchmarks/count_local.py": {
-      "owner": "ben",
-      "evidence": "New owned local count execution and visibility diagnostic runner; not copied from Lead."
-    },
-    "benchmarks/count_oracle.py": {
-      "owner": "ben",
-      "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
-    },
-    "benchmarks/count_probe.py": {
-      "owner": "ben",
-      "evidence": "New Stannum diagnostic or test code; not copied from Lead."
-    },
-    "benchmarks/count_visibility.py": {
-      "owner": "ben",
-      "evidence": "New Stannum diagnostic or test code; not copied from Lead."
-    },
-    "benchmarks/dataset.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/fold_reproduction.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
-    },
-    "benchmarks/foreground_writes.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 1f79095007a88234389bded090fd7fcab7ce8ee1."
-    },
-    "benchmarks/insert_latency.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 727399bf5516b6ede4f97aad2250d4a57399e35d."
-    },
-    "benchmarks/local/attrib.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c707013d43d68a147968076494794631560d17e0."
-    },
-    "benchmarks/local/exit-test.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 6af89821cd53beafdd501d234c91f66bba107d6c."
-    },
-    "benchmarks/local/gates.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
-    },
-    "benchmarks/local/mock-build.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6."
-    },
-    "benchmarks/local/mock-container.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
-    },
-    "benchmarks/local/mock-probe.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6."
-    },
-    "benchmarks/local/mockdb.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7ee73ff00e2643ecb2142a819e86ae24fb274c85."
-    },
-    "benchmarks/local/report.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7ee73ff00e2643ecb2142a819e86ae24fb274c85."
-    },
-    "benchmarks/local/run150m.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6."
-    },
-    "benchmarks/local/timeseries.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Added on branch bench/long-run on 2026-09-27."
-    },
-    "benchmarks/local/workload.sh": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6. Moved from benchmarks/local/mock-run.sh, merged with the duplicate runner in benchmarks/local/run150m.sh (now a wrapper)."
-    },
-    "benchmarks/merge_costs.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 849853598b1c007451ebe049d58e6e4c2a46acd3."
-    },
-    "benchmarks/mutation.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 42b32e939f6e5a1424d7260282cdc04a2184850b."
-    },
-    "benchmarks/mutation_targets.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum native PostgreSQL workload generator regression."
-    },
-    "benchmarks/oracle.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/paired.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/paired_libraries.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
-    },
-    "benchmarks/published_dataset.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum checksummed downloader for public benchmark data; no upstream code copied."
-    },
-    "benchmarks/query_comparison.py": {
-      "owner": "ben",
-      "evidence": "New Stannum diagnostic or test code; not copied from Lead."
-    },
-    "benchmarks/query_shapes.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum deterministic query-shape benchmark integration."
-    },
-    "benchmarks/resources.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum resource measurement summarization and regression coverage."
-    },
-    "benchmarks/run.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/server_times.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/stn3_fielded_poc.py": {
-      "owner": "ben",
-      "evidence": "New Stannum STN3 4.6 fielded-terms latency GATE harness; not copied from Lead."
-    },
-    "benchmarks/sustained.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum benchmark work, built on the existing Ben-authored benchmark modules; no Lead source copied. Private-cluster rate/concurrency campaign using the existing Stannum mutation runner."
-    },
-    "benchmarks/test_campaign.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/test_contention.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in e0fe96d06f4378ba3c88cf3a0633d3f2739cb6be."
-    },
-    "benchmarks/test_count_crossover.py": {
-      "owner": "ben",
-      "evidence": "New Stannum metadata-based COUNT crossover experiment and held-out policy evaluation; not copied from Lead."
-    },
-    "benchmarks/test_count_fuzz.py": {
-      "owner": "ben",
-      "evidence": "New Stannum seeded Boolean and concurrent-snapshot correctness harness; not copied from Lead."
-    },
-    "benchmarks/test_count_oracle.py": {
-      "owner": "ben",
-      "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
-    },
-    "benchmarks/test_database_snapshot.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum benchmark snapshot capture, restore, and validation implementation."
-    },
-    "benchmarks/test_dataset.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/test_fold_reproduction.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
-    },
-    "benchmarks/test_foreground_writes.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 1f79095007a88234389bded090fd7fcab7ce8ee1."
-    },
-    "benchmarks/test_local_report.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7ee73ff00e2643ecb2142a819e86ae24fb274c85."
-    },
-    "benchmarks/test_merge_costs.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 849853598b1c007451ebe049d58e6e4c2a46acd3."
-    },
-    "benchmarks/test_oracle.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/test_paired.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/test_paired_libraries.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
-    },
-    "benchmarks/test_published_dataset.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum split-stream and integrity regression tests."
-    },
-    "benchmarks/test_query_comparison.py": {
-      "owner": "ben",
-      "evidence": "New Stannum diagnostic or test code; not copied from Lead."
-    },
-    "benchmarks/test_query_shapes.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum query-shape coverage and validation regression tests."
-    },
-    "benchmarks/test_resources.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum resource measurement summarization and regression coverage."
-    },
-    "benchmarks/test_run.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/test_server_times.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "benchmarks/test_stn3_fielded_poc.py": {
-      "owner": "ben",
-      "evidence": "New Stannum unit tests for the STN3 4.6 latency GATE harness; not copied from Lead."
-    },
-    "benchmarks/test_sustained.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum benchmark work, built on the existing Ben-authored benchmark modules; no Lead source copied. Original tests of mutation accounting, scheduling pressure and repeated campaign ordering."
-    },
-    "benchmarks/test_tin.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum integration and validation for the pinned PlanetScale/ParadeDB benchmark driver. Upstream patch context retains its separate MIT license."
-    },
-    "benchmarks/test_tin_catalog.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation for controlled remote EXPLAIN probes and their cleanup/redaction tests; introduced in 4a7cb44. No upstream source copied."
-    },
-    "benchmarks/test_tin_experiments.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation for bounded remote TIN experiments and safety checks; no upstream source copied."
-    },
-    "benchmarks/test_vacuum_cleanup.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 9bc663ac5d84082a04ae1ff0578be824dd2018d3."
-    },
-    "benchmarks/tin.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum integration and validation for the pinned PlanetScale/ParadeDB benchmark driver. Upstream patch context retains its separate MIT license."
-    },
-    "benchmarks/tin/position-limit.sql": {
-      "owner": "ben",
-      "evidence": "Original Stannum integration and validation for the pinned PlanetScale/ParadeDB benchmark driver. Upstream patch context retains its separate MIT license."
-    },
-    "benchmarks/tin_behavior_probe.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 29a520e482ac9f1c1a32329ca9a88050f22f469b."
-    },
-    "benchmarks/tin_catalog.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation for controlled remote EXPLAIN probes and their cleanup/redaction tests; introduced in 4a7cb44. No upstream source copied."
-    },
-    "benchmarks/tin_experiments.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation for bounded remote TIN experiments and safety checks; no upstream source copied."
-    },
-    "benchmarks/vacuum_cleanup.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in a70ba90f4658fdc1f3b91cfb313a55429a76810c."
-    },
-    "boldi-vigna/Cargo.toml": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/Cargo.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/README.md": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/README.md",
-      "upstream_revision": "251df396f0a13636c67331d08550b419209bb66a",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/display.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/display.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/error.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/error.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/interval.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/interval.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/lib.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/lib.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/phrase_plan.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in d9068b1ee21e988ea72c8b1f195b4b9c58e91572."
-    },
-    "boldi-vigna/src/positions.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/positions.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/query.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/query.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/solver.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/solver.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/disjunction.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/disjunction.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/empty.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/empty.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/filter.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/filter.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/mod.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/mod.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/ordered.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/ordered.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/phrase.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/phrase.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/relation.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/relation.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/term.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/term.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "boldi-vigna/src/state/unordered.rs": {
-      "owner": "planetscale",
-      "upstream_path": "boldi-vigna/src/state/unordered.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "conformance/cases/bm25.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
-    },
-    "conformance/cases/catalog.alternatives.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_alternatives.yaml."
-    },
-    "conformance/cases/catalog.count.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_count.yaml."
-    },
-    "conformance/cases/catalog.ddl.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_ddl.yaml."
-    },
-    "conformance/cases/catalog.expansion.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_expansion.yaml."
-    },
-    "conformance/cases/catalog.highlight.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_highlight.yaml."
-    },
-    "conformance/cases/catalog.phrase.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_phrase.yaml."
-    },
-    "conformance/cases/catalog.positions.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_positions.yaml."
-    },
-    "conformance/cases/catalog.proximity.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_proximity.yaml."
-    },
-    "conformance/cases/catalog.relations.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_relations.yaml."
-    },
-    "conformance/cases/catalog.scoring.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_scoring.yaml."
-    },
-    "conformance/cases/catalog.syntax.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_syntax.yaml."
-    },
-    "conformance/cases/catalog.tokenize.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_tokenize.yaml."
-    },
-    "conformance/cases/catalog.topk.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_topk.yaml."
-    },
-    "conformance/cases/query_size.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
-    },
-    "conformance/cases/smoke.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
-    },
-    "conformance/cases/span.minimal_interval.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26. Moved from conformance/cases/span_minimal_interval.yaml."
-    },
-    "conformance/cases/spans.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
-    },
-    "conformance/divergences/stannum.yaml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b70feda7cb36cca0ccde1216515d347a79176a9b."
-    },
-    "conformance/run.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
-    },
-    "contract/cases/arithmetic.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract cases for the design section 5.2 arithmetic rows. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/calls.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract cases for the pgembed call patterns. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/capabilities.yaml": {
-      "owner": "ben",
-      "evidence": "Original shape gate for stannum.capabilities(). Spec is embedded in the case (design section 4.2 / section 7 item 3); there is no 0.4.0 recording."
-    },
-    "contract/cases/catalog.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract cases for the catalog surface, GUCs, and ACLs. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/ddl.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract cases for DDL limits and reloptions. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/expansion.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract case for expansion past max_expansion. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/fields.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract cases for fielded phrases, spans, highlights, and patterns. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/parallel.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract case for a nonempty custom dictionary forcing serial plans. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/segments.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract case for a token posted in two segments plus a dead document. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/stats.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract case locking index_stats.average_length at 0.0. Expected values are recorded, not hand-written."
-    },
-    "contract/cases/tokenizer.yaml": {
-      "owner": "ben",
-      "evidence": "Original 0.4.0 contract case for tokenizer symmetry. Expected values are recorded, not hand-written."
-    },
-    "contract/divergences/stannum.yaml": {
-      "owner": "ben",
-      "evidence": "Original divergence file for the stannum tool-contract suite. Empty on 0.4.0; entries may carry expected error text for later engines."
-    },
-    "contract/exclusions.yaml": {
-      "owner": "ben",
-      "evidence": "Exclusion list for the tool-contract suite. HOT underfill cites the pg_test that is not expressible as SQL. capabilities.shape is excluded only on engine 0.4.0 (design section 7 item 3, 0.5.0-only / new-objects)."
-    },
-    "contract/run.py": {
-      "owner": "ben",
-      "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7). Carries the 0.4.0 cases plus the capabilities shape gate and engine-scoped exclusions."
-    },
-    "docs/query-language/README.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/SUMMARY.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/alternatives.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/alternatives.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/boolean-operators.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/boolean-operators.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/boost.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/boost.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/introduction.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/introduction.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/keywords.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/keywords.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/phrases.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/phrases.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/positional-filters.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/positional-filters.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/precedence.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/precedence.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/proximity.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/proximity.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/recipes.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/recipes.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/span-relations.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/span-relations.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "docs/query-language/terms.md": {
-      "owner": "mixed",
-      "upstream_path": "tinql/docs/src/terms.md",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
-    },
-    "postgres/Cargo.toml": {
-      "owner": "mixed",
-      "upstream_path": "postgres/Cargo.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/sql/stannum--0.4.0--0.5.0.sql": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src",
-      "evidence": "Upgrade SQL adding capabilities(); jieba_* keep-surface stubs already match 0.4.0. Credits PlanetScale because it extends a snapshot generated from inherited Lead and original Stannum Rust definitions."
-    },
-    "postgres/sql/stannum--0.4.0.sql": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src",
-      "notice": "withheld",
-      "evidence": "Byte-identical copy of main's released 0.4.0 snapshot (predecessor for ALTER EXTENSION). Notice withheld so the copy stays unmodified."
-    },
-    "postgres/sql/stannum--0.5.0.sql": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/lib.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "generated_from": [
-        "postgres/src/am.rs",
-        "postgres/src/score.rs",
-        "postgres/src/search.rs",
-        "postgres/src/operator.rs",
-        "postgres/src/highlight_udfs.rs",
-        "postgres/src/tool/highlight.rs",
-        "postgres/src/tool/diagnostics.rs",
-        "postgres/src/tool/capabilities.rs",
-        "postgres/src/udfs.rs",
-        "postgres/src/dict.rs",
-        "postgres/src/stopwords.rs",
-        "postgres/src/lib.rs"
-      ],
-      "evidence": "pgrx-generated SQL from inherited and Stannum Rust definitions, including support bindings and SQL wrappers. Reapply notice after generation."
-    },
-    "postgres/src/am.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/am.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/bm25.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/bm25.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/customscan.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "postgres/src/dict.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum jieba_words table and SipHash-1-3 v1 fingerprint, with table+snapshot load/add/delete/reload/version from the 0.4.0 dict.rs port. 3.2 governance (SEEN/NONEMPTY/WARNED/INTERNAL_SPI, check_analysis, analysis_summary, parallel_safe) ported from 0.4.0; nonempty custom dictionaries decline parallel paths via customscan.rs."
-    },
-    "postgres/src/fields/bound.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 fused WAND bound (design §5.1 saturate derivative, intersecting-block interval truncation, representative_count via TfBucket::new). Not copied from Lead."
-    },
-    "postgres/src/fields/codec.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 fielded-term key codec (~ hex nibble header, doubled-tilde escape, round-trip decode). Not copied from Lead."
-    },
-    "postgres/src/fields/cursor.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 LogicalPostingCursor over fielded Term streams (union candidates, equal-ordinal coalescing, fused next_bound_interval). Not copied from Lead."
-    },
-    "postgres/src/fields/df.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 df_agg union-count over term-stream ordinals (both-fields-once trap; query-time sum of per-segment values). Not copied from Lead."
-    },
-    "postgres/src/fields/error.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 fielded-key defects with distinct query-error versus verify-corruption report kinds. Not copied from Lead."
-    },
-    "postgres/src/fields/expand.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 multi-column expansion adapter (Index::term / Window / expand, two-stage limit, scope mask). Not copied from Lead."
-    },
-    "postgres/src/fields/mod.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 field-model module. Reexports the 4.1 codec, LogicalPostingCursor, expansion adapter, fused BM25F arithmetic, df_agg union-count, and the 4.4 fused WAND bound. States the design section 3 contract (does not absorb the owned shims). Not copied from Lead."
-    },
-    "postgres/src/fields/score.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 fused BM25F arithmetic (tf*/len*/avgdl*/idf-cast-then-boost saturate) and all_fields_mask. Not copied from Lead."
-    },
-    "postgres/src/fields/types.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L1 FieldTerm / LogicalTerm / Lookup type shapes wrapping segment::segment::Term streams. Not copied from Lead."
-    },
-    "postgres/src/fold.rs": {
-      "owner": "ben",
-      "evidence": "Original Boolean count executor over document ordinals, written for Stannum."
-    },
-    "postgres/src/heap_probe.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: a counting allocator for pg_test builds, written for Stannum."
-    },
-    "postgres/src/highlight.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/highlight.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/highlight_udfs.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/highlight_udfs.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes: 5-arg highlight bodies, column_field_name attnum gate, and SUPPORT rewrite that stays 4-arg on single-column. Retain PlanetScale credit."
-    },
-    "postgres/src/lib.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/lib.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/match_positions.rs": {
-      "owner": "planetscale",
-      "upstream_path": "postgres/src/match_positions.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "postgres/src/operator.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/operator.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/options.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/options.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/query_limits.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: pg_tests of oversized and deeply nested queries."
-    },
-    "postgres/src/score.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/score.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/src/search.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/highlight.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Port of the 0.4.0 standalone search()/search_count() SRF onto STN3. Not a byte copy of Lead; PlanetScale credit is retained because snippet and score paths call inherited highlight and score code."
-    },
-    "postgres/src/selectivity.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 69577a09af81322bcf2a036558e8b90c19346cb3."
-    },
-    "postgres/src/storage/buffer_label.rs": {
-      "owner": "ben",
-      "evidence": "STN4 format delta: §6.3.1 durable write-buffer generation classifier (tag decoding order, write-path decision, legacy fielded-key shape validator). No upstream counterpart."
-    },
-    "postgres/src/storage/layout.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "postgres/src/stopwords.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum function-word presets (stannum-stopwords-v1) and auto/auto:zh/auto:en reloption expansion. Ported from the main-line stopwords.rs; builtin_stop_words SQL entry point lives in postgres/src/tool/diagnostics.rs."
-    },
-    "postgres/src/storage/mod.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "postgres/src/storage/verify.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 15f5764703950b4715fb64dba9eda7b3993bb8bf."
-    },
-    "postgres/src/storage/wal.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 592a5c170c353828c8446ccbeca529108de213d7."
-    },
-    "postgres/src/stream.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 66bc09c8c623cf5026d3030618c2b7e4f16927b2."
-    },
-    "postgres/src/tin_conformance.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation, written 2026-09-26 to record and replay PlanetScale TIN 1.0.3 responses."
-    },
-    "postgres/src/tool/capabilities.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum capabilities() document for the tool-layer contract (design section 4.2). Not copied from Lead."
-    },
-    "postgres/src/tool/diagnostics.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L2 SQL entry points for tokenize, ql_parse, builtin_stop_words, index_stats/index_health, and index_analysis (design sections 3 and 4.1). Thin #[pg_extern] wrappers; this file does not import IndexScorer or storage internals."
-    },
-    "postgres/src/tool/highlight.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L2 SQL entry points for the 5-arg highlight() overloads (design sections 3 and 4.1). Thin #[pg_extern] wrappers delegate to postgres/src/highlight_udfs.rs; this file does not import IndexScorer or storage internals."
-    },
-    "postgres/src/tool/mod.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L2 tool-layer module. States the design section 3 seam: this layer imports nothing from engine internals."
-    },
-    "postgres/src/tool/search.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L2 SQL entry points for search()/search_count() (design sections 3 and 4.1). Thin #[pg_extern] wrappers delegate to postgres/src/search.rs; this file does not import IndexScorer or storage internals."
-    },
-    "postgres/src/tool/score.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum L2 pg_tests for the score-family SQL surface (design sections 4.1 and 5.1, Appendix A). Does not copy Lead sources; the #[pg_extern] bodies stay in postgres/src/score.rs."
-    },
-    "postgres/src/udfs.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/udfs.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "postgres/stannum.control": {
-      "owner": "mixed",
-      "upstream_path": "postgres/tin.control",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Derived from Lead postgres/tin.control; extension name, description and version handling changed."
-    },
-    "postgres/tests/count_under_vacuum.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Ported from the pg_test count_misses_rows_vacuum_removes_after_its_view (introduced in d96b2aa) to a private cluster on 2026-09-26."
-    },
-    "postgres/tests/crash_before_publication.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 1c7a95736839c1c36a4ef1a97756d5d7c372d016."
-    },
-    "postgres/tests/exit_during_walk.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 6af89821cd53beafdd501d234c91f66bba107d6c."
-    },
-    "postgres/tests/extension_upgrade.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 9997c06219d0b106a91e788a959bc2036a7de179."
-    },
-    "postgres/tests/merge_lifecycle.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in aa870ad9470babeafa5ac2cf10f38eed5983efbf. Moved from docs/benchmarks/merge_lifecycle.py."
-    },
-    "postgres/tests/postings_lifecycle.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "postgres/tests/ranked_fuzz.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in c66fd1b570fc111d9cbe3d399065736d8013a447."
-    },
-    "postgres/tests/search_srf.py": {
-      "owner": "ben",
-      "evidence": "Port of the 0.4.0 installed SQL, permission, RLS, and MVCC fallback integration test onto STN3."
-    },
-    "postgres/tests/test_stannum_jieba.py": {
-      "owner": "ben",
-      "evidence": "Port of the pgembed jieba tokenizer symmetry fixtures onto STN3's private-cluster unittest pattern. Not copied from Lead."
-    },
-    "postgres/tests/test_wide_cursor.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum wide-query fuzzer generation regression tests. Moved from benchmarks/test_wide_cursor.py."
-    },
-    "postgres/tests/vacuum_cleanup_pins.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum regression reproducing reader-pinned heap cleanup and validating benchmark accounting. Moved from benchmarks/vacuum_cleanup_pins.py."
-    },
-    "rust-toolchain.toml": {
-      "owner": "planetscale",
-      "upstream_path": "rust-toolchain.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "script/dump-segments.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in d968a6e59d5a2b9f16b284e8a06c2a85baf4cf86."
-    },
-    "script/pgrx-lock.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in d3f5c9833304d4d8a2fa05edf7931f64aaf0d764."
-    },
-    "script/reference-oracle": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 44ae79a7b960bdace26fbeccf5b34f9d3c6487fe."
-    },
-    "script/source_headers.py": {
-      "owner": "ben",
-      "evidence": "Added for the Stannum attribution migration; original header-check tooling."
-    },
-    "script/test-all": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in bba2ea6dd197e3ca6ed553ef3f412964adc7be6e."
-    },
-    "script/test_dump_segments.py": {
-      "owner": "ben",
-      "evidence": "New Stannum unit tests for current kind-5 / 68-byte dump-segments parsers; not copied from Lead."
-    },
-    "script/test_pgrx_lock.py": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in d3f5c9833304d4d8a2fa05edf7931f64aaf0d764."
-    },
-    "script/test_source_headers.py": {
-      "owner": "ben",
-      "evidence": "Added for the Stannum attribution migration; original header-check tooling."
-    },
-    "segment/Cargo.toml": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 3fcf441ac7c3d183de179b1f846ceb0ef83e1358."
-    },
-    "segment/examples/breakdown.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in d968a6e59d5a2b9f16b284e8a06c2a85baf4cf86."
-    },
-    "segment/examples/merge_memory.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
-    },
-    "segment/examples/vacuum_diagnostic.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in a70ba90f4658fdc1f3b91cfb313a55429a76810c."
-    },
-    "segment/src/bound.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
-    },
-    "segment/src/cache.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7372fc6fb8f0bbf469f1b6b3340dbe8af787bcdf."
-    },
-    "segment/src/channels.rs": {
-      "owner": "ben",
-      "evidence": "STN4 format delta: FCH1 per-field channel directory inside a term extent (design §1.2). No upstream counterpart."
-    },
-    "segment/src/dead.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: dead lists decoded as a bitmap over segment ordinals, written for Stannum."
-    },
-    "segment/src/dictionary.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/docs.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
-    },
-    "segment/src/error.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/forward.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/index.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/lanes.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in abf20157d9c675a86b92c1399b729ff197f78f3c."
-    },
-    "segment/src/length_class.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
-    },
-    "segment/src/lib.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/merge.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 26b9d1ec0f2cad8e84386cf26b63afe3dadcd42c."
-    },
-    "segment/src/merge_strategy.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 6f8189c269c66d941502d0da662e142e1f898cc4."
-    },
-    "segment/src/ordinals.rs": {
-      "owner": "ben",
-      "evidence": "Original ordinal stream codec and chunked Boolean evaluator, written for Stannum."
-    },
-    "segment/src/pages.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 6bbb74b787fb206f26ea0cc107cfe74d1cf924a7."
-    },
-    "segment/src/payload.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/random_tests.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/reader.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/segment.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/set.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/source.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/tf_bucket.rs": {
-      "owner": "mixed",
-      "upstream_path": "postgres/src/tf_bucket.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Moved from Lead postgres/src/tf_bucket.rs in b740f5d; visibility widened for use across crates."
-    },
-    "segment/src/tid.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/trailer.rs": {
-      "owner": "ben",
-      "evidence": "STN3 format delta: STNF trailer codec (design §5.1). No upstream counterpart."
-    },
-    "segment/src/varint.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/src/verify.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 15f5764703950b4715fb64dba9eda7b3993bb8bf."
-    },
-    "segment/tests/buffer_cost.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "segment/tests/record_memory.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: the peak-memory test of grouping a document's tokens by term."
-    },
-    "segment/tests/record_throughput.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: a timing probe of grouping tokenized documents by term."
-    },
-    "tinql/Cargo.toml": {
-      "owner": "mixed",
-      "upstream_path": "tinql/Cargo.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tinql/src/ast.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/ast.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/error.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/error.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/lib.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/lib.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/limits.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: query size and nesting limits."
-    },
-    "tinql/src/parser/descent.rs": {
-      "owner": "mixed",
-      "upstream_path": "tinql/src/parser/pest_parser/mod.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Recursive-descent transliteration of the upstream pest grammar (tinql/src/parser/pest_parser/grammar.pest) and builder, keeping the upstream builder helpers, with Stannum's nesting and size limits; retain PlanetScale credit."
-    },
-    "tinql/src/parser/differential.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: differential tests of the descent parser against the pest oracle."
-    },
-    "tinql/src/parser/mod.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/parser/mod.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/parser/pest_parser/grammar.pest": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/parser/pest_parser/grammar.pest",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/parser/pest_parser/mod.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/parser/pest_parser/mod.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/parser/phrase.pest": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/parser/pest_parser/phrase.pest",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Moved from tinql/src/parser/pest_parser/phrase.pest; otherwise byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/parser/phrase_grammar.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/parser/pest_parser/phrase_grammar.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Moved from tinql/src/parser/pest_parser/phrase_grammar.rs, with its grammar path and visibility adjusted."
-    },
-    "tinql/src/quote.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/quote.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/capability.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/runtime/capability.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/display.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/runtime/display.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/estimate.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 69577a09af81322bcf2a036558e8b90c19346cb3."
-    },
-    "tinql/src/runtime/eval.rs": {
-      "owner": "mixed",
-      "upstream_path": "tinql/src/runtime/eval.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tinql/src/runtime/lower.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/runtime/lower.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/mod.rs": {
-      "owner": "mixed",
-      "upstream_path": "tinql/src/runtime/mod.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tinql/src/runtime/plan.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "tinql/src/runtime/position_filter.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/runtime/position_filter.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/regex.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/runtime/regex.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/retrieval.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
-    },
-    "tinql/src/runtime/simplify.rs": {
-      "owner": "mixed",
-      "upstream_path": "tinql/src/runtime/simplify.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tinql/src/runtime/span_expr.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/runtime/span_expr.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/runtime/subtokenize.rs": {
-      "owner": "mixed",
-      "upstream_path": "tinql/src/runtime/subtokenize.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tinql/src/tests.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/tests.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/src/util.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tinql/src/util.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tinql/tests/deep_queries.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: oversized and deeply nested query tests."
-    },
-    "tinql/tests/tokenized_doc_cost.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation: a timing probe of tokenizing short documents for exact evaluation."
-    },
-    "tokenizer/Cargo.toml": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/Cargo.toml",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/src/compiled.rs": {
-      "owner": "mixed",
-      "upstream_path": "tokenizer/src/compiled.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tokenizer/src/folder.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/src/folder.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/src/lib.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/src/lib.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/src/long_tokens.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/src/long_tokens.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/src/presets.rs": {
-      "owner": "mixed",
-      "upstream_path": "tokenizer/src/presets.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tokenizer/src/source_spans.rs": {
-      "owner": "mixed",
-      "upstream_path": "tokenizer/src/source_spans.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tokenizer/src/spec.rs": {
-      "owner": "mixed",
-      "upstream_path": "tokenizer/src/spec.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
-    },
-    "tokenizer/src/tokenizers.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/src/tokenizers.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/src/tokenizers/jieba.rs": {
-      "owner": "mixed",
-      "upstream_path": "tokenizer/src/spec.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Introduced in 6d02ec7 with the mixed notice already applied. New jieba tokenizer, absent from Lead; PlanetScale credit is retained because it implements the inherited tokenizer spec and compiled-pipeline interface."
-    },
-    "tokenizer/src/tokenizers/unicode.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/src/tokenizers/unicode.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/src/tokenizers/whitespace.rs": {
-      "owner": "planetscale",
-      "upstream_path": "tokenizer/src/tokenizers/whitespace.rs",
-      "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
-      "evidence": "Byte-identical to the upstream source before notice insertion."
-    },
-    "tokenizer/tests/compatibility.rs": {
-      "owner": "ben",
-      "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 82157ed1e4da3e195b0837dbb868897a8f57ad48."
-    }
+ "version": 1,
+ "lead_revision": "6007456d659dc83411bb177385d16921f07391e4",
+ "shared_ancestor": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+ "stannum_start": "9bc663ac5d84082a04ae1ff0578be824dd2018d3",
+ "files": {
+  ".cargo/config.toml": {
+   "owner": "planetscale",
+   "upstream_path": ".cargo/config.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  ".github/workflows/ci.yml": {
+   "owner": "mixed",
+   "upstream_path": ".github/workflows/ci.yml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "Cargo.toml": {
+   "owner": "mixed",
+   "upstream_path": "Cargo.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "README.md": {
+   "owner": "mixed",
+   "upstream_path": "README.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "benchmarks/Dockerfile": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/aws/build-image.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum temporary AWS benchmark setup; no upstream source copied."
+  },
+  "benchmarks/aws/count-probe.sh": {
+   "owner": "ben",
+   "evidence": "New Stannum diagnostic or test code; not copied from Lead."
+  },
+  "benchmarks/aws/crossover.sh": {
+   "owner": "ben",
+   "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
+  },
+  "benchmarks/aws/crossover_campaign.py": {
+   "owner": "ben",
+   "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
+  },
+  "benchmarks/aws/database_snapshot.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum benchmark snapshot capture, restore, and validation implementation."
+  },
+  "benchmarks/aws/start-postgres.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum temporary AWS benchmark setup; no upstream source copied."
+  },
+  "benchmarks/baselines.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/campaign.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/contention.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in e0fe96d06f4378ba3c88cf3a0633d3f2739cb6be."
+  },
+  "benchmarks/count_crossover.py": {
+   "owner": "ben",
+   "evidence": "New Stannum metadata-based COUNT crossover experiment and held-out policy evaluation; not copied from Lead."
+  },
+  "benchmarks/count_crossover_report.py": {
+   "owner": "ben",
+   "evidence": "New Stannum metadata-based COUNT crossover experiment and held-out policy evaluation; not copied from Lead."
+  },
+  "benchmarks/count_fuzz.py": {
+   "owner": "ben",
+   "evidence": "New Stannum seeded Boolean and concurrent-snapshot correctness harness; not copied from Lead."
+  },
+  "benchmarks/count_local.py": {
+   "owner": "ben",
+   "evidence": "New owned local count execution and visibility diagnostic runner; not copied from Lead."
+  },
+  "benchmarks/count_oracle.py": {
+   "owner": "ben",
+   "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
+  },
+  "benchmarks/count_probe.py": {
+   "owner": "ben",
+   "evidence": "New Stannum diagnostic or test code; not copied from Lead."
+  },
+  "benchmarks/count_visibility.py": {
+   "owner": "ben",
+   "evidence": "New Stannum diagnostic or test code; not copied from Lead."
+  },
+  "benchmarks/dataset.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/fold_reproduction.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
+  },
+  "benchmarks/foreground_writes.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 1f79095007a88234389bded090fd7fcab7ce8ee1."
+  },
+  "benchmarks/insert_latency.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 727399bf5516b6ede4f97aad2250d4a57399e35d."
+  },
+  "benchmarks/local/attrib.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c707013d43d68a147968076494794631560d17e0."
+  },
+  "benchmarks/local/exit-test.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 6af89821cd53beafdd501d234c91f66bba107d6c."
+  },
+  "benchmarks/local/gates.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
+  },
+  "benchmarks/local/mock-build.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6."
+  },
+  "benchmarks/local/mock-container.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
+  },
+  "benchmarks/local/mock-probe.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6."
+  },
+  "benchmarks/local/mockdb.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7ee73ff00e2643ecb2142a819e86ae24fb274c85."
+  },
+  "benchmarks/local/report.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7ee73ff00e2643ecb2142a819e86ae24fb274c85."
+  },
+  "benchmarks/local/run150m.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6."
+  },
+  "benchmarks/local/timeseries.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Added on branch bench/long-run on 2026-09-27."
+  },
+  "benchmarks/local/workload.sh": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in c261512fee1222b5cdc2e60d8d4ec63c08f8b4b6. Moved from benchmarks/local/mock-run.sh, merged with the duplicate runner in benchmarks/local/run150m.sh (now a wrapper)."
+  },
+  "benchmarks/merge_costs.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 849853598b1c007451ebe049d58e6e4c2a46acd3."
+  },
+  "benchmarks/mutation.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 42b32e939f6e5a1424d7260282cdc04a2184850b."
+  },
+  "benchmarks/mutation_targets.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum native PostgreSQL workload generator regression."
+  },
+  "benchmarks/oracle.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/paired.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/paired_libraries.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
+  },
+  "benchmarks/published_dataset.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum checksummed downloader for public benchmark data; no upstream code copied."
+  },
+  "benchmarks/query_comparison.py": {
+   "owner": "ben",
+   "evidence": "New Stannum diagnostic or test code; not copied from Lead."
+  },
+  "benchmarks/query_shapes.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum deterministic query-shape benchmark integration."
+  },
+  "benchmarks/resources.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum resource measurement summarization and regression coverage."
+  },
+  "benchmarks/run.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/server_times.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/stn3_fielded_poc.py": {
+   "owner": "ben",
+   "evidence": "New Stannum STN3 4.6 fielded-terms latency GATE harness; not copied from Lead."
+  },
+  "benchmarks/sustained.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum benchmark work, built on the existing Ben-authored benchmark modules; no Lead source copied. Private-cluster rate/concurrency campaign using the existing Stannum mutation runner."
+  },
+  "benchmarks/test_campaign.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/test_contention.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in e0fe96d06f4378ba3c88cf3a0633d3f2739cb6be."
+  },
+  "benchmarks/test_count_crossover.py": {
+   "owner": "ben",
+   "evidence": "New Stannum metadata-based COUNT crossover experiment and held-out policy evaluation; not copied from Lead."
+  },
+  "benchmarks/test_count_fuzz.py": {
+   "owner": "ben",
+   "evidence": "New Stannum seeded Boolean and concurrent-snapshot correctness harness; not copied from Lead."
+  },
+  "benchmarks/test_count_oracle.py": {
+   "owner": "ben",
+   "evidence": "New Stannum bounded index oracle or owned AWS crossover orchestration; not copied from Lead."
+  },
+  "benchmarks/test_database_snapshot.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum benchmark snapshot capture, restore, and validation implementation."
+  },
+  "benchmarks/test_dataset.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/test_fold_reproduction.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
+  },
+  "benchmarks/test_foreground_writes.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 1f79095007a88234389bded090fd7fcab7ce8ee1."
+  },
+  "benchmarks/test_local_report.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7ee73ff00e2643ecb2142a819e86ae24fb274c85."
+  },
+  "benchmarks/test_merge_costs.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 849853598b1c007451ebe049d58e6e4c2a46acd3."
+  },
+  "benchmarks/test_oracle.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/test_paired.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/test_paired_libraries.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
+  },
+  "benchmarks/test_published_dataset.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum split-stream and integrity regression tests."
+  },
+  "benchmarks/test_query_comparison.py": {
+   "owner": "ben",
+   "evidence": "New Stannum diagnostic or test code; not copied from Lead."
+  },
+  "benchmarks/test_query_shapes.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum query-shape coverage and validation regression tests."
+  },
+  "benchmarks/test_resources.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum resource measurement summarization and regression coverage."
+  },
+  "benchmarks/test_run.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/test_server_times.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "benchmarks/test_stn3_fielded_poc.py": {
+   "owner": "ben",
+   "evidence": "New Stannum unit tests for the STN3 4.6 latency GATE harness; not copied from Lead."
+  },
+  "benchmarks/test_sustained.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum benchmark work, built on the existing Ben-authored benchmark modules; no Lead source copied. Original tests of mutation accounting, scheduling pressure and repeated campaign ordering."
+  },
+  "benchmarks/test_tin.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum integration and validation for the pinned PlanetScale/ParadeDB benchmark driver. Upstream patch context retains its separate MIT license."
+  },
+  "benchmarks/test_tin_catalog.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation for controlled remote EXPLAIN probes and their cleanup/redaction tests; introduced in 4a7cb44. No upstream source copied."
+  },
+  "benchmarks/test_tin_experiments.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation for bounded remote TIN experiments and safety checks; no upstream source copied."
+  },
+  "benchmarks/test_vacuum_cleanup.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 9bc663ac5d84082a04ae1ff0578be824dd2018d3."
+  },
+  "benchmarks/tin.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum integration and validation for the pinned PlanetScale/ParadeDB benchmark driver. Upstream patch context retains its separate MIT license."
+  },
+  "benchmarks/tin/position-limit.sql": {
+   "owner": "ben",
+   "evidence": "Original Stannum integration and validation for the pinned PlanetScale/ParadeDB benchmark driver. Upstream patch context retains its separate MIT license."
+  },
+  "benchmarks/tin_behavior_probe.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 29a520e482ac9f1c1a32329ca9a88050f22f469b."
+  },
+  "benchmarks/tin_catalog.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation for controlled remote EXPLAIN probes and their cleanup/redaction tests; introduced in 4a7cb44. No upstream source copied."
+  },
+  "benchmarks/tin_experiments.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation for bounded remote TIN experiments and safety checks; no upstream source copied."
+  },
+  "benchmarks/vacuum_cleanup.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in a70ba90f4658fdc1f3b91cfb313a55429a76810c."
+  },
+  "boldi-vigna/Cargo.toml": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/Cargo.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/README.md": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/README.md",
+   "upstream_revision": "251df396f0a13636c67331d08550b419209bb66a",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/display.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/display.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/error.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/error.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/interval.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/interval.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/lib.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/lib.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/phrase_plan.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in d9068b1ee21e988ea72c8b1f195b4b9c58e91572."
+  },
+  "boldi-vigna/src/positions.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/positions.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/query.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/query.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/solver.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/solver.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/disjunction.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/disjunction.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/empty.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/empty.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/filter.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/filter.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/mod.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/mod.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/ordered.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/ordered.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/phrase.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/phrase.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/relation.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/relation.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/term.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/term.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "boldi-vigna/src/state/unordered.rs": {
+   "owner": "planetscale",
+   "upstream_path": "boldi-vigna/src/state/unordered.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "conformance/cases/bm25.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
+  },
+  "conformance/cases/catalog.alternatives.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_alternatives.yaml."
+  },
+  "conformance/cases/catalog.count.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_count.yaml."
+  },
+  "conformance/cases/catalog.ddl.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_ddl.yaml."
+  },
+  "conformance/cases/catalog.expansion.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_expansion.yaml."
+  },
+  "conformance/cases/catalog.highlight.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_highlight.yaml."
+  },
+  "conformance/cases/catalog.phrase.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_phrase.yaml."
+  },
+  "conformance/cases/catalog.positions.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_positions.yaml."
+  },
+  "conformance/cases/catalog.proximity.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_proximity.yaml."
+  },
+  "conformance/cases/catalog.relations.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_relations.yaml."
+  },
+  "conformance/cases/catalog.scoring.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_scoring.yaml."
+  },
+  "conformance/cases/catalog.syntax.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_syntax.yaml."
+  },
+  "conformance/cases/catalog.tokenize.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_tokenize.yaml."
+  },
+  "conformance/cases/catalog.topk.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; conformance cases encoded from docs/tin-behavior-catalog.md section 9, written for this repository on 2026-09-26. Moved from conformance/cases/catalog_topk.yaml."
+  },
+  "conformance/cases/query_size.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
+  },
+  "conformance/cases/smoke.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
+  },
+  "conformance/cases/span.minimal_interval.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26. Moved from conformance/cases/span_minimal_interval.yaml."
+  },
+  "conformance/cases/spans.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
+  },
+  "conformance/divergences/stannum.yaml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b70feda7cb36cca0ccde1216515d347a79176a9b."
+  },
+  "conformance/run.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
+  },
+  "contract/cases/arithmetic.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract cases for the design section 5.2 arithmetic rows. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/calls.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract cases for the pgembed call patterns. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/capabilities.yaml": {
+   "owner": "ben",
+   "evidence": "Original shape gate for stannum.capabilities(). Spec is embedded in the case (design section 4.2 / section 7 item 3); there is no 0.4.0 recording."
+  },
+  "contract/cases/catalog.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract cases for the catalog surface, GUCs, and ACLs. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/ddl.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract cases for DDL limits and reloptions. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/expansion.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract case for expansion past max_expansion. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/fields.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract cases for fielded phrases, spans, highlights, and patterns. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/parallel.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract case for a nonempty custom dictionary forcing serial plans. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/segments.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract case for a token posted in two segments plus a dead document. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/stats.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract case locking index_stats.average_length at 0.0. Expected values are recorded, not hand-written."
+  },
+  "contract/cases/tokenizer.yaml": {
+   "owner": "ben",
+   "evidence": "Original 0.4.0 contract case for tokenizer symmetry. Expected values are recorded, not hand-written."
+  },
+  "contract/divergences/stannum.yaml": {
+   "owner": "ben",
+   "evidence": "Original divergence file for the stannum tool-contract suite. Empty on 0.4.0; entries may carry expected error text for later engines."
+  },
+  "contract/exclusions.yaml": {
+   "owner": "ben",
+   "evidence": "Exclusion list for the tool-contract suite. HOT underfill cites the pg_test that is not expressible as SQL. capabilities.shape is excluded only on engine 0.4.0 (design section 7 item 3, 0.5.0-only / new-objects)."
+  },
+  "contract/run.py": {
+   "owner": "ben",
+   "evidence": "Adapted from conformance/run.py for the stannum tool-contract suite (STN3 tool-layer design section 7). Carries the 0.4.0 cases plus the capabilities shape gate and engine-scoped exclusions."
+  },
+  "docs/query-language/README.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/SUMMARY.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/alternatives.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/alternatives.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/boolean-operators.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/boolean-operators.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/boost.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/boost.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/introduction.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/introduction.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/keywords.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/keywords.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/phrases.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/phrases.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/positional-filters.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/positional-filters.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/precedence.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/precedence.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/proximity.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/proximity.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/recipes.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/recipes.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/span-relations.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/span-relations.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "docs/query-language/terms.md": {
+   "owner": "mixed",
+   "upstream_path": "tinql/docs/src/terms.md",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
+  },
+  "postgres/Cargo.toml": {
+   "owner": "mixed",
+   "upstream_path": "postgres/Cargo.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/sql/stannum--0.4.0--0.5.0.sql": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src",
+   "evidence": "Upgrade SQL adding capabilities(); jieba_* keep-surface stubs already match 0.4.0. Credits PlanetScale because it extends a snapshot generated from inherited Lead and original Stannum Rust definitions."
+  },
+  "postgres/sql/stannum--0.4.0.sql": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src",
+   "notice": "withheld",
+   "evidence": "Byte-identical copy of main's released 0.4.0 snapshot (predecessor for ALTER EXTENSION). Notice withheld so the copy stays unmodified."
+  },
+  "postgres/sql/stannum--0.5.0.sql": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/lib.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "generated_from": [
+    "postgres/src/am.rs",
+    "postgres/src/score.rs",
+    "postgres/src/search.rs",
+    "postgres/src/operator.rs",
+    "postgres/src/highlight_udfs.rs",
+    "postgres/src/tool/highlight.rs",
+    "postgres/src/tool/diagnostics.rs",
+    "postgres/src/tool/capabilities.rs",
+    "postgres/src/udfs.rs",
+    "postgres/src/dict.rs",
+    "postgres/src/stopwords.rs",
+    "postgres/src/lib.rs"
+   ],
+   "evidence": "pgrx-generated SQL from inherited and Stannum Rust definitions, including support bindings and SQL wrappers. Reapply notice after generation."
+  },
+  "postgres/src/am.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/am.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/bm25.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/bm25.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/customscan.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "postgres/src/dict.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum jieba_words table and SipHash-1-3 v1 fingerprint, with table+snapshot load/add/delete/reload/version from the 0.4.0 dict.rs port. 3.2 governance (SEEN/NONEMPTY/WARNED/INTERNAL_SPI, check_analysis, analysis_summary, parallel_safe) ported from 0.4.0; nonempty custom dictionaries decline parallel paths via customscan.rs."
+  },
+  "postgres/src/fields/bound.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 fused WAND bound (design \u00a75.1 saturate derivative, intersecting-block interval truncation, representative_count via TfBucket::new). Not copied from Lead."
+  },
+  "postgres/src/fields/codec.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 fielded-term key codec (~ hex nibble header, doubled-tilde escape, round-trip decode). Not copied from Lead."
+  },
+  "postgres/src/fields/cursor.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 LogicalPostingCursor over fielded Term streams (union candidates, equal-ordinal coalescing, fused next_bound_interval). Not copied from Lead."
+  },
+  "postgres/src/fields/df.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 df_agg union-count over term-stream ordinals (both-fields-once trap; query-time sum of per-segment values). Not copied from Lead."
+  },
+  "postgres/src/fields/error.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 fielded-key defects with distinct query-error versus verify-corruption report kinds. Not copied from Lead."
+  },
+  "postgres/src/fields/expand.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 multi-column expansion adapter (Index::term / Window / expand, two-stage limit, scope mask). Not copied from Lead."
+  },
+  "postgres/src/fields/mod.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 field-model module. Reexports the 4.1 codec, LogicalPostingCursor, expansion adapter, fused BM25F arithmetic, df_agg union-count, and the 4.4 fused WAND bound. States the design section 3 contract (does not absorb the owned shims). Not copied from Lead."
+  },
+  "postgres/src/fields/score.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 fused BM25F arithmetic (tf*/len*/avgdl*/idf-cast-then-boost saturate) and all_fields_mask. Not copied from Lead."
+  },
+  "postgres/src/fields/types.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L1 FieldTerm / LogicalTerm / Lookup type shapes wrapping segment::segment::Term streams. Not copied from Lead."
+  },
+  "postgres/src/fold.rs": {
+   "owner": "ben",
+   "evidence": "Original Boolean count executor over document ordinals, written for Stannum."
+  },
+  "postgres/src/heap_probe.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: a counting allocator for pg_test builds, written for Stannum."
+  },
+  "postgres/src/highlight.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/highlight.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/highlight_udfs.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/highlight_udfs.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes: 5-arg highlight bodies, column_field_name attnum gate, and SUPPORT rewrite that stays 4-arg on single-column. Retain PlanetScale credit."
+  },
+  "postgres/src/lib.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/lib.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/match_positions.rs": {
+   "owner": "planetscale",
+   "upstream_path": "postgres/src/match_positions.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "postgres/src/operator.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/operator.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/options.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/options.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/query_limits.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: pg_tests of oversized and deeply nested queries."
+  },
+  "postgres/src/score.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/score.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/src/search.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/highlight.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Port of the 0.4.0 standalone search()/search_count() SRF onto STN3. Not a byte copy of Lead; PlanetScale credit is retained because snippet and score paths call inherited highlight and score code."
+  },
+  "postgres/src/selectivity.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 69577a09af81322bcf2a036558e8b90c19346cb3."
+  },
+  "postgres/src/storage/buffer_label.rs": {
+   "owner": "ben",
+   "evidence": "STN4 format delta: \u00a76.3.1 durable write-buffer generation classifier (tag decoding order, write-path decision, legacy fielded-key shape validator). No upstream counterpart."
+  },
+  "postgres/src/storage/classify.rs": {
+   "owner": "ben",
+   "evidence": "STN4 format delta: \u00a76.3 relation classification (per-segment ValidV2/ValidV1/Stock/Malformed labels, generation predicates, mutually exclusive classes). No upstream counterpart."
+  },
+  "postgres/src/storage/layout.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "postgres/src/stopwords.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum function-word presets (stannum-stopwords-v1) and auto/auto:zh/auto:en reloption expansion. Ported from the main-line stopwords.rs; builtin_stop_words SQL entry point lives in postgres/src/tool/diagnostics.rs."
+  },
+  "postgres/src/storage/mod.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "postgres/src/storage/verify.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 15f5764703950b4715fb64dba9eda7b3993bb8bf."
+  },
+  "postgres/src/storage/wal.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 592a5c170c353828c8446ccbeca529108de213d7."
+  },
+  "postgres/src/stream.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 66bc09c8c623cf5026d3030618c2b7e4f16927b2."
+  },
+  "postgres/src/tin_conformance.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation, written 2026-09-26 to record and replay PlanetScale TIN 1.0.3 responses."
+  },
+  "postgres/src/tool/capabilities.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum capabilities() document for the tool-layer contract (design section 4.2). Not copied from Lead."
+  },
+  "postgres/src/tool/diagnostics.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L2 SQL entry points for tokenize, ql_parse, builtin_stop_words, index_stats/index_health, and index_analysis (design sections 3 and 4.1). Thin #[pg_extern] wrappers; this file does not import IndexScorer or storage internals."
+  },
+  "postgres/src/tool/highlight.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L2 SQL entry points for the 5-arg highlight() overloads (design sections 3 and 4.1). Thin #[pg_extern] wrappers delegate to postgres/src/highlight_udfs.rs; this file does not import IndexScorer or storage internals."
+  },
+  "postgres/src/tool/mod.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L2 tool-layer module. States the design section 3 seam: this layer imports nothing from engine internals."
+  },
+  "postgres/src/tool/search.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L2 SQL entry points for search()/search_count() (design sections 3 and 4.1). Thin #[pg_extern] wrappers delegate to postgres/src/search.rs; this file does not import IndexScorer or storage internals."
+  },
+  "postgres/src/tool/score.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum L2 pg_tests for the score-family SQL surface (design sections 4.1 and 5.1, Appendix A). Does not copy Lead sources; the #[pg_extern] bodies stay in postgres/src/score.rs."
+  },
+  "postgres/src/udfs.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/udfs.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "postgres/stannum.control": {
+   "owner": "mixed",
+   "upstream_path": "postgres/tin.control",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Derived from Lead postgres/tin.control; extension name, description and version handling changed."
+  },
+  "postgres/tests/count_under_vacuum.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Ported from the pg_test count_misses_rows_vacuum_removes_after_its_view (introduced in d96b2aa) to a private cluster on 2026-09-26."
+  },
+  "postgres/tests/crash_before_publication.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 1c7a95736839c1c36a4ef1a97756d5d7c372d016."
+  },
+  "postgres/tests/exit_during_walk.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 6af89821cd53beafdd501d234c91f66bba107d6c."
+  },
+  "postgres/tests/extension_upgrade.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 9997c06219d0b106a91e788a959bc2036a7de179."
+  },
+  "postgres/tests/merge_lifecycle.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in aa870ad9470babeafa5ac2cf10f38eed5983efbf. Moved from docs/benchmarks/merge_lifecycle.py."
+  },
+  "postgres/tests/postings_lifecycle.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "postgres/tests/ranked_fuzz.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in c66fd1b570fc111d9cbe3d399065736d8013a447."
+  },
+  "postgres/tests/search_srf.py": {
+   "owner": "ben",
+   "evidence": "Port of the 0.4.0 installed SQL, permission, RLS, and MVCC fallback integration test onto STN3."
+  },
+  "postgres/tests/test_stannum_jieba.py": {
+   "owner": "ben",
+   "evidence": "Port of the pgembed jieba tokenizer symmetry fixtures onto STN3's private-cluster unittest pattern. Not copied from Lead."
+  },
+  "postgres/tests/test_wide_cursor.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum wide-query fuzzer generation regression tests. Moved from benchmarks/test_wide_cursor.py."
+  },
+  "postgres/tests/vacuum_cleanup_pins.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum regression reproducing reader-pinned heap cleanup and validating benchmark accounting. Moved from benchmarks/vacuum_cleanup_pins.py."
+  },
+  "rust-toolchain.toml": {
+   "owner": "planetscale",
+   "upstream_path": "rust-toolchain.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "script/dump-segments.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in d968a6e59d5a2b9f16b284e8a06c2a85baf4cf86."
+  },
+  "script/pgrx-lock.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in d3f5c9833304d4d8a2fa05edf7931f64aaf0d764."
+  },
+  "script/reference-oracle": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 44ae79a7b960bdace26fbeccf5b34f9d3c6487fe."
+  },
+  "script/source_headers.py": {
+   "owner": "ben",
+   "evidence": "Added for the Stannum attribution migration; original header-check tooling."
+  },
+  "script/test-all": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in bba2ea6dd197e3ca6ed553ef3f412964adc7be6e."
+  },
+  "script/test_dump_segments.py": {
+   "owner": "ben",
+   "evidence": "New Stannum unit tests for current kind-5 / 68-byte dump-segments parsers; not copied from Lead."
+  },
+  "script/test_pgrx_lock.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in d3f5c9833304d4d8a2fa05edf7931f64aaf0d764."
+  },
+  "script/test_source_headers.py": {
+   "owner": "ben",
+   "evidence": "Added for the Stannum attribution migration; original header-check tooling."
+  },
+  "segment/Cargo.toml": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 3fcf441ac7c3d183de179b1f846ceb0ef83e1358."
+  },
+  "segment/examples/breakdown.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in d968a6e59d5a2b9f16b284e8a06c2a85baf4cf86."
+  },
+  "segment/examples/merge_memory.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 80e5f85e05b178c58e24a73d30a794a9004c4a18."
+  },
+  "segment/examples/vacuum_diagnostic.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in a70ba90f4658fdc1f3b91cfb313a55429a76810c."
+  },
+  "segment/src/bound.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
+  },
+  "segment/src/cache.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in 7372fc6fb8f0bbf469f1b6b3340dbe8af787bcdf."
+  },
+  "segment/src/channels.rs": {
+   "owner": "ben",
+   "evidence": "STN4 format delta: FCH1 per-field channel directory inside a term extent (design \u00a71.2). No upstream counterpart."
+  },
+  "segment/src/dead.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: dead lists decoded as a bitmap over segment ordinals, written for Stannum."
+  },
+  "segment/src/dictionary.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/docs.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
+  },
+  "segment/src/error.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/forward.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/index.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/lanes.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in abf20157d9c675a86b92c1399b729ff197f78f3c."
+  },
+  "segment/src/length_class.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
+  },
+  "segment/src/lib.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/merge.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 26b9d1ec0f2cad8e84386cf26b63afe3dadcd42c."
+  },
+  "segment/src/merge_strategy.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 6f8189c269c66d941502d0da662e142e1f898cc4."
+  },
+  "segment/src/ordinals.rs": {
+   "owner": "ben",
+   "evidence": "Original ordinal stream codec and chunked Boolean evaluator, written for Stannum."
+  },
+  "segment/src/pages.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 6bbb74b787fb206f26ea0cc107cfe74d1cf924a7."
+  },
+  "segment/src/payload.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/random_tests.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/reader.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/segment.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/set.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/source.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/tf_bucket.rs": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/tf_bucket.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Moved from Lead postgres/src/tf_bucket.rs in b740f5d; visibility widened for use across crates."
+  },
+  "segment/src/tid.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/trailer.rs": {
+   "owner": "ben",
+   "evidence": "STN3 format delta: STNF trailer codec (design \u00a75.1). No upstream counterpart."
+  },
+  "segment/src/varint.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/src/verify.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 15f5764703950b4715fb64dba9eda7b3993bb8bf."
+  },
+  "segment/tests/buffer_cost.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "segment/tests/record_memory.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: the peak-memory test of grouping a document's tokens by term."
+  },
+  "segment/tests/record_throughput.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: a timing probe of grouping tokenized documents by term."
+  },
+  "tinql/Cargo.toml": {
+   "owner": "mixed",
+   "upstream_path": "tinql/Cargo.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tinql/src/ast.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/ast.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/error.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/error.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/lib.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/lib.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/limits.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: query size and nesting limits."
+  },
+  "tinql/src/parser/descent.rs": {
+   "owner": "mixed",
+   "upstream_path": "tinql/src/parser/pest_parser/mod.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Recursive-descent transliteration of the upstream pest grammar (tinql/src/parser/pest_parser/grammar.pest) and builder, keeping the upstream builder helpers, with Stannum's nesting and size limits; retain PlanetScale credit."
+  },
+  "tinql/src/parser/differential.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: differential tests of the descent parser against the pest oracle."
+  },
+  "tinql/src/parser/mod.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/parser/mod.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/parser/pest_parser/grammar.pest": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/parser/pest_parser/grammar.pest",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/parser/pest_parser/mod.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/parser/pest_parser/mod.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/parser/phrase.pest": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/parser/pest_parser/phrase.pest",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Moved from tinql/src/parser/pest_parser/phrase.pest; otherwise byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/parser/phrase_grammar.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/parser/pest_parser/phrase_grammar.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Moved from tinql/src/parser/pest_parser/phrase_grammar.rs, with its grammar path and visibility adjusted."
+  },
+  "tinql/src/quote.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/quote.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/capability.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/runtime/capability.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/display.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/runtime/display.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/estimate.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 69577a09af81322bcf2a036558e8b90c19346cb3."
+  },
+  "tinql/src/runtime/eval.rs": {
+   "owner": "mixed",
+   "upstream_path": "tinql/src/runtime/eval.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tinql/src/runtime/lower.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/runtime/lower.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/mod.rs": {
+   "owner": "mixed",
+   "upstream_path": "tinql/src/runtime/mod.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tinql/src/runtime/plan.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "tinql/src/runtime/position_filter.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/runtime/position_filter.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/regex.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/runtime/regex.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/retrieval.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."
+  },
+  "tinql/src/runtime/simplify.rs": {
+   "owner": "mixed",
+   "upstream_path": "tinql/src/runtime/simplify.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tinql/src/runtime/span_expr.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/runtime/span_expr.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/runtime/subtokenize.rs": {
+   "owner": "mixed",
+   "upstream_path": "tinql/src/runtime/subtokenize.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tinql/src/tests.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/tests.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/src/util.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tinql/src/util.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tinql/tests/deep_queries.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: oversized and deeply nested query tests."
+  },
+  "tinql/tests/tokenized_doc_cost.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation: a timing probe of tokenizing short documents for exact evaluation."
+  },
+  "tokenizer/Cargo.toml": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/Cargo.toml",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/src/compiled.rs": {
+   "owner": "mixed",
+   "upstream_path": "tokenizer/src/compiled.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tokenizer/src/folder.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/src/folder.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/src/lib.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/src/lib.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/src/long_tokens.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/src/long_tokens.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/src/presets.rs": {
+   "owner": "mixed",
+   "upstream_path": "tokenizer/src/presets.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tokenizer/src/source_spans.rs": {
+   "owner": "mixed",
+   "upstream_path": "tokenizer/src/source_spans.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tokenizer/src/spec.rs": {
+   "owner": "mixed",
+   "upstream_path": "tokenizer/src/spec.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Inherited upstream file with Stannum changes; retain PlanetScale credit."
+  },
+  "tokenizer/src/tokenizers.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/src/tokenizers.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/src/tokenizers/jieba.rs": {
+   "owner": "mixed",
+   "upstream_path": "tokenizer/src/spec.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Introduced in 6d02ec7 with the mixed notice already applied. New jieba tokenizer, absent from Lead; PlanetScale credit is retained because it implements the inherited tokenizer spec and compiled-pipeline interface."
+  },
+  "tokenizer/src/tokenizers/unicode.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/src/tokenizers/unicode.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/src/tokenizers/whitespace.rs": {
+   "owner": "planetscale",
+   "upstream_path": "tokenizer/src/tokenizers/whitespace.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "evidence": "Byte-identical to the upstream source before notice insertion."
+  },
+  "tokenizer/tests/compatibility.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 82157ed1e4da3e195b0837dbb868897a8f57ad48."
   }
+ }
 }

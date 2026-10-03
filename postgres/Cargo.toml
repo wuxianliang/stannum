@@ -19,7 +19,7 @@ default = ["pg18"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 # serde_json is required by capabilities(). The feature stays so cfg(feature = "pg_test") still selects test modules.
-pg_test = []
+pg_test = ["segment/pg_test"]
 
 [dependencies]
 pgrx = "=0.19.1"

@@ -40,6 +40,7 @@
 //! standbys serve segmented reads only then (see [`index_reads_allowed`]).
 
 pub mod buffer_label;
+pub(crate) mod classify;
 pub mod layout;
 pub mod verify;
 pub mod wal;
@@ -66,9 +67,11 @@ use segment::docs::{DocCursor, DocTable, PageCursor, PageTable, TidCursor};
 use segment::forward::ForwardRecord;
 use segment::index::{Expanded, Index, MutableIndex, Window};
 use segment::ordinals::Ordinals;
+use segment::segment::trailer_offset;
 use segment::segment::{Lengths, Reader, Term};
 use segment::segment::{Segment, SegmentBuilder};
 use segment::set::{Cursor, Difference, Intersection};
+use segment::source::Source as ByteSource;
 use tinql::runtime::Query;
 
 use tinql::runtime::plan::{Limits, plan};
@@ -732,19 +735,38 @@ pub(crate) unsafe fn test_replace_buffer(index: pg_sys::Relation, data: &[u8], d
 /// map or cached builder participates.
 #[cfg(feature = "pg_test")]
 pub(crate) unsafe fn test_buffer_label(index: pg_sys::Relation) -> buffer_label::BufferLabel {
+    let (_, meta) = unsafe { read_meta(index, false) };
+    unsafe { persisted_buffer_label(index, &meta) }
+}
+
+/// Test-only: replaces the immutable segment directory wholesale with runs
+/// holding `blobs` — complete segment blobs, trailers included — so
+/// fixtures can plant v1 and malformed generations the current writers can
+/// no longer produce. Entries take fresh generations; the replaced runs'
+/// pages stay allocated for the test's lifetime.
+#[cfg(feature = "pg_test")]
+pub(crate) unsafe fn test_replace_segments(index: pg_sys::Relation, blobs: &[Vec<u8>]) {
     unsafe {
-        let (_, meta) = read_meta(index, false);
-        let stream = if meta.buffer.bytes == 0 {
-            Vec::new()
-        } else {
-            read_buffer_stream(index, &meta.buffer)
-        };
-        buffer_label::classify_buffer(
-            meta.fields.len(),
-            meta.buffer.docs,
-            meta.buffer.bytes,
-            &stream,
-        )
+        let (guard, mut meta) = read_meta(index, true);
+        let mut segments = Vec::with_capacity(blobs.len());
+        for blob in blobs {
+            let parsed = Segment::parse(blob)
+                .unwrap_or_else(|error| pgrx::error!("fixture segment does not parse: {error}"));
+            let (run, map) = write_segment_run(index, blob);
+            segments.push(SegmentEntry {
+                run,
+                map,
+                dead: Run::EMPTY,
+                dead_stamp: 0,
+                docs: parsed.document_count(),
+                total_length: parsed.total_length(),
+                generation: meta.next_generation,
+            });
+            meta.next_generation += 1;
+        }
+        meta.segments = segments;
+        write_meta(index, &guard, &meta);
+        drop(guard);
     }
 }
 
@@ -2312,6 +2334,10 @@ struct BufferIndex {
     /// stock records — decided from the tag on the first fill and kept
     /// for every later append, which never rewrites the generation.
     fielded: bool,
+    /// Records decoded across every fill of this epoch, for the §6.3.1
+    /// count cross-check (a well-formed stream holds exactly `docs`
+    /// records; a disagreement is `BufferMalformed`, not a stale stream).
+    records: u32,
     index: Rc<MutableIndex>,
 }
 
@@ -2378,15 +2404,17 @@ unsafe fn read_buffer_range(
 }
 
 /// The buffer's index for the current state, extended with any records
-/// appended since it was last used. `None` when a page read is stale against
-/// `published` (see [`read_buffer_range`]); the cache is left as it was.
+/// appended since it was last used, with the persisted generation flag
+/// (`fielded`: the stream carries `STN4_BUFFER_TAG`). `None` when a page
+/// read is stale against `published` (see [`read_buffer_range`]); the cache
+/// is left as it was.
 unsafe fn buffer_index(
     index: pg_sys::Relation,
     identity: u64,
     state: &BufferState,
     published: Option<u64>,
     field_count: u8,
-) -> Option<Rc<MutableIndex>> {
+) -> Option<(Rc<MutableIndex>, bool)> {
     let cache = BUFFER_INDEX.with_borrow_mut(Option::take);
     let mut entry = match cache {
         Some(entry)
@@ -2402,6 +2430,7 @@ unsafe fn buffer_index(
             covered: 0,
             pages: vec![state.head],
             fielded: false,
+            records: 0,
             index: Rc::new(
                 MutableIndex::with_field_count(field_count.max(1))
                     .unwrap_or_else(|_| MutableIndex::default()),
@@ -2438,10 +2467,21 @@ unsafe fn buffer_index(
             } else {
                 codec_in(entry.index.add_encoded(&tail[at..]), "write buffer")
             };
+            entry.records += 1;
         }
         entry.covered = state.bytes as usize;
     }
-    let result = entry.index.clone();
+    // The §6.3.1 count cross-check, multi-column only (single-column
+    // buffers keep the stock error surface): a stream whose decoded record
+    // count disagrees with the meta page's `docs` is `BufferMalformed`, so
+    // `M`, never a generation class.
+    if field_count >= 2 && entry.records != state.docs {
+        corrupt(format!(
+            "Stannum write buffer: buffer state says {} documents but the stream holds {}",
+            state.docs, entry.records
+        ));
+    }
+    let result = (entry.index.clone(), entry.fielded);
     BUFFER_INDEX.with_borrow_mut(|slot| *slot = Some(entry));
     Some(result)
 }
@@ -3625,24 +3665,174 @@ unsafe fn folds(index: pg_sys::Relation, buffer: &BufferState, bytes: usize) -> 
             || buffer.docs >= WRITE_BUFFER_DOCS.get().max(1) as u32)
 }
 
-/// Whether any immutable segment carries an STNF v2 trailer (design §6.3
-/// `G_v2`), consulted only on the stale-buffer error path. A.4's
-/// `open_index` classification owns full `M` detection; this probe answers
-/// only StaleFielded-vs-MixedFielded for an already-stale buffer.
+/// The buffer's §6.3.1 label from persisted state alone — meta counts and
+/// the KIND_BUFFER bytes — the view a restarted backend, recovery, or WAL
+/// replay reconstructs.
 ///
 /// # Safety
 /// `index` is live; `meta` is its current directory.
-unsafe fn any_v2_segment(index: pg_sys::Relation, meta: &Meta) -> bool {
-    meta.segments.iter().any(|entry| {
+unsafe fn persisted_buffer_label(
+    index: pg_sys::Relation,
+    meta: &Meta,
+) -> buffer_label::BufferLabel {
+    let stream = if meta.buffer.bytes == 0 {
+        Vec::new()
+    } else {
+        unsafe { read_buffer_stream(index, &meta.buffer) }
+    };
+    buffer_label::classify_buffer(
+        meta.fields.len(),
+        meta.buffer.docs,
+        meta.buffer.bytes,
+        &stream,
+    )
+}
+
+/// The full §6.3 classification of a kind-5 relation: every immutable
+/// segment parsed and the buffer labeled from persisted bytes. Heavy —
+/// error fences, VACUUM, and tests only; the insert happy path uses the
+/// [`segment_mix`] probe and pays the full walk only on its error path.
+/// `PreStn3` and the meta-page corruption classes have already errored
+/// kind-first in [`read_meta`]; an LSG segment under kind-5 in
+/// [`live_check_meta`].
+///
+/// # Safety
+/// `index` is live; `meta` is its current directory.
+unsafe fn classify_relation(index: pg_sys::Relation, meta: &Meta) -> classify::RelationClass {
+    let buffer = unsafe { persisted_buffer_label(index, meta) };
+    let segments: Vec<classify::SegmentLabel> = meta
+        .segments
+        .iter()
+        .map(|entry| {
+            let label = generation_label(entry.generation);
+            let bytes = unsafe { read_run(index, entry.run, &label) };
+            classify::segment_label(meta.fields.len(), &bytes)
+        })
+        .collect();
+    classify::relation_class(&segments, buffer)
+}
+
+/// The §6.3 guarded-callback fence: `Current` proceeds; `StaleFielded` and
+/// `MixedFielded` are the distinct rebuild errors (pinned in pg_tests,
+/// both different from the parent §8 migration string); `Corrupt` keeps
+/// the existing corruption treatment. No caller reaches here for
+/// `PreStn3` — that fired kind-first in [`read_meta`].
+fn fence_relation(class: classify::RelationClass) {
+    match class {
+        classify::RelationClass::Current => {}
+        classify::RelationClass::StaleFielded => pgrx::error!(
+            "stannum: index holds a pre-STN4 fielded write buffer; \
+             REINDEX the index"
+        ),
+        classify::RelationClass::MixedFielded => pgrx::error!(
+            "stannum: index mixes pre-STN4 and STN4 fielded \
+             write buffers; REINDEX the index"
+        ),
+        classify::RelationClass::Corrupt(reason) => corrupt(format!("Stannum index: {reason}")),
+    }
+}
+
+/// The §6.3 fence for the heavy guarded callbacks (VACUUM's two entry
+/// points): a non-Current relation errors before any page is dirtied.
+/// Single-column relations skip it — no class but `Current`/`Corrupt` is
+/// reachable, and `Corrupt` already fires where the stock readers walk.
+///
+/// # Safety
+/// `index` is a live kind-5 index relation.
+unsafe fn fence_vacuum(index: pg_sys::Relation) {
+    let (_, meta) = unsafe { read_meta(index, false) };
+    if meta.fields.len() >= 2 {
+        fence_relation(unsafe { classify_relation(index, &meta) });
+    }
+}
+
+/// The immutable-segment generation evidence (design §6.3 `G_v1`/`G_v2`/
+/// `M`) as the insert happy path sees it: header and trailer-prefix reads
+/// only — the page table (cached per backend), the 64-byte header, five
+/// trailer bytes. Deep v2 validation (FCH1 framing, df unions, norms)
+/// stays with the readers scans and merges build; the insert fence needs
+/// the generation, not the semantics.
+#[derive(Debug)]
+struct SegmentMix {
+    v1: bool,
+    v2: bool,
+    malformed: Option<String>,
+}
+
+/// Probe results by (index identity, directory generations): a fold,
+/// merge, or vacuum changes the key, and a dead-list swap (which keeps
+/// generations) cannot change a generation.
+type SegmentMixes = HashMap<(u64, Vec<u32>), Rc<SegmentMix>>;
+
+thread_local! {
+    static SEGMENT_MIXES: RefCell<SegmentMixes> = RefCell::new(HashMap::new());
+}
+
+/// The generation mix of `meta`'s immutable segments, cached per backend
+/// by (identity, generations). Consulted under the insert fence's
+/// exclusive meta lock; the reads are buffer pins only.
+///
+/// # Safety
+/// `index` is live; `meta` is the locked directory being written against.
+unsafe fn segment_mix(index: pg_sys::Relation, meta: &Meta) -> Rc<SegmentMix> {
+    let key = (
+        meta.identity,
+        meta.segments
+            .iter()
+            .map(|entry| entry.generation)
+            .collect::<Vec<_>>(),
+    );
+    if let Some(mix) = SEGMENT_MIXES.with_borrow(|mixes| mixes.get(&key).cloned()) {
+        return mix;
+    }
+    let mut mix = SegmentMix {
+        v1: false,
+        v2: false,
+        malformed: None,
+    };
+    for entry in &meta.segments {
         let label = generation_label(entry.generation);
-        let bytes = unsafe { read_run(index, entry.run, &label) };
-        matches!(
-            Segment::parse(&bytes)
-                .ok()
-                .and_then(|segment| segment.trailer().map(|trailer| trailer.version)),
-            Some(2)
-        )
-    })
+        let table = unsafe { page_table(index, meta.identity, entry) };
+        let source = RunSource::new(unsafe { (*index).rd_id }, entry.run, table, label);
+        let probed: segment::Result<Option<u8>> = (|| {
+            let total = ByteSource::len(&source);
+            let pages_end = trailer_offset(&source)?;
+            if pages_end == total {
+                return Ok(None);
+            }
+            let prefix = ByteSource::read(&source, pages_end, 5)?;
+            if prefix.len() < 5 || &prefix[..4] != segment::trailer::MAGIC {
+                return Err(segment::Error::Corrupt("STNF magic"));
+            }
+            Ok(Some(prefix[4]))
+        })();
+        match probed {
+            // A stock blob (no trailer) is outside S — but a multi-column
+            // segment without a trailer is malformed, not stock.
+            Ok(None) if meta.fields.len() >= 2 => {
+                mix.malformed =
+                    Some("multi-column segment is missing the STNF field-norms trailer".to_owned());
+            }
+            Ok(None) => {}
+            Ok(Some(segment::trailer::VERSION_V1)) => mix.v1 = true,
+            Ok(Some(segment::trailer::VERSION)) => mix.v2 = true,
+            Ok(Some(version)) => {
+                mix.malformed = Some(format!("STNF version {version}"));
+            }
+            Err(error) => mix.malformed = Some(error.to_string()),
+        }
+        if mix.malformed.is_some() {
+            break;
+        }
+    }
+    let mix = Rc::new(mix);
+    SEGMENT_MIXES.with_borrow_mut(|mixes| {
+        if mixes.len() > 4096 {
+            mixes.clear();
+        }
+        mixes.insert(key, Rc::clone(&mix));
+    });
+    mix
 }
 
 /// # Safety
@@ -3730,27 +3920,37 @@ pub unsafe fn insert(
                 &stream,
             ) {
                 buffer_label::BufferWritePath::TagBirth => {
+                    // The buffer is live or neutral; only the immutable
+                    // segments can carry the withdrawn generation (the
+                    // folded 4.3–4.6 leftovers), and the cached probe reads
+                    // headers, not segments. On evidence the full walk
+                    // names the precise class.
+                    let mix = segment_mix(index, &meta);
+                    if mix.v1 || mix.malformed.is_some() {
+                        fence_relation(classify_relation(index, &meta));
+                    }
                     let mut tagged = Vec::with_capacity(bytes.len() + 2);
                     tagged.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
                     tagged.extend_from_slice(&bytes);
                     tagged
                 }
-                buffer_label::BufferWritePath::Append => bytes,
-                buffer_label::BufferWritePath::Stale => {
-                    // The relation class (design §6.3): a ValidV2 segment
-                    // beside the stale buffer is MixedFielded, otherwise
-                    // StaleFielded. Both are rebuild errors before any
-                    // write; neither dirties a page.
-                    if any_v2_segment(index, &meta) {
-                        pgrx::error!(
-                            "stannum: index mixes pre-STN4 and STN4 fielded \
-                             write buffers; REINDEX the index"
-                        );
+                buffer_label::BufferWritePath::Append => {
+                    // As above: a tagged buffer beside v1 segments is the
+                    // MixedFielded rebuild error before any append.
+                    let mix = segment_mix(index, &meta);
+                    if mix.v1 || mix.malformed.is_some() {
+                        fence_relation(classify_relation(index, &meta));
                     }
-                    pgrx::error!(
-                        "stannum: index holds a pre-STN4 fielded write buffer; \
-                         REINDEX the index"
-                    );
+                    bytes
+                }
+                buffer_label::BufferWritePath::Stale => {
+                    // Error path: the full §6.3 classification decides the
+                    // string — a malformed or missing-trailer segment beside
+                    // the stale buffer is Corrupt, a ValidV2 segment makes
+                    // it MixedFielded, anything else StaleFielded. The
+                    // buffer alone guarantees `G_v1`, so this always fences.
+                    fence_relation(classify_relation(index, &meta));
+                    unreachable!("a stale buffer is never Current")
                 }
                 buffer_label::BufferWritePath::Malformed(reason) => {
                     corrupt(format!("Stannum write buffer: {reason}"))
@@ -4009,8 +4209,7 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 }
             } else {
                 None
-            };
-            // The meta page is released before the segment readers load:
+            }; // The meta page is released before the segment readers load:
             // segment runs are freed only past every snapshot that could
             // read them, not under this lock, and loading eighteen readers'
             // page tables and dead lists from disk under it queued a writer
@@ -4021,6 +4220,8 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
             let mut labels = Vec::with_capacity(meta.segments.len() + 1);
             let mut dead_sets = Vec::with_capacity(meta.segments.len() + 1);
             let mut field_norms = Vec::with_capacity(meta.segments.len() + 1);
+            let mut segment_labels: Vec<classify::SegmentLabel> =
+                Vec::with_capacity(meta.segments.len());
             let envelope_fields = u8::try_from(meta.fields.len()).unwrap_or(1);
             let keys = meta
                 .segments
@@ -4037,11 +4238,28 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 pgrx::check_for_interrupts!();
                 let (segment, dead, dead_set) =
                     cached_segment(index, index_oid, meta.identity, entry);
-                let norms = segment.reader.trailer().map(|trailer| FieldNorms {
-                    field_count: trailer.field_count,
-                    field_totals: trailer.field_totals.clone(),
-                    rows: trailer.rows.clone(),
-                });
+                let (norms, generation_label_of_segment) = match segment.reader.trailer() {
+                    Some(trailer) => {
+                        let norms = FieldNorms {
+                            field_count: trailer.field_count,
+                            field_totals: trailer.field_totals.clone(),
+                            rows: trailer.rows.clone(),
+                        };
+                        // The open-time pass already validated a v2 trailer
+                        // (FCH1 framing, df unions, norms agreement); a v1
+                        // trailer only decodes — classification reads it,
+                        // operations must not.
+                        let label = if trailer.version == segment::trailer::VERSION {
+                            classify::SegmentLabel::ValidV2
+                        } else {
+                            classify::SegmentLabel::ValidV1
+                        };
+                        (Some(norms), label)
+                    }
+                    // A stock blob never reaches a multi-column view:
+                    // check_source_norms errors on the missing trailer first.
+                    None => (None, classify::SegmentLabel::Stock),
+                };
                 check_source_norms(
                     envelope_fields,
                     norms.as_ref(),
@@ -4051,9 +4269,46 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 labels.push(generation_label(entry.generation));
                 dead_sets.push(dead_set);
                 field_norms.push(norms);
+                segment_labels.push(generation_label_of_segment);
             }
             let immutable_sources = sources.len();
-            if let Some(buffer) = buffer {
+            // The §6.3 scan fence, multi-column only: every source above was
+            // read for this view anyway, so the relation class is exact at no
+            // extra page reads — `PreStn3` and the meta corruptions fired
+            // kind-first in read_meta, the LSG-under-kind-5 corruption in
+            // live_check_meta, and `Current` relations pass through untouched.
+            if envelope_fields >= 2 {
+                let v1_segments = segment_labels
+                    .iter()
+                    .any(|label| matches!(label, classify::SegmentLabel::ValidV1));
+                // docs == 0 means `buffer` is None: the counts decide arms
+                // 1–3 without a stream read. docs > 0 means buffer_index
+                // decoded the stream (its own corruption errors fired there)
+                // and reports the persisted generation.
+                let buffer_label = if meta.buffer.docs == 0 {
+                    if meta.buffer.bytes == 0 {
+                        buffer_label::BufferLabel::Empty
+                    } else {
+                        buffer_label::BufferLabel::Malformed(
+                            "write buffer holds bytes but no documents",
+                        )
+                    }
+                } else if buffer.as_ref().is_some_and(|(_, fielded)| *fielded) {
+                    // Tagged: `Current` or `NoTerms`, and both proceed unless
+                    // the segments carry v1. On that error path the persisted
+                    // label names the precise class (`NoTerms` is neutral, so
+                    // v1-only is StaleFielded, not mixed).
+                    if v1_segments {
+                        persisted_buffer_label(index, &meta)
+                    } else {
+                        buffer_label::BufferLabel::Current
+                    }
+                } else {
+                    buffer_label::BufferLabel::Stale
+                };
+                fence_relation(classify::relation_class(&segment_labels, buffer_label));
+            }
+            if let Some((buffer, _tagged)) = buffer {
                 let norms = codec_in(buffer.field_norms(), "write buffer").map(
                     |(field_count, field_totals, rows)| FieldNorms {
                         field_count,
@@ -4334,6 +4589,11 @@ pub unsafe fn bulk_delete(
     state: *mut std::ffi::c_void,
 ) -> (u64, u64) {
     let callback = callback.expect("VACUUM callback");
+    // The §6.3 guarded-callback fence: VACUUM rewrites the buffer and
+    // merges segments, so a non-Current relation is the rebuild error
+    // before any page is dirtied (design §6.3; `ambuild`/`REINDEX` rebuild
+    // from the heap and stay exempt).
+    unsafe { fence_vacuum(index) };
     let mut is_dead = |tid: Tid| unsafe { callback(&mut pointer_of(tid), state) };
     let mut handled: HashSet<u32> = HashSet::new();
     let (mut live, mut removed) = (0u64, 0u64);
@@ -4476,6 +4736,8 @@ pub unsafe fn bulk_delete(
 /// `index` is a live LDP2 index locked for VACUUM.
 pub unsafe fn cleanup(index: pg_sys::Relation) {
     unsafe {
+        // As `bulk_delete`: maintenance merges are guarded callbacks too.
+        fence_vacuum(index);
         maintain_segments(index);
         reclaim_pending(index);
         reclaim_orphans(index);

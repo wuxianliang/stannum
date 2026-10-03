@@ -944,6 +944,628 @@ mod tests {
         close_rel(rel);
     }
 
+    // --- STN4 A.4: the §6.3 classification matrix ------------------------------
+
+    /// Demotes a ValidV2 segment blob to a well-formed v1 blob: the same
+    /// stock sections and norms, plus the df section v1 carried. The df
+    /// entries need not mirror the dictionary — v1 decode validates them
+    /// structurally — so one entry classifies; the class, not the content,
+    /// is the fixture.
+    fn demoted_v1(blob: &[u8]) -> Vec<u8> {
+        let reader = segment::segment::Segment::parse(blob).unwrap();
+        let trailer = reader.trailer().unwrap();
+        assert_eq!(trailer.version, 2, "the fixture demotes a ValidV2 blob");
+        let mut out = blob[..reader.pages_end() as usize].to_vec();
+        out.extend_from_slice(
+            &segment::trailer::encode_v1(&trailer.field_totals, &trailer.rows, &[("needle", 1)])
+                .unwrap(),
+        );
+        assert_eq!(
+            segment::segment::Segment::parse(&out)
+                .unwrap()
+                .trailer()
+                .unwrap()
+                .version,
+            1,
+            "the demoted blob stays decodable: classification reads it"
+        );
+        out
+    }
+
+    /// A v2 blob whose trailer names an unknown STNF version.
+    fn with_unknown_version(blob: &[u8]) -> Vec<u8> {
+        let reader = segment::segment::Segment::parse(blob).unwrap();
+        let mut out = blob.to_vec();
+        out[reader.pages_end() as usize + 4] = 7;
+        assert!(segment::segment::Segment::parse(&out).is_err());
+        out
+    }
+
+    /// A multi-column blob stripped of its trailer entirely.
+    fn without_trailer(blob: &[u8]) -> Vec<u8> {
+        let reader = segment::segment::Segment::parse(blob).unwrap();
+        blob[..reader.pages_end() as usize].to_vec()
+    }
+
+    /// A v2 blob whose every FCH1 extent header is broken: structurally
+    /// sound stock bytes, a sound trailer, and framing the open-time walk
+    /// rejects.
+    fn with_broken_fch1(blob: &[u8]) -> Vec<u8> {
+        let mut out = blob.to_vec();
+        let mut patched = 0;
+        for at in 0..out.len().saturating_sub(3) {
+            if &out[at..at + 4] == b"FCH1" {
+                out[at] = b'X';
+                patched += 1;
+            }
+        }
+        assert!(patched > 0, "the fixture expects FCH1-framed extents");
+        assert!(
+            segment::segment::Segment::parse(&out).is_err(),
+            "broken FCH1 framing fails the open-time walk"
+        );
+        out
+    }
+
+    /// Demotes the first `demote` immutable segments to well-formed v1
+    /// (keeping any later ones ValidV2) and empties the buffer.
+    unsafe fn plant_v1_segments(rel: pg_sys::Relation, demote: usize) {
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert!(
+                !blobs.is_empty() && demote >= 1 && blobs.len() >= demote,
+                "fixture demotes {demote} of {} built segments",
+                blobs.len()
+            );
+            let planted: Vec<Vec<u8>> = blobs
+                .iter()
+                .enumerate()
+                .map(|(at, blob)| {
+                    if at < demote {
+                        demoted_v1(blob)
+                    } else {
+                        blob.clone()
+                    }
+                })
+                .collect();
+            crate::storage::test_replace_segments(rel, &planted);
+            crate::storage::test_replace_buffer(rel, &[], 0);
+        }
+    }
+
+    /// §6.3 fixture row: all immutable ValidV2 beside a `BufferEmpty`
+    /// buffer is `Current` — search answers and insert proceeds.
+    #[pg_test]
+    fn all_valid_v2_with_empty_buffer_is_current() {
+        overlap_fixture("v2empty");
+        let rel = open_rel("v2empty_idx");
+        unsafe {
+            // CREATE INDEX flushed one ValidV2 segment and left the buffer
+            // empty; the demotion helper proves the starting point is v2.
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 1);
+            assert_eq!(
+                segment::segment::Segment::parse(&blobs[0])
+                    .unwrap()
+                    .trailer()
+                    .unwrap()
+                    .version,
+                2
+            );
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Empty
+            );
+        }
+        close_rel(rel);
+        // Current answers: the operator finds the indexed rows.
+        let found =
+            Spi::get_one::<i64>("SELECT count(*) FROM v2empty_docs WHERE title ==> 'needle'")
+                .unwrap();
+        assert_eq!(found, Some(2), "doc 1 and doc 2 carry needle in title");
+        // Current writes: an insert into the empty buffer re-births the tag.
+        Spi::run("INSERT INTO v2empty_docs VALUES (9, 'needle', 'pad')").unwrap();
+        let rel = open_rel("v2empty_idx");
+        unsafe {
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current
+            );
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 fixture rows: all immutable ValidV1 with `BufferEmpty`,
+    /// `BufferStale`, and the generation-neutral `BufferNoTerms` are all
+    /// `StaleFielded` — search is the rebuild error, insert refuses before
+    /// any write, and no page changes.
+    #[pg_test]
+    fn all_valid_v1_is_stalefielded_for_every_non_live_buffer() {
+        overlap_fixture("v1all");
+        let rel = open_rel("v1all_idx");
+        unsafe {
+            plant_v1_segments(rel, 1);
+            // BufferEmpty: both the scan fence and the insert fence fire with
+            // the StaleFielded string, without writing.
+            let (stream, blobs) = (
+                crate::storage::test_buffer_stream(rel),
+                crate::storage::test_segment_blobs(rel),
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM v1all_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO v1all_docs VALUES (9, 'needle', 'pad');
+                     RAISE EXCEPTION 'the insert fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong insert error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+            assert_eq!(
+                crate::storage::test_segment_blobs(rel),
+                blobs,
+                "the directory is unchanged"
+            );
+            // BufferStale (untagged legacy beside the v1 segments).
+            let legacy = legacy_fielded_stream(&[("~0~needle", 1)]);
+            crate::storage::test_replace_buffer(rel, &legacy, 1);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM v1all_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            // BufferNoTerms is generation-neutral: v1-only segments stay
+            // StaleFielded, not mixed.
+            let noterms = tagged_fielded_stream(&[]);
+            crate::storage::test_replace_buffer(rel, &noterms, 1);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM v1all_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 fixture rows: well-formed v1 beside well-formed v2 — with an
+    /// empty buffer, or a live tagged buffer beside v1 segments — is
+    /// `MixedFielded`; both fences fire and neither writes.
+    #[pg_test]
+    fn v1_beside_v2_is_mixedfielded() {
+        overlap_fixture("mixedseg");
+        // A second ValidV2 segment: one fold past the CREATE INDEX flush.
+        Spi::run(
+            "SET LOCAL stannum.write_buffer_bytes = 1024;
+             INSERT INTO mixedseg_docs VALUES (4, 'zzz', repeat('filler ', 400));",
+        )
+        .unwrap();
+        let rel = open_rel("mixedseg_idx");
+        unsafe {
+            assert_eq!(
+                crate::storage::test_segment_blobs(rel).len(),
+                2,
+                "CREATE INDEX flush + one fold"
+            );
+            plant_v1_segments(rel, 1);
+            let (stream, blobs) = (
+                crate::storage::test_buffer_stream(rel),
+                crate::storage::test_segment_blobs(rel),
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM mixedseg_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'mixes pre-STN4 and STN4' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO mixedseg_docs VALUES (9, 'needle', 'pad');
+                     RAISE EXCEPTION 'the insert fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'mixes pre-STN4 and STN4' THEN
+                         RAISE EXCEPTION 'wrong insert error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+            assert_eq!(crate::storage::test_segment_blobs(rel), blobs);
+        }
+        close_rel(rel);
+
+        // A live tagged buffer beside demoted v1 segments is MixedFielded
+        // on both fences (built healthy, demoted after — the writer cannot
+        // reach this state, the classifier must still name it).
+        overlap_fixture("mixedbuf");
+        Spi::run("DELETE FROM mixedbuf_docs").unwrap();
+        Spi::run("INSERT INTO mixedbuf_docs VALUES (7, 'needle', 'pad')").unwrap();
+        let rel = open_rel("mixedbuf_idx");
+        unsafe {
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current,
+                "the buffer is live before the demotion"
+            );
+            let blobs = crate::storage::test_segment_blobs(rel);
+            let planted: Vec<Vec<u8>> = blobs.iter().map(|blob| demoted_v1(blob)).collect();
+            crate::storage::test_replace_segments(rel, &planted);
+            let stream = crate::storage::test_buffer_stream(rel);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM mixedbuf_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'mixes pre-STN4 and STN4' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO mixedbuf_docs VALUES (9, 'a', 'b');
+                     RAISE EXCEPTION 'the insert fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'mixes pre-STN4 and STN4' THEN
+                         RAISE EXCEPTION 'wrong insert error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 fixture rows: `v1 + v2 + one malformed trailer` and `v1 + v2 +
+    /// one missing trailer` are `Corrupt`, never mixed, never the migration
+    /// string.
+    #[pg_test]
+    fn v1_v2_plus_malformed_or_missing_trailer_is_corrupt() {
+        overlap_fixture("cormix");
+        Spi::run(
+            "SET LOCAL stannum.write_buffer_bytes = 1024;
+             INSERT INTO cormix_docs VALUES (4, 'zzz', repeat('filler ', 400));",
+        )
+        .unwrap();
+        let rel = open_rel("cormix_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 2);
+            // v1 beside v2 beside an unknown-version trailer.
+            let malformed = vec![demoted_v1(&blobs[0]), with_unknown_version(&blobs[1])];
+            crate::storage::test_replace_segments(rel, &malformed);
+            crate::storage::test_replace_buffer(rel, &[], 0);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM cormix_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'STNF version'
+                        OR SQLERRM ~ 'mixes'
+                        OR SQLERRM ~ 'holds a pre-STN4'
+                        OR SQLERRM ~ 'requires REINDEX to 0.5.0' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            // v1 beside v2 beside a multi-column segment with no trailer.
+            let missing = vec![demoted_v1(&blobs[0]), without_trailer(&blobs[1])];
+            crate::storage::test_replace_segments(rel, &missing);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM cormix_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'missing the STNF field-norms trailer'
+                        OR SQLERRM ~ 'mixes'
+                        OR SQLERRM ~ 'holds a pre-STN4' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            // The insert fence names the same corruption through its probe.
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO cormix_docs VALUES (9, 'a', 'b');
+                     RAISE EXCEPTION 'the insert fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'missing the STNF field-norms trailer' THEN
+                         RAISE EXCEPTION 'wrong insert error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 fixture row: a well-formed v2 trailer whose terms fail FCH1
+    /// framing is `Corrupt`, not `Current` — and not a rebuild class.
+    #[pg_test]
+    fn v2_with_malformed_fch1_is_corrupt() {
+        overlap_fixture("corfch");
+        let rel = open_rel("corfch_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            let planted = vec![with_broken_fch1(&blobs[0])];
+            crate::storage::test_replace_segments(rel, &planted);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM corfch_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'corrupt segment data'
+                        OR SQLERRM !~ 'REINDEX'
+                        OR SQLERRM ~ 'mixes'
+                        OR SQLERRM ~ 'holds a pre-STN4' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 fixture row: well-formed v2 segments beside a `BufferMalformed`
+    /// buffer are `Corrupt`. The shape here is the record-count cross-check:
+    /// one well-formed tagged record against a `docs` count of two.
+    #[pg_test]
+    fn v2_segments_with_malformed_buffer_are_corrupt() {
+        overlap_fixture("corbuf");
+        let rel = open_rel("corbuf_idx");
+        unsafe {
+            let one = tagged_fielded_stream(&[vec!["needle"]]);
+            crate::storage::test_replace_buffer(rel, &one, 2);
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Malformed(
+                    "write buffer document count disagrees with the stream"
+                )
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM corbuf_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'the stream holds 1'
+                        OR SQLERRM ~ 'mixes'
+                        OR SQLERRM ~ 'holds a pre-STN4' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 fixture row: a ValidV2 dictionary containing the surface token
+    /// `~0~foo` stays `Current` — the immutable classification never runs
+    /// the recognizer on dictionary keys, and a fold keeps the token
+    /// FCH1-framed and scoreable.
+    #[pg_test]
+    fn v2_dictionary_surface_token_stays_current() {
+        Spi::run(
+            "CREATE TABLE surf_docs (id int, title text, body text);
+             CREATE INDEX surf_idx ON surf_docs USING stannum(title, body)
+               WITH (tokenizer = 'whitespace');
+             INSERT INTO surf_docs VALUES (1, '~0~foo filler', 'x');",
+        )
+        .unwrap();
+        // Fold the shaped token into an immutable segment.
+        Spi::run(
+            "SET LOCAL stannum.write_buffer_bytes = 1024;
+             INSERT INTO surf_docs VALUES (2, 'zzz', repeat('filler ', 400));",
+        )
+        .unwrap();
+        let rel = open_rel("surf_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            let folded = blobs
+                .iter()
+                .find(|blob| {
+                    segment::segment::Segment::parse(blob)
+                        .unwrap()
+                        .term("~0~foo")
+                        .unwrap()
+                        .is_some()
+                })
+                .expect("the folded segment holds the surface token");
+            let segment = segment::segment::Segment::parse(folded).unwrap();
+            let token = segment.term("~0~foo").unwrap().unwrap();
+            assert_eq!(token.channels(2).unwrap().len(), 1, "still FCH1-framed");
+            assert!(segment::verify::verify_segment(folded).is_clean());
+        }
+        close_rel(rel);
+        // The relation stays Current: queries answer through it.
+        let found =
+            Spi::get_one::<i64>("SELECT count(*) FROM surf_docs WHERE title ==> 'filler'").unwrap();
+        assert_eq!(found, Some(1), "doc 1's title holds filler");
+    }
+
+    /// §6.3 fixture rows: empty kind-5 is `Current` and answers zero;
+    /// buffer-only `BufferCurrent` is `Current`; buffer-only
+    /// `BufferMalformed` is `Corrupt`.
+    #[pg_test]
+    fn empty_and_buffer_only_shapes() {
+        Spi::run(
+            "CREATE TABLE empty_docs (id int, title text, body text);
+             CREATE INDEX empty_idx ON empty_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let found = Spi::get_one::<i64>("SELECT count(*) FROM empty_docs WHERE title ==> 'needle'")
+            .unwrap();
+        assert_eq!(found, Some(0), "empty kind-5 answers zero");
+        // Buffer-only Current: no immutable segments, a tagged live buffer.
+        Spi::run("INSERT INTO empty_docs VALUES (1, 'needle', 'pad')").unwrap();
+        let found = Spi::get_one::<i64>("SELECT count(*) FROM empty_docs WHERE title ==> 'needle'")
+            .unwrap();
+        assert_eq!(found, Some(1), "buffer-only Current answers");
+        // Buffer-only Malformed: a lone 0x00 byte names no format.
+        let rel = open_rel("empty_idx");
+        unsafe {
+            crate::storage::test_replace_buffer(rel, &[0x00], 1);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM empty_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'Stannum write buffer' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+    }
+
+    /// The insert fence decides from persisted state, the view a restarted
+    /// backend reconstructs — cold (no cache in this backend) and warm (a
+    /// scan already read the relation) both refuse the stale relation
+    /// without writing.
+    #[pg_test]
+    fn insert_after_restart_on_stale_errors_without_writing() {
+        // Cold: no prior read of this index in the backend.
+        overlap_fixture("coldstale");
+        let rel = open_rel("coldstale_idx");
+        unsafe {
+            plant_v1_segments(rel, 1);
+            let (stream, blobs) = (
+                crate::storage::test_buffer_stream(rel),
+                crate::storage::test_segment_blobs(rel),
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO coldstale_docs VALUES (9, 'needle', 'pad');
+                     RAISE EXCEPTION 'the cold fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+            assert_eq!(crate::storage::test_segment_blobs(rel), blobs);
+        }
+        close_rel(rel);
+
+        // Warm: a fenced scan first (populating the reader, buffer, and mix
+        // caches), then the insert.
+        overlap_fixture("warmstale");
+        let rel = open_rel("warmstale_idx");
+        unsafe {
+            plant_v1_segments(rel, 1);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     SELECT count(*) FROM warmstale_docs WHERE title ==> 'needle';
+                     RAISE EXCEPTION 'the scan fence let the query through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' THEN
+                         RAISE EXCEPTION 'wrong scan error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            let (stream, blobs) = (
+                crate::storage::test_buffer_stream(rel),
+                crate::storage::test_segment_blobs(rel),
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO warmstale_docs VALUES (9, 'needle', 'pad');
+                     RAISE EXCEPTION 'the warm fence let the write through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds a pre-STN4 fielded write buffer' OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(crate::storage::test_buffer_stream(rel), stream, "no write");
+            assert_eq!(crate::storage::test_segment_blobs(rel), blobs);
+        }
+        close_rel(rel);
+    }
+
+    /// §6.3 guarded callbacks: VACUUM's two entry points are the rebuild
+    /// error on a StaleFielded relation before any page is dirtied (the
+    /// fence is the first statement of each).
+    #[pg_test(error = "stannum: index holds a pre-STN4 fielded write buffer; REINDEX the index")]
+    fn bulk_delete_on_stale_relation_is_the_rebuild_error() {
+        overlap_fixture("vacstale");
+        let rel = open_rel("vacstale_idx");
+        unsafe {
+            plant_v1_segments(rel, 1);
+            crate::storage::testing::bulk_delete_with(rel, &std::collections::BTreeSet::new());
+        }
+        close_rel(rel);
+    }
+
+    #[pg_test(error = "stannum: index holds a pre-STN4 fielded write buffer; REINDEX the index")]
+    fn vacuum_cleanup_on_stale_relation_is_the_rebuild_error() {
+        overlap_fixture("vacclean");
+        let rel = open_rel("vacclean_idx");
+        unsafe {
+            plant_v1_segments(rel, 1);
+            crate::storage::cleanup(rel);
+        }
+        // Not reached: the fence errors first.
+        close_rel(rel);
+    }
+
     #[pg_test(error = "stannum: field syntax requires a multi-column index")]
     fn single_column_rejects_field_syntax() {
         Spi::run(

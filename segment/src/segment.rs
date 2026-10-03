@@ -888,6 +888,43 @@ impl<'a> Reader<&'a [u8]> {
     }
 }
 
+/// The blob offset where the STNF trailer begins, from the segment header
+/// alone (design §6.3): the classification probes read only this and the
+/// trailer prefix — never the dictionary, extents, or page data that
+/// [`Reader::new`]'s open-time walk touches. Mirrors that walk's header
+/// section; `Err` on a header the stock decoder would reject, including
+/// pre-STN3 magics. `Ok(offset) == source.len()` means no trailer.
+pub fn trailer_offset(source: &dyn crate::source::Source) -> Result<u64> {
+    let total = source.len();
+    let head = source.read(0, total.min(64) as usize)?;
+    let mut reader = crate::reader::Reader::new(&head);
+    let magic = reader.take(4)?;
+    if pre_stn3_magic(magic) {
+        return Err(Error::PreStn3);
+    }
+    if magic != MAGIC {
+        return Err(Error::Corrupt("segment magic"));
+    }
+    let doc_count = reader.varint_u32()?;
+    let _total_length = reader.varint()?;
+    let dictionary_len = u64::from(reader.varint_u32()?);
+    let ordinals_len = u64::from(reader.varint_u32()?);
+    let payload_len = u64::from(reader.varint_u32()?);
+    let pages_len = u64::from(reader.varint_u32()?);
+    let pages_at = reader.position() as u64
+        + dictionary_len
+        + ordinals_len
+        + payload_len
+        + u64::from(doc_count) * (2 + 4 + 1);
+    let pages_end = pages_at
+        .checked_add(pages_len)
+        .ok_or(Error::Corrupt("segment length"))?;
+    if pages_end > total || !pages_len.is_multiple_of(docs::PAGE_ENTRY as u64) {
+        return Err(Error::Corrupt("segment length"));
+    }
+    Ok(pages_end)
+}
+
 impl<S: Source> Reader<S> {
     pub fn new(source: S) -> Result<Self> {
         let total = source.len();
@@ -2399,6 +2436,33 @@ mod tests {
         assert!(
             held_spans > loads / 2 && held_spans < loads,
             "{held_spans} of {loads}"
+        );
+    }
+
+    /// `trailer_offset` mirrors `Reader::new`'s header walk for the §6.3
+    /// classification probes: it must agree with the parsed reader on where
+    /// the trailer starts (and that a stock blob has none), and reject what
+    /// the stock decoder rejects — without touching dictionary or payload.
+    #[test]
+    fn trailer_offset_agrees_with_the_parsed_reader() {
+        // A stock blob: no trailer, offset == length.
+        let mut builder = SegmentBuilder::default();
+        builder.add_document(tid(1, 1), tokens("a b")).unwrap();
+        let bytes = builder.finish();
+        let reader = Segment::parse(&bytes).unwrap();
+        assert_eq!(trailer_offset(&&bytes[..]), Ok(bytes.len() as u64));
+        assert_eq!(trailer_offset(&&bytes[..]), Ok(reader.pages_end()));
+        // A truncated head cannot be probed.
+        assert!(trailer_offset(&&bytes[..3]).is_err());
+        // A bad magic is the reader's own corruption classes.
+        let mut lsg = bytes.clone();
+        lsg[..4].copy_from_slice(b"LSG1");
+        assert_eq!(trailer_offset(&&lsg[..]), Err(Error::PreStn3));
+        let mut unknown = bytes;
+        unknown[..4].copy_from_slice(b"STN4");
+        assert_eq!(
+            trailer_offset(&&unknown[..]),
+            Err(Error::Corrupt("segment magic"))
         );
     }
 
