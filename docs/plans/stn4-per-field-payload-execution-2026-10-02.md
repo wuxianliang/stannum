@@ -251,7 +251,7 @@ rewrite yet except what flush/open must do. SQL surface unchanged.
   - Review focus: design §6.3 predicates and fixture table; parent §8
     kind-first.
 
-- [ ] **A.4.1 `legacy_fielded_key_shape` isolation**
+- [x] **A.4.1 `legacy_fielded_key_shape` isolation** (f5654b5, clippy fix 3815ee3)
   - Goal: the `~{h}~` grammar survives only as an untagged-legacy
     **validator**. It does not encode, does not call `Index::term` on an
     encoded key, and does not participate in lookup, expand, scoring, or
