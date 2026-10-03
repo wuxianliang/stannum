@@ -565,6 +565,52 @@ pub fn fielded_records(mut bytes: &[u8]) -> impl Iterator<Item = Result<FieldedR
 mod tests {
     use super::*;
 
+    /// Design §6.3.1's disjointness proof, as a fixture: a well-formed
+    /// legacy `ForwardRecord` stream never starts with `0x00`, at the head
+    /// or at any record boundary, so no legal legacy buffer can collide
+    /// with [`STN4_BUFFER_TAG`]. The length varint prefixes a body of at
+    /// least four varints (`block`, `offset`, `doc_len`, `term_count`), so
+    /// it is at least 4 as a single byte and has the continuation bit set
+    /// when multi-byte — never zero.
+    #[test]
+    fn well_formed_legacy_stream_never_starts_with_zero() {
+        let docs: Vec<Vec<(&str, u32)>> = vec![
+            vec![],
+            vec![("a", 1)],
+            vec![("~0~foo", 1), ("zzz", 2)],
+            vec![("~0~~~0~~bar", 1)],
+            (0..40)
+                .map(|i| {
+                    (
+                        Box::leak(format!("term{i:03}").into_boxed_str()) as &str,
+                        i + 1,
+                    )
+                })
+                .collect(),
+        ];
+        let mut stream = Vec::new();
+        for tokens in docs {
+            let record = ForwardRecord::from_tokens(Tid::new(0, 1).unwrap(), tokens).unwrap();
+            let before = stream.len();
+            record.encode(&mut stream).unwrap();
+            assert_ne!(
+                stream[before], 0,
+                "every record's length varint is nonzero, so no legacy stream \
+                 can be mistaken for the STN4 tag"
+            );
+        }
+        assert!(!stream.starts_with(&STN4_BUFFER_TAG));
+        // Every boundary holds, not just the head: re-walk the packed stream
+        // and check each record's first byte as the decoder sees it.
+        let mut at = 0;
+        while at < stream.len() {
+            assert_ne!(stream[at], 0);
+            let consumed = ForwardRecord::encoded_len(&stream[at..]).unwrap();
+            ForwardRecord::decode(&stream[at..]).unwrap();
+            at += consumed;
+        }
+    }
+
     #[test]
     fn round_trips_tokens_and_packs_records() {
         let tid = Tid::new(12, 3).unwrap();

@@ -39,6 +39,7 @@
 //! through [`wal`] when the custom resource manager is registered; hot
 //! standbys serve segmented reads only then (see [`index_reads_allowed`]).
 
+pub mod buffer_label;
 pub mod layout;
 pub mod verify;
 pub mod wal;
@@ -722,6 +723,28 @@ pub(crate) unsafe fn test_replace_buffer(index: pg_sys::Relation, data: &[u8], d
         replace_buffer(index, &mut meta.buffer, data, docs);
         write_meta(index, &guard, &meta);
         drop(guard);
+    }
+}
+
+/// Test-only: the write buffer's §6.3.1 label, derived from persisted
+/// state alone — meta counts and the KIND_BUFFER bytes — which is the view
+/// a restarted backend, recovery, or WAL replay reconstructs. No in-memory
+/// map or cached builder participates.
+#[cfg(feature = "pg_test")]
+pub(crate) unsafe fn test_buffer_label(index: pg_sys::Relation) -> buffer_label::BufferLabel {
+    unsafe {
+        let (_, meta) = read_meta(index, false);
+        let stream = if meta.buffer.bytes == 0 {
+            Vec::new()
+        } else {
+            read_buffer_stream(index, &meta.buffer)
+        };
+        buffer_label::classify_buffer(
+            meta.fields.len(),
+            meta.buffer.docs,
+            meta.buffer.bytes,
+            &stream,
+        )
     }
 }
 
@@ -3602,6 +3625,26 @@ unsafe fn folds(index: pg_sys::Relation, buffer: &BufferState, bytes: usize) -> 
             || buffer.docs >= WRITE_BUFFER_DOCS.get().max(1) as u32)
 }
 
+/// Whether any immutable segment carries an STNF v2 trailer (design §6.3
+/// `G_v2`), consulted only on the stale-buffer error path. A.4's
+/// `open_index` classification owns full `M` detection; this probe answers
+/// only StaleFielded-vs-MixedFielded for an already-stale buffer.
+///
+/// # Safety
+/// `index` is live; `meta` is its current directory.
+unsafe fn any_v2_segment(index: pg_sys::Relation, meta: &Meta) -> bool {
+    meta.segments.iter().any(|entry| {
+        let label = generation_label(entry.generation);
+        let bytes = unsafe { read_run(index, entry.run, &label) };
+        matches!(
+            Segment::parse(&bytes)
+                .ok()
+                .and_then(|segment| segment.trailer().map(|trailer| trailer.version)),
+            Some(2)
+        )
+    })
+}
+
 /// # Safety
 /// `index` is live and locked for insertion. The pointers reference the first
 /// indexed datum/null flag and a valid heap TID for the duration of this call.
@@ -3665,33 +3708,53 @@ pub unsafe fn insert(
             // bytes encoded for a different index identity or pipeline.
         };
         // Multi-column write fence and tag birth (design §6.3.1). The
-        // persisted tag — not any in-memory shape — is the generation: it is
-        // read before any conversion into builders, an untagged well-formed
-        // stream (including zero-term) is stale and errors before any page is
-        // dirtied, and the first insert into an empty buffer writes the tag
-        // and the record as one WAL-logged append.
+        // persisted tag — not any in-memory shape — is the generation: the
+        // write path is read from persisted state before any conversion into
+        // builders, an untagged well-formed stream (including zero-term) is
+        // stale and errors before any page is dirtied, and the first insert
+        // into an empty buffer writes the tag and the record as one
+        // WAL-logged append. The tagged arm is a prefix check at the stock
+        // cost profile; fold owns the grammar walk on decode. A
+        // fold-triggering insert re-births the tag in `fold`'s replacement
+        // stream, below — this fence decides on the pre-fold buffer only.
         let bytes = if meta.fields.len() >= 2 {
-            if (meta.buffer.docs == 0) != (meta.buffer.bytes == 0) {
-                corrupt("Stannum write buffer: document and byte counts disagree".to_owned());
-            }
-            if meta.buffer.bytes == 0 {
-                let mut tagged = Vec::with_capacity(bytes.len() + 2);
-                tagged.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
-                tagged.extend_from_slice(&bytes);
-                tagged
+            let stream = if meta.buffer.bytes == 0 {
+                Vec::new()
             } else {
-                let stream = read_buffer_stream(index, &meta.buffer);
-                if !stream.starts_with(&segment::forward::STN4_BUFFER_TAG) {
-                    // Arm 6.2: the untagged stream must be a well-formed
-                    // legacy record stream to be stale; garbage is corrupt.
-                    for record in segment::forward::records(&stream) {
-                        codec_in(record, "write buffer");
+                read_buffer_stream(index, &meta.buffer)
+            };
+            match buffer_label::write_path(
+                meta.fields.len(),
+                meta.buffer.docs,
+                meta.buffer.bytes,
+                &stream,
+            ) {
+                buffer_label::BufferWritePath::TagBirth => {
+                    let mut tagged = Vec::with_capacity(bytes.len() + 2);
+                    tagged.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
+                    tagged.extend_from_slice(&bytes);
+                    tagged
+                }
+                buffer_label::BufferWritePath::Append => bytes,
+                buffer_label::BufferWritePath::Stale => {
+                    // The relation class (design §6.3): a ValidV2 segment
+                    // beside the stale buffer is MixedFielded, otherwise
+                    // StaleFielded. Both are rebuild errors before any
+                    // write; neither dirties a page.
+                    if any_v2_segment(index, &meta) {
+                        pgrx::error!(
+                            "stannum: index mixes pre-STN4 and STN4 fielded \
+                             write buffers; REINDEX the index"
+                        );
                     }
                     pgrx::error!(
-                        "stannum: index holds a pre-STN4 fielded write buffer; REINDEX the index"
+                        "stannum: index holds a pre-STN4 fielded write buffer; \
+                         REINDEX the index"
                     );
                 }
-                bytes
+                buffer_label::BufferWritePath::Malformed(reason) => {
+                    corrupt(format!("Stannum write buffer: {reason}"))
+                }
             }
         } else {
             bytes

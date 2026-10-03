@@ -823,6 +823,10 @@
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in 69577a09af81322bcf2a036558e8b90c19346cb3."
     },
+    "postgres/src/storage/buffer_label.rs": {
+      "owner": "ben",
+      "evidence": "STN4 format delta: §6.3.1 durable write-buffer generation classifier (tag decoding order, write-path decision, legacy fielded-key shape validator). No upstream counterpart."
+    },
     "postgres/src/storage/layout.rs": {
       "owner": "ben",
       "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in b740f5dcb3eda81badd396d75a9ba9debd307ad7."

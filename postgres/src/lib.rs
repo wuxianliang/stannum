@@ -566,6 +566,384 @@ mod tests {
         Spi::run("INSERT INTO legacy_docs VALUES (2, 'needle', 'pad')").unwrap();
     }
 
+    /// A 4.3–4.6-style untagged buffer stream: stock `ForwardRecord`s whose
+    /// term keys are legacy fielded keys (`~{h}~token`), exactly as the
+    /// fielded-terms writers of those versions left them.
+    fn legacy_fielded_stream(keys: &[(&str, u32)]) -> Vec<u8> {
+        let record = segment::forward::ForwardRecord::from_tokens(
+            segment::Tid::new(0, 1).unwrap(),
+            keys.iter().copied(),
+        )
+        .unwrap();
+        let mut stream = Vec::new();
+        record.encode(&mut stream).unwrap();
+        assert!(!stream.starts_with(&segment::forward::STN4_BUFFER_TAG));
+        stream
+    }
+
+    /// A tagged STN4 buffer stream holding one record with the given groups
+    /// (each group: field terms). `&[]` is the zero-term record.
+    fn tagged_fielded_stream(groups: &[Vec<&str>]) -> Vec<u8> {
+        let record = segment::forward::FieldedRecord {
+            tid: segment::Tid::new(0, 1).unwrap(),
+            groups: groups
+                .iter()
+                .enumerate()
+                .map(|(field, terms)| segment::forward::FieldedGroup {
+                    field: field as u8,
+                    field_length: terms.len() as u32,
+                    terms: terms
+                        .iter()
+                        .map(|&term| segment::forward::FieldedTerm {
+                            term: term.to_owned(),
+                            positions: vec![1],
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&segment::forward::STN4_BUFFER_TAG);
+        record.encode(&mut stream).unwrap();
+        stream
+    }
+
+    /// Design §6.3.1: the persisted tag — not the token spelling — is the
+    /// generation. A tagged buffer holding surface tokens shaped like
+    /// legacy fielded keys is `BufferCurrent`, stays Current after reopen,
+    /// and the live writer produces the same class for the same tokens.
+    #[pg_test]
+    fn tagged_buffer_with_legacy_shaped_surface_tokens_is_current() {
+        Spi::run(
+            "CREATE TABLE tag_shape_docs (id int, title text, body text);
+             CREATE INDEX tag_shape_idx ON tag_shape_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let rel = open_rel("tag_shape_idx");
+        unsafe {
+            let stream = tagged_fielded_stream(&[vec!["~0~foo", "~1~bar"]]);
+            crate::storage::test_replace_buffer(rel, &stream, 1);
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current,
+                "the tag decides, not the ~h~ spelling"
+            );
+        }
+        close_rel(rel);
+        // Reopen: the label comes from persisted bytes alone, the view a
+        // restarted backend or WAL replay reconstructs.
+        let rel = open_rel("tag_shape_idx");
+        unsafe {
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current,
+                "the reopened relation emits the live writer's label"
+            );
+        }
+        close_rel(rel);
+        // The live writer agrees: a whitespace tokenizer keeps `~0~foo` a
+        // single surface token, and the born-tagged buffer is Current.
+        Spi::run(
+            "CREATE TABLE tag_live_docs (id int, title text, body text);
+             CREATE INDEX tag_live_idx ON tag_live_docs
+               USING stannum(title, body) WITH (tokenizer = 'whitespace');
+             INSERT INTO tag_live_docs VALUES (1, '~0~foo', 'x');",
+        )
+        .unwrap();
+        let rel = open_rel("tag_live_idx");
+        unsafe {
+            let stream = crate::storage::test_buffer_stream(rel);
+            assert!(stream.starts_with(&segment::forward::STN4_BUFFER_TAG));
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current
+            );
+        }
+        close_rel(rel);
+    }
+
+    /// Design §6.3.1 arm 6.2: an untagged well-formed fielded-terms buffer
+    /// is `BufferStale`; with no v2 segments the relation is StaleFielded
+    /// and INSERT is the rebuild error before any write.
+    #[pg_test]
+    fn untagged_legacy_buffer_is_stale_and_blocks_insert_without_v2_segments() {
+        Spi::run(
+            "CREATE TABLE stale_docs (id int, title text, body text);
+             CREATE INDEX stale_idx ON stale_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let rel = open_rel("stale_idx");
+        unsafe {
+            let stream = legacy_fielded_stream(&[("~0~needle", 1), ("~1~pad", 2)]);
+            crate::storage::test_replace_buffer(rel, &stream, 1);
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Stale,
+                "the missing tag is the generation"
+            );
+            let before = crate::storage::test_buffer_stream(rel);
+            // A PL/pgSQL subtransaction catches the fence error (pgrx
+            // `Spi::run` lets extension errors escape), so the test can
+            // pin the error class. The byte-equality check below is
+            // structural only — rollback restores the pages in both
+            // worlds; the fence-order/crash proof is A.4/E.1's.
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO stale_docs VALUES (2, 'needle', 'pad');
+                     RAISE EXCEPTION 'the stale fence let the insert through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'pre-STN4 fielded write buffer'
+                        OR SQLERRM ~ 'mixes' THEN
+                         RAISE EXCEPTION 'wrong fence error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(
+                crate::storage::test_buffer_stream(rel),
+                before,
+                "no write: the stream is byte-identical after the refused insert"
+            );
+        }
+        close_rel(rel);
+    }
+
+    /// Design §6.3: ValidV2 segments beside a `BufferStale` buffer make the
+    /// relation MixedFielded — and the STNF version never selects the buffer
+    /// decoder: the untagged stream still classifies Stale, not Current.
+    #[pg_test]
+    fn v2_segments_plus_legacy_buffer_is_mixedfielded_and_buffer_stays_stale() {
+        overlap_fixture("mixed");
+        // overlap_fixture flushed one ValidV2 segment at CREATE INDEX.
+        let rel = open_rel("mixed_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert_eq!(blobs.len(), 1);
+            assert_eq!(
+                segment::segment::Segment::parse(&blobs[0])
+                    .unwrap()
+                    .trailer()
+                    .unwrap()
+                    .version,
+                2,
+                "the fixture's segment is ValidV2"
+            );
+            let stream = legacy_fielded_stream(&[("~0~needle", 1), ("~1~pad", 2)]);
+            crate::storage::test_replace_buffer(rel, &stream, 1);
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Stale,
+                "the STNF version of the segments does not reclassify the buffer"
+            );
+            let before = crate::storage::test_buffer_stream(rel);
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO mixed_docs VALUES (4, 'needle', 'pad');
+                     RAISE EXCEPTION 'the mixed fence let the insert through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'mixes pre-STN4 and STN4' THEN
+                         RAISE EXCEPTION 'wrong fence error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(
+                crate::storage::test_buffer_stream(rel),
+                before,
+                "no write on the mixed class either (structural, as above)"
+            );
+        }
+        close_rel(rel);
+    }
+
+    /// Design §6.3.1: a tagged zero-term buffer is generation-neutral
+    /// `BufferNoTerms`; INSERT appends after the tag (never a second tag),
+    /// flush folds it into a ValidV2 segment, and the reopened relation is
+    /// Current.
+    #[pg_test]
+    fn tagged_zero_term_inserts_appends_and_survives_flush_and_reopen() {
+        Spi::run(
+            "CREATE TABLE noterms_docs (id int, title text, body text);
+             CREATE INDEX noterms_idx ON noterms_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        // A real zero-term document: every field tokenizes to nothing, so
+        // the first insert gives the buffer its tag and a zero-group record
+        // — the generation-neutral `BufferNoTerms`.
+        Spi::run("INSERT INTO noterms_docs VALUES (1, '', '')").unwrap();
+        let rel = open_rel("noterms_idx");
+        unsafe {
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::NoTerms,
+                "a tagged zero-term buffer is generation-neutral NoTerms"
+            );
+        }
+        close_rel(rel);
+        // The first term-bearing insert appends after the tag: no fence,
+        // no second tag, one more record.
+        Spi::run("INSERT INTO noterms_docs VALUES (2, 'needle', 'pad')").unwrap();
+        let rel = open_rel("noterms_idx");
+        unsafe {
+            let stream = crate::storage::test_buffer_stream(rel);
+            assert!(stream.starts_with(&segment::forward::STN4_BUFFER_TAG));
+            let body = &stream[segment::forward::STN4_BUFFER_TAG.len()..];
+            let records: Vec<_> = segment::forward::fielded_records(body)
+                .map(|record| record.unwrap())
+                .collect();
+            assert_eq!(
+                records.len(),
+                2,
+                "the zero-term record and the appended term-bearing one"
+            );
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current
+            );
+        }
+        close_rel(rel);
+        // Flush to a ValidV2 segment (the GUC floor is 1kB), then reopen.
+        Spi::run(
+            "SET LOCAL stannum.write_buffer_bytes = 1024;
+             INSERT INTO noterms_docs VALUES (2, 'zzz', repeat('filler ', 2000));",
+        )
+        .unwrap();
+        let rel = open_rel("noterms_idx");
+        unsafe {
+            let blobs = crate::storage::test_segment_blobs(rel);
+            assert!(!blobs.is_empty(), "the fold flushed a segment");
+            assert!(blobs.iter().all(|blob| {
+                segment::verify::verify_segment(blob).is_clean()
+                    && segment::segment::Segment::parse(blob)
+                        .unwrap()
+                        .trailer()
+                        .unwrap()
+                        .version
+                        == 2
+            }));
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Current,
+                "after flush and reopen the relation stays Current"
+            );
+        }
+        close_rel(rel);
+    }
+
+    /// Design §6.3.1 arms 1–3 and the unknown-version arm: count mismatches
+    /// and `0x00` + an unknown format byte are corruption, not legacy.
+    #[pg_test]
+    fn malformed_buffer_counts_and_unknown_tag_version_error_on_insert() {
+        Spi::run(
+            "CREATE TABLE malformed_docs (id int, title text, body text);
+             CREATE INDEX malformed_idx ON malformed_docs
+               USING stannum(title, body);",
+        )
+        .unwrap();
+        let rel = open_rel("malformed_idx");
+        unsafe {
+            let stream = legacy_fielded_stream(&[("~0~needle", 1)]);
+            // bytes > 0 with docs == 0.
+            crate::storage::test_replace_buffer(rel, &stream, 0);
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Malformed(
+                    "write buffer holds bytes but no documents"
+                )
+            );
+            // A PL/pgSQL subtransaction catches the corrupt error so the
+            // test can pin that it is corruption, not the stale fence.
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO malformed_docs VALUES (1, 'a', 'b');
+                     RAISE EXCEPTION 'the count mismatch let the insert through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'holds bytes but no documents' THEN
+                         RAISE EXCEPTION 'wrong error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+        let rel = open_rel("malformed_idx");
+        unsafe {
+            // `0x00` + an unknown STN4 format byte is not a legacy stream.
+            let mut unknown = vec![0x00, 0x02];
+            unknown.extend_from_slice(&legacy_fielded_stream(&[("~0~needle", 1)]));
+            crate::storage::test_replace_buffer(rel, &unknown, 1);
+            assert_eq!(
+                crate::storage::test_buffer_label(rel),
+                crate::storage::buffer_label::BufferLabel::Malformed(
+                    "write buffer starts with an unknown STN4 format"
+                )
+            );
+            Spi::run(
+                "DO $$
+                 BEGIN
+                     INSERT INTO malformed_docs VALUES (2, 'a', 'b');
+                     RAISE EXCEPTION 'the unknown format let the insert through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'unknown STN4 format' THEN
+                         RAISE EXCEPTION 'wrong error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+        }
+        close_rel(rel);
+    }
+
+    /// The fence's tagged arm is a prefix check, so a tagged stream whose
+    /// record body is torn appends without a fence error and surfaces at
+    /// `fold`'s decode — the named backstop — as corruption. The buffer
+    /// and the segment directory are unchanged after the refusal (the
+    /// structural caveat of the other DO-block fixtures applies here too).
+    #[pg_test]
+    fn tagged_body_corruption_surfaces_at_fold_not_the_fence() {
+        Spi::run(
+            "CREATE TABLE torn_docs (id int, title text, body text);
+             CREATE INDEX torn_idx ON torn_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let rel = open_rel("torn_idx");
+        unsafe {
+            let mut tagged = tagged_fielded_stream(&[vec!["~0~foo"]]);
+            tagged.truncate(tagged.len() - 3);
+            crate::storage::test_replace_buffer(rel, &tagged, 1);
+            let before = crate::storage::test_buffer_stream(rel);
+            let segments_before = crate::storage::test_segment_blobs(rel).len();
+            Spi::run(
+                "SET LOCAL stannum.write_buffer_bytes = 1024;
+                 DO $$
+                 BEGIN
+                     INSERT INTO torn_docs VALUES (1, 'zzz', repeat('filler ', 2000));
+                     RAISE EXCEPTION 'the torn body let the fold through';
+                 EXCEPTION WHEN OTHERS THEN
+                     IF SQLERRM !~ 'Stannum write buffer'
+                        OR SQLERRM ~ 'pre-STN4 fielded write buffer' THEN
+                         RAISE EXCEPTION 'wrong error: %', SQLERRM;
+                     END IF;
+                 END $$;",
+            )
+            .unwrap();
+            assert_eq!(
+                crate::storage::test_buffer_stream(rel),
+                before,
+                "fold refused before rewriting the buffer"
+            );
+            assert_eq!(
+                crate::storage::test_segment_blobs(rel).len(),
+                segments_before,
+                "no segment was published from a torn body"
+            );
+        }
+        close_rel(rel);
+    }
+
     #[pg_test(error = "stannum: field syntax requires a multi-column index")]
     fn single_column_rejects_field_syntax() {
         Spi::run(
