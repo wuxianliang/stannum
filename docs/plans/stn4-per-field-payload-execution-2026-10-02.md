@@ -449,6 +449,19 @@ D.\* after C.2. E.1 may already have started after A.4.
     - `python3 -m unittest discover -s benchmarks -p 'test_*fielded_poc.py'`
       (harness unit tests) green.
   - Review focus: design §5, §8 C.2; 4.6 JSON as the comparison artifact.
+  - **2026-10-03 — STOPPED RED, escalated to the user. Evidence:
+    `docs/benchmarks/stn4-per-field-poc.json`.** MANDATORY dictionary/build gate
+    **missed on English build only**: dict 1.0006× on both corpora (hypothesis
+    confirmed; `stnf_df_len == 0`, `trailer_count == 1` on multi-column), build
+    1.8689× vs the 1.8× ceiling (1.1451s / 0.6127s, one `CREATE INDEX` wall
+    clock in the inherited 4.6 protocol). Chinese build 1.2719× passes.
+    Advisory p50 misses on **both** corpora (2.88× / 2.38× vs 1.3×) with
+    `waiver: null`. Top-level decision `escalate`. Per design §9 a mandatory
+    miss stops the line; Phase D.* does not start and C.4 stays gated. The
+    JSON also records a semantic divergence found by this run: Chinese
+    `(索引 OR 查询) AND 搜索` returns 0 rows on `stn4_multi` where
+    `stn3_single` and `v040` return 2 (the English equivalent agrees at 10
+    rows), so that query's Chinese latency ratio is not evidence.
 
 - [ ] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
   exports and fixtures, **AND the STNF-v1 df-sidecar query reader +

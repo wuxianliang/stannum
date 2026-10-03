@@ -1,0 +1,25 @@
+# STN4 C.2 Chinese latency GATE — 12 unscoped tinql queries.
+# Same text on stn4_multi, stn3_single, and v040. No title:() field syntax.
+# Every Chinese index uses tokenizer='jieba'. Terms are locked vocab entries.
+
+# common
+我们
+历史
+
+# medium
+望远镜
+计算机 AND 科学
+
+# rare
+彗星
+星云
+
+# AND
+历史 AND 望远镜
+战争 AND 历史
+(索引 OR 查询) AND 搜索
+
+# OR
+望远镜 OR 天文学
+类星体 OR 星云
+脉冲星 OR 数据库

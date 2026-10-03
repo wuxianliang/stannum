@@ -89,20 +89,39 @@ impl Breakdown {
         for block in 0..dictionary.index().blocks() {
             for (_, entry, entry_len) in dictionary.block_sizes(block)? {
                 let term = segment.resolve(entry)?;
-                let ordinals = term.ordinals()?;
-                let payload = term.payload()?;
                 let mut bytes = Bytes {
                     terms: 1,
                     dictionary: entry_len,
-                    ordinals_head: ordinals.head_len(),
-                    skips: payload.skip_table_len(),
-                    payload_data: payload.data_len(),
-                    bitmap_chunks: ordinals.bitmap_chunks(),
                     ..Bytes::default()
                 };
-                bytes.ordinals_body = entry.ordinals.len as usize - bytes.ordinals_head;
-                bytes.payload_header =
-                    entry.payload.len as usize - bytes.skips - bytes.payload_data;
+                if let Some(trailer) = segment.trailer() {
+                    // STN4: FCH1 directories live in the posting extents.
+                    // Stock STN3 ordinals() rejects the directory as corrupt.
+                    // Channel-directory bytes are 5+5n per extent × two extents;
+                    // they go in ordinals_head so the C.2 harness can label them
+                    // without charging them to dict_bytes.
+                    let children = term.channels(trailer.field_count)?;
+                    let n = children.len();
+                    bytes.ordinals_head = 2 * (5 + 5 * n);
+                    for (_, child) in &children {
+                        let ordinals = child.ordinals()?;
+                        let payload = child.payload()?;
+                        bytes.bitmap_chunks += ordinals.bitmap_chunks();
+                        bytes.ordinals_body += ordinals.head_len();
+                        bytes.skips += payload.skip_table_len();
+                        bytes.payload_data += payload.data_len();
+                    }
+                } else {
+                    let ordinals = term.ordinals()?;
+                    let payload = term.payload()?;
+                    bytes.ordinals_head = ordinals.head_len();
+                    bytes.bitmap_chunks = ordinals.bitmap_chunks();
+                    bytes.skips = payload.skip_table_len();
+                    bytes.payload_data = payload.data_len();
+                    bytes.ordinals_body = entry.ordinals.len as usize - bytes.ordinals_head;
+                    bytes.payload_header =
+                        entry.payload.len as usize - bytes.skips - bytes.payload_data;
+                }
                 self.by_df.entry(bucket(entry.df)).or_default().add(&bytes);
             }
         }

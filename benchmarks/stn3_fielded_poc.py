@@ -61,7 +61,11 @@ INDEX_SQL = {
 }
 STNF_MAGIC = b"STNF"
 STNF_VERSION = 1
+STNF_VERSION_V1 = 1
+STNF_VERSION_V2 = 2
 STNF_PREFIX_LEN = 13
+STNF_PREFIX_LEN_V1 = 13
+STNF_PREFIX_LEN_V2 = 9
 BREAKDOWN_DICTIONARY = re.compile(r"^\s+dictionary\s+(\d+)\b", re.M)
 
 VOCAB = tuple("""
@@ -335,18 +339,35 @@ def p50_p99(samples):
 
 
 def stnf_sections(blob):
-    """STNF suffix (norms_len, df_len). Both 0 when the blob has no trailer."""
+    """STNF suffix (norms_len, df_len). Both 0 when the blob has no trailer.
+
+    v1 (4.6 / fielded-terms): magic STNF, version 1, norms_len u32le, df_len
+    u32le, then norms and df. Prefix is 13 bytes. claimed = 13 + norms + df.
+
+    v2 (STN4): magic STNF, version 2, norms_len u32le, then norms. No df_len
+    field. Prefix is 9 bytes. stnf_df_len is 0. claimed = 9 + norms_len.
+
+    The matching prefix must sit at blob EOF. A single-column blob has no
+    trailer and returns (0, 0).
+    """
     found = None
     start = 0
     while True:
         at = blob.find(STNF_MAGIC, start)
         if at < 0:
             break
-        if at + STNF_PREFIX_LEN <= len(blob) and blob[at + 4] == STNF_VERSION:
-            norms_len, df_len = struct.unpack_from("<II", blob, at + 5)
-            claimed = STNF_PREFIX_LEN + norms_len + df_len
-            if claimed >= STNF_PREFIX_LEN and at + claimed == len(blob):
-                found = (norms_len, df_len)
+        if at + 5 <= len(blob):
+            version = blob[at + 4]
+            if version == STNF_VERSION_V1 and at + STNF_PREFIX_LEN_V1 <= len(blob):
+                norms_len, df_len = struct.unpack_from("<II", blob, at + 5)
+                claimed = STNF_PREFIX_LEN_V1 + norms_len + df_len
+                if claimed >= STNF_PREFIX_LEN_V1 and at + claimed == len(blob):
+                    found = (norms_len, df_len)
+            elif version == STNF_VERSION_V2 and at + STNF_PREFIX_LEN_V2 <= len(blob):
+                (norms_len,) = struct.unpack_from("<I", blob, at + 5)
+                claimed = STNF_PREFIX_LEN_V2 + norms_len
+                if claimed >= STNF_PREFIX_LEN_V2 and at + claimed == len(blob):
+                    found = (norms_len, 0)
         start = at + 1
     return found if found is not None else (0, 0)
 
@@ -397,8 +418,14 @@ def run_breakdown(blobs, repo=ROOT):
         *[str(path) for path in blobs],
     ]
     result = subprocess.run(
-        cmd, cwd=repo, check=True, text=True, capture_output=True
+        cmd, cwd=repo, check=False, text=True, capture_output=True
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "breakdown failed:\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
     return parse_breakdown(result.stdout), result.stdout
 
 
