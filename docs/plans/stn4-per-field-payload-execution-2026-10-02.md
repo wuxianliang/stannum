@@ -391,7 +391,9 @@ the same relation names) **and** B.2 (bound witness). C.2 is the
 representation gate: **D.\* does not start on a red C.2.** C.3 may overlap
 D.\* after C.2. E.1 may already have started after A.4.
 
-- [ ] **C.1 Semantic smoke — GATE + contract-suite re-run**
+- [x] **C.1 Semantic smoke — GATE + contract-suite re-run** (547f080) — **GREEN**:
+  all five §5.2 cases PASS bit-exact through real SQL on STN4 multi-column
+  indexes; census 5 FAIL / 2 GAP / 32 PASS (the 5 = Phase D phrase/span).
   - Goal: parent §5.2 cases 1–5 through real SQL on multi-column **STN4**
     indexes match the 0.4.0 recordings. Restore the 4.5 multi-column greens.
   - Scope: no formula edits in `postgres/src/fields/score.rs`. Live SQL via
