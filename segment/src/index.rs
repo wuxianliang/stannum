@@ -65,11 +65,13 @@ pub trait Index {
     /// Yields one `(decoded text, term)` at a time. Applies interrupt checks
     /// every [`crate::INTERRUPT_INTERVAL`] dictionary entries, like
     /// [`Index::expand`]. Does not apply `max_expansion`, does not open
-    /// `channels()`, and does not collect the window.
+    /// `channels()`, and does not collect the window. The filter is owned by
+    /// the iterator so the returned [`ScanWindow`] names only the index
+    /// lifetime.
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> Result<ScanWindow<'a>>;
     /// Every document in the index, in TID order.
     fn documents(&self) -> Result<DocCursor<'_>>;
@@ -88,14 +90,14 @@ pub trait Index {
     }
 }
 
-struct ReaderScanWindow<'a, 'f, S: Source> {
+struct ReaderScanWindow<'a, S: Source> {
     reader: &'a Reader<S>,
     inner: Box<dyn Iterator<Item = Result<(String, TermEntry)>> + 'a>,
-    filter: &'f dyn Fn(&str) -> bool,
+    filter: Box<dyn Fn(&str) -> bool>,
     scanned: usize,
 }
 
-impl<'a, 'f, S: Source> Iterator for ReaderScanWindow<'a, 'f, S> {
+impl<'a, S: Source> Iterator for ReaderScanWindow<'a, S> {
     type Item = Result<(String, Term<'a>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -135,15 +137,15 @@ fn window_bounds(sorted: &[String], window: Window<'_>) -> (usize, usize) {
     }
 }
 
-struct MutableScanWindow<'a, 'f> {
+struct MutableScanWindow<'a> {
     index: &'a MutableIndex,
-    filter: &'f dyn Fn(&str) -> bool,
+    filter: Box<dyn Fn(&str) -> bool>,
     end: usize,
     pos: usize,
     scanned: usize,
 }
 
-impl<'a, 'f> Iterator for MutableScanWindow<'a, 'f> {
+impl<'a> Iterator for MutableScanWindow<'a> {
     type Item = Result<(String, Term<'a>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -240,7 +242,7 @@ impl<S: Source> Index for Reader<S> {
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> Result<ScanWindow<'a>> {
         let dictionary = self.dictionary()?;
         let inner: Box<dyn Iterator<Item = Result<(String, TermEntry)>> + 'a> = match window {
@@ -289,7 +291,7 @@ impl<I: Index + ?Sized> Index for &I {
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> Result<ScanWindow<'a>> {
         (**self).scan_window(window, filter)
     }
@@ -338,7 +340,7 @@ impl<I: Index + ?Sized> Index for Box<I> {
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> Result<ScanWindow<'a>> {
         (**self).scan_window(window, filter)
     }
@@ -387,7 +389,7 @@ impl<I: Index + ?Sized> Index for std::rc::Rc<I> {
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> Result<ScanWindow<'a>> {
         (**self).scan_window(window, filter)
     }
@@ -1253,7 +1255,7 @@ impl Index for MutableIndex {
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> Result<ScanWindow<'a>> {
         let (start, end) = {
             let mut sorted = self.sorted.borrow_mut();
@@ -1376,7 +1378,7 @@ mod tests {
             assert_eq!(x, y);
             let scan = |index: &dyn Index| {
                 index
-                    .scan_window(window, &|_| true)
+                    .scan_window(window, Box::new(|_| true))
                     .unwrap()
                     .map(|item| item.unwrap().0)
                     .collect::<Vec<_>>()
@@ -1613,7 +1615,7 @@ mod tests {
         add_fielded(&mutable, 1, &["beer wine", "beer"]).unwrap();
         add_fielded(&mutable, 2, &["cider", "wine"]).unwrap();
         let names: Vec<String> = mutable
-            .scan_window(Window::All, &|_| true)
+            .scan_window(Window::All, Box::new(|_| true))
             .unwrap()
             .map(|item| item.unwrap().0)
             .collect();
@@ -1623,7 +1625,7 @@ mod tests {
             "fielded keys are surface tokens"
         );
         let prefix: Vec<String> = mutable
-            .scan_window(Window::Prefix("w"), &|_| true)
+            .scan_window(Window::Prefix("w"), Box::new(|_| true))
             .unwrap()
             .map(|item| item.unwrap().0)
             .collect();
@@ -1631,7 +1633,7 @@ mod tests {
         let bytes = mutable.flush().unwrap();
         let segment = Reader::parse(&bytes).unwrap();
         let from_reader: Vec<String> = segment
-            .scan_window(Window::All, &|_| true)
+            .scan_window(Window::All, Box::new(|_| true))
             .unwrap()
             .map(|item| item.unwrap().0)
             .collect();

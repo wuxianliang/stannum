@@ -5,8 +5,9 @@
 
 use crate::bm25::Bm25Overrides;
 use crate::fields::{
-    Front, Intersect, LogicalPostingCursor, LogicalTerm, Lookup, all_fields_mask, buckets_from_tfs,
-    fused_score_from_buckets, lookup, next_atleast, next_conjunction, next_union,
+    Front, Intersect, LogicalPostingCursor, LogicalTerm, Lookup, SurfaceWindow, all_fields_mask,
+    buckets_from_tfs, expand, fields_in_mask, fused_score_from_buckets, lookup, next_atleast,
+    next_conjunction, next_union,
 };
 use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
 use crate::score::{
@@ -21,7 +22,10 @@ use segment::Tid;
 use segment::index::Index;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
-use tinql::runtime::{Query, parse_tinql_to_query};
+use tinql::runtime::{
+    CompiledRegex, FuzzyMatcher, Query, RangeBound, SpanExpr, SpanPositionFilter, SpanTermSlot,
+    parse_tinql_to_query,
+};
 use tokenizer::CompiledTokenizerPipeline;
 
 type SearchRow = (pg_sys::ItemPointerData, f32, Option<String>);
@@ -164,6 +168,33 @@ enum FieldedNode {
     },
     Not(Box<FieldedNode>),
     All,
+    /// Positional filter over `inner` membership. `slots[i]` are interned keys
+    /// for span term slot `i` (an expansion becomes several keys).
+    Span {
+        inner: Box<FieldedNode>,
+        slots: Vec<Vec<usize>>,
+        kind: Box<FieldedSpan>,
+        mask: u16,
+    },
+}
+
+#[derive(Clone)]
+enum FieldedSpan {
+    Fast {
+        query: boldi_vigna::SpanQuery,
+        filter: Option<SpanPositionFilter>,
+    },
+    Expr(SpanExpr),
+}
+
+enum FieldedExpansion<'a> {
+    Regex(&'a CompiledRegex),
+    Range(&'a RangeBound, &'a RangeBound),
+    Fuzzy {
+        term: &'a str,
+        prefix: u32,
+        distance: u32,
+    },
 }
 
 struct WalkNode<'a> {
@@ -192,6 +223,15 @@ enum WalkKind<'a> {
         doc_count: u32,
         dead: &'a segment::dead::DeadDocs,
     },
+    Span {
+        inner: Box<WalkNode<'a>>,
+        slots: Vec<Vec<Option<LogicalPostingCursor<'a>>>>,
+        kind: FieldedSpan,
+        solver: Option<boldi_vigna::SpanSolver>,
+        mask: u16,
+        field_count: u8,
+        norms: Option<&'a crate::storage::FieldNorms>,
+    },
 }
 
 fn open_walk<'a>(
@@ -199,6 +239,8 @@ fn open_walk<'a>(
     logicals: &'a [Option<LogicalTerm<'a>>],
     dead: &'a segment::dead::DeadDocs,
     doc_count: u32,
+    field_count: u8,
+    norms: Option<&'a crate::storage::FieldNorms>,
 ) -> WalkNode<'a> {
     unsafe { pg_sys::check_stack_depth() };
     match node {
@@ -229,7 +271,7 @@ fn open_walk<'a>(
             kind: WalkKind::And(
                 children
                     .iter()
-                    .map(|child| open_walk(child, logicals, dead, doc_count))
+                    .map(|child| open_walk(child, logicals, dead, doc_count, field_count, norms))
                     .collect(),
             ),
         },
@@ -245,7 +287,7 @@ fn open_walk<'a>(
                 min: *min,
                 children: children
                     .iter()
-                    .map(|child| open_walk(child, logicals, dead, doc_count))
+                    .map(|child| open_walk(child, logicals, dead, doc_count, field_count, norms))
                     .collect(),
             },
         },
@@ -253,7 +295,14 @@ fn open_walk<'a>(
             current: None,
             init: false,
             kind: WalkKind::Not {
-                inner: Box::new(open_walk(inner, logicals, dead, doc_count)),
+                inner: Box::new(open_walk(
+                    inner,
+                    logicals,
+                    dead,
+                    doc_count,
+                    field_count,
+                    norms,
+                )),
                 doc_count,
                 dead,
             },
@@ -263,6 +312,57 @@ fn open_walk<'a>(
             init: false,
             kind: WalkKind::All { doc_count, dead },
         },
+        FieldedNode::Span {
+            inner,
+            slots,
+            kind,
+            mask,
+        } => {
+            let solver = match kind.as_ref() {
+                FieldedSpan::Fast { query, .. } => Some(
+                    boldi_vigna::SpanSolver::new(query)
+                        .unwrap_or_else(|error| pgrx::error!("Stannum span: {error}")),
+                ),
+                FieldedSpan::Expr(_) => None,
+            };
+            let slot_cursors = slots
+                .iter()
+                .map(|keys| {
+                    keys.iter()
+                        .map(|key| {
+                            logicals
+                                .get(*key)
+                                .and_then(|term| term.as_ref())
+                                .map(|logical| {
+                                    logical.cursor().unwrap_or_else(|error| {
+                                        pgrx::error!("Stannum fielded cursor: {error}")
+                                    })
+                                })
+                        })
+                        .collect()
+                })
+                .collect();
+            WalkNode {
+                current: None,
+                init: false,
+                kind: WalkKind::Span {
+                    inner: Box::new(open_walk(
+                        inner,
+                        logicals,
+                        dead,
+                        doc_count,
+                        field_count,
+                        norms,
+                    )),
+                    slots: slot_cursors,
+                    kind: kind.as_ref().clone(),
+                    solver,
+                    mask: *mask,
+                    field_count,
+                    norms,
+                },
+            }
+        }
     }
 }
 
@@ -281,6 +381,7 @@ impl Front for WalkNode<'_> {
             WalkKind::Not {
                 inner, doc_count, ..
             } => u64::from(*doc_count).saturating_sub(inner.hint()),
+            WalkKind::Span { inner, .. } => inner.hint(),
         }
     }
 
@@ -393,6 +494,49 @@ impl Front for WalkNode<'_> {
                 self.current = None;
                 self.init = true;
             }
+            WalkKind::Span {
+                inner,
+                slots,
+                kind,
+                solver,
+                mask,
+                field_count,
+                norms,
+            } => {
+                let mut ordinal = target;
+                loop {
+                    inner.advance(ordinal, ix);
+                    let Some(at) = inner.current() else {
+                        self.current = None;
+                        self.init = true;
+                        return;
+                    };
+                    ix.tick();
+                    let lengths = norms.and_then(|n| n.lengths(at));
+                    if fielded_span_holds(
+                        slots,
+                        at,
+                        FieldedSpanHold {
+                            kind,
+                            solver: solver.as_mut(),
+                            mask: *mask,
+                            field_count: *field_count,
+                            lengths: lengths.as_deref(),
+                        },
+                        ix,
+                    ) {
+                        self.current = Some(at);
+                        self.init = true;
+                        return;
+                    }
+                    if at == u32::MAX {
+                        self.current = None;
+                        self.init = true;
+                        return;
+                    }
+                    ordinal = at + 1;
+                }
+            }
         }
     }
 }
@@ -406,6 +550,320 @@ const FIELDED_INTERRUPT_CHUNK: usize = 64;
 fn interrupt_at(i: usize) {
     if i.is_multiple_of(FIELDED_INTERRUPT_CHUNK) {
         pgrx::check_for_interrupts!();
+    }
+}
+
+fn range_window<'a>(lower: &'a RangeBound, upper: &'a RangeBound) -> SurfaceWindow<'a> {
+    fn bound(bound: &RangeBound) -> Option<&str> {
+        match bound {
+            RangeBound::Open => None,
+            RangeBound::Term(term) => Some(term.as_str()),
+        }
+    }
+    SurfaceWindow::Range(bound(lower), bound(upper))
+}
+
+fn expand_one_source<'a>(
+    source: &'a dyn Index,
+    expansion: &FieldedExpansion<'_>,
+    mask: u16,
+    field_count: u8,
+    limit: usize,
+) -> Lookup<'a> {
+    let result = match expansion {
+        FieldedExpansion::Regex(regex) => {
+            if let Some(prefix) = regex.pure_prefix() {
+                expand(
+                    source,
+                    SurfaceWindow::Prefix(&prefix),
+                    |_| true,
+                    mask,
+                    field_count,
+                    limit,
+                )
+            } else {
+                let regex = (*regex).clone();
+                expand(
+                    source,
+                    SurfaceWindow::All,
+                    move |term| regex.is_match(term),
+                    mask,
+                    field_count,
+                    limit,
+                )
+            }
+        }
+        FieldedExpansion::Range(lower, upper) => expand(
+            source,
+            range_window(lower, upper),
+            |_| true,
+            mask,
+            field_count,
+            limit,
+        ),
+        FieldedExpansion::Fuzzy {
+            term,
+            prefix,
+            distance,
+        } => {
+            let fixed: String = term.chars().take(*prefix as usize).collect();
+            let matcher = FuzzyMatcher::new(term, *prefix, *distance);
+            expand(
+                source,
+                SurfaceWindow::Prefix(&fixed),
+                move |candidate| matcher.is_match(candidate),
+                mask,
+                field_count,
+                limit,
+            )
+        }
+    };
+    result.unwrap_or_else(|error| pgrx::error!("Stannum fielded expand: {error}"))
+}
+
+fn expand_fielded(
+    sources: &[&dyn Index],
+    expansion: FieldedExpansion<'_>,
+    mask: u16,
+    field_count: u8,
+    limit: usize,
+) -> Option<Vec<String>> {
+    let mut found = BTreeSet::new();
+    for source in sources {
+        match expand_one_source(source, &expansion, mask, field_count, limit) {
+            Lookup::Overflow => return None,
+            Lookup::Terms(terms) => {
+                for term in terms {
+                    found.insert(term.text);
+                }
+            }
+            Lookup::Term(term) => {
+                found.insert(term.text);
+            }
+        }
+        if found.len() > limit {
+            return None;
+        }
+    }
+    Some(found.into_iter().collect())
+}
+
+fn expansion_overflow(limit: usize) -> ! {
+    pgrx::ereport!(
+        ERROR,
+        pgrx::PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+        format!(
+            "query expands to more than {limit} terms to score \
+             (stannum.max_expansion_terms)"
+        )
+    );
+}
+
+struct FieldedExpander<'a> {
+    sources: &'a [&'a dyn Index],
+    field_count: u8,
+    limit: usize,
+    used: usize,
+}
+
+impl FieldedExpander<'_> {
+    fn expand(&mut self, expansion: FieldedExpansion<'_>, mask: u16) -> Vec<String> {
+        let remain = self.limit.saturating_sub(self.used);
+        let Some(texts) = expand_fielded(self.sources, expansion, mask, self.field_count, remain)
+        else {
+            expansion_overflow(self.limit);
+        };
+        self.used = self.used.saturating_add(texts.len());
+        texts
+    }
+}
+
+fn intern_expanded(
+    keys: &mut Vec<(String, u16)>,
+    texts: Vec<String>,
+    mask: u16,
+) -> (FieldedNode, Vec<usize>) {
+    let indices: Vec<usize> = texts
+        .iter()
+        .map(|text| intern_fielded_key(keys, text, mask))
+        .collect();
+    let node = match indices.len() {
+        0 => FieldedNode::Or {
+            min: 1,
+            children: Vec::new(),
+        },
+        1 => FieldedNode::Leaf(indices[0]),
+        _ => FieldedNode::Or {
+            min: 1,
+            children: indices.iter().copied().map(FieldedNode::Leaf).collect(),
+        },
+    };
+    (node, indices)
+}
+
+fn seek_slot_cursor(cursor: &mut LogicalPostingCursor<'_>, ordinal: u32) -> bool {
+    if cursor.is_exhausted() {
+        return false;
+    }
+    match cursor.current_ordinal() {
+        Some(at) if at == ordinal => true,
+        Some(at) if at > ordinal => false,
+        _ => {
+            cursor
+                .advance(ordinal)
+                .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+            cursor.current_ordinal() == Some(ordinal)
+        }
+    }
+}
+
+fn span_holds_positions(
+    kind: &FieldedSpan,
+    solver: Option<&mut boldi_vigna::SpanSolver>,
+    positions: &[Vec<u32>],
+    doc_len: u32,
+) -> bool {
+    let lists: Vec<&[u32]> = positions.iter().map(Vec::as_slice).collect();
+    match kind {
+        FieldedSpan::Fast { filter, .. } => {
+            let Some(solver) = solver else {
+                return false;
+            };
+            match filter {
+                None => solver.intervals(&lists).next().is_some(),
+                Some(filter) => solver
+                    .intervals(&lists)
+                    .any(|interval| filter.matches_interval(doc_len, interval)),
+            }
+        }
+        FieldedSpan::Expr(expr) => {
+            let resolved = expr.resolve(doc_len);
+            let mut solver = match boldi_vigna::SpanSolver::new(&resolved) {
+                Ok(solver) => solver,
+                Err(boldi_vigna::SpanError::EmptyQuery) => return false,
+                Err(error) => pgrx::error!("Stannum span: {error}"),
+            };
+            solver.intervals(&lists).next().is_some()
+        }
+    }
+}
+
+/// Evaluate the span once per eligible field. Positions from different fields
+/// never combine: each field's `field_hits` stream is a separate TermPositions.
+/// The span matcher's per-call state, grouped so the walk stays readable:
+/// the compiled span, an optional solver for the slow shape, the field mask
+/// and count the walk is scoped to, and the STNF lengths at this ordinal.
+struct FieldedSpanHold<'a> {
+    kind: &'a FieldedSpan,
+    solver: Option<&'a mut boldi_vigna::SpanSolver>,
+    mask: u16,
+    field_count: u8,
+    lengths: Option<&'a [u32]>,
+}
+
+fn fielded_span_holds(
+    slots: &mut [Vec<Option<LogicalPostingCursor<'_>>>],
+    ordinal: u32,
+    hold: FieldedSpanHold<'_>,
+    ix: &mut Intersect<'_>,
+) -> bool {
+    let FieldedSpanHold {
+        kind,
+        mut solver,
+        mask,
+        field_count,
+        lengths,
+    } = hold;
+    let n_fields = usize::from(field_count);
+    let mut by_slot_field: Vec<Vec<Vec<u32>>> = vec![vec![Vec::new(); n_fields]; slots.len()];
+    for (slot, cursors) in slots.iter_mut().enumerate() {
+        for cursor in cursors.iter_mut().flatten() {
+            ix.tick();
+            if !seek_slot_cursor(cursor, ordinal) {
+                continue;
+            }
+            let hits = cursor
+                .field_hits()
+                .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+            for hit in hits {
+                if mask & (1u16 << hit.field) == 0 {
+                    continue;
+                }
+                let Some(bucket) = by_slot_field[slot].get_mut(usize::from(hit.field)) else {
+                    continue;
+                };
+                bucket.extend(hit.positions);
+            }
+        }
+        for positions in by_slot_field[slot].iter_mut().take(n_fields) {
+            positions.sort_unstable();
+            positions.dedup();
+        }
+    }
+    for field in fields_in_mask(mask, field_count) {
+        ix.tick();
+        let field_i = usize::from(field);
+        let positions: Vec<Vec<u32>> = by_slot_field
+            .iter()
+            .map(|per_field| per_field[field_i].clone())
+            .collect();
+        if positions.iter().all(Vec::is_empty) {
+            continue;
+        }
+        let doc_len = lengths
+            .and_then(|row| row.get(field_i).copied())
+            .unwrap_or(0);
+        if span_holds_positions(kind, solver.as_deref_mut(), &positions, doc_len) {
+            return true;
+        }
+    }
+    false
+}
+
+fn span_requires_all(query: &boldi_vigna::SpanQuery) -> bool {
+    use boldi_vigna::SpanQuery::*;
+    match query {
+        Term(_) => true,
+        Ordered(children) | Unordered(children) => children.iter().all(span_requires_all),
+        MaxGaps { inner, .. }
+        | GapsInRange { inner, .. }
+        | MaxWidth { inner, .. }
+        | WithinPositions { inner, .. } => span_requires_all(inner),
+        Empty
+        | Or(_)
+        | NotContaining { .. }
+        | NotContainedBy { .. }
+        | NonOverlapping { .. }
+        | Containing { .. }
+        | ContainedBy { .. }
+        | Overlapping { .. }
+        | Before { .. }
+        | After { .. } => false,
+    }
+}
+
+fn fielded_span_kind(query: &Query) -> Option<(Box<FieldedSpan>, bool)> {
+    match query {
+        Query::Span {
+            span_query,
+            position_filter,
+            ..
+        } => Some((
+            Box::new(FieldedSpan::Fast {
+                query: span_query.clone(),
+                filter: position_filter.clone(),
+            }),
+            span_requires_all(span_query),
+        )),
+        Query::SpanExpr { span_expr, .. } => {
+            let all = span_expr.all_terms_required();
+            let kind = match span_expr.to_fast_path_root() {
+                Some((query, filter)) => FieldedSpan::Fast { query, filter },
+                None => FieldedSpan::Expr(span_expr.clone()),
+            };
+            Some((Box::new(kind), all))
+        }
+        _ => None,
     }
 }
 
@@ -456,10 +914,22 @@ fn unsupported_fielded_query() -> ! {
     pgrx::error!("stannum.search() does not support this query on a multi-column index")
 }
 
+/// A compile path with no expansion, for the shapes `pg_test` fixtures use.
+#[cfg(feature = "pg_test")]
+fn no_fielded_expand(_: FieldedExpansion<'_>, _: u16) -> Vec<String> {
+    Vec::new()
+}
+
 fn fielded_query_supported(query: &Query) -> bool {
     unsafe { pg_sys::check_stack_depth() };
     match query {
-        Query::Term(_) | Query::MatchAll => true,
+        Query::Term(_)
+        | Query::MatchAll
+        | Query::Span { .. }
+        | Query::SpanExpr { .. }
+        | Query::Regex(_)
+        | Query::Range { .. }
+        | Query::Fuzzy { .. } => true,
         Query::And(left, right) | Query::Or(left, right) => {
             fielded_query_supported(left) && fielded_query_supported(right)
         }
@@ -469,11 +939,6 @@ fn fielded_query_supported(query: &Query) -> bool {
         Query::Not(inner) | Query::Boost { inner, .. } | Query::Field { inner, .. } => {
             fielded_query_supported(inner)
         }
-        Query::Span { .. }
-        | Query::SpanExpr { .. }
-        | Query::Regex(_)
-        | Query::Range { .. }
-        | Query::Fuzzy { .. } => false,
     }
 }
 
@@ -498,6 +963,7 @@ fn compile_fielded(
     names: &[String],
     mask: u16,
     keys: &mut Vec<(String, u16)>,
+    expand: &mut dyn FnMut(FieldedExpansion<'_>, u16) -> Vec<String>,
 ) -> FieldedNode {
     unsafe { pg_sys::check_stack_depth() };
     match query {
@@ -506,24 +972,24 @@ fn compile_fielded(
             let Some(ordinal) = names.iter().position(|stored| stored == name) else {
                 pgrx::error!("stannum: unknown field '{name}'");
             };
-            compile_fielded(inner, names, 1u16 << ordinal, keys)
+            compile_fielded(inner, names, 1u16 << ordinal, keys, expand)
         }
-        Query::Boost { inner, .. } => compile_fielded(inner, names, mask, keys),
+        Query::Boost { inner, .. } => compile_fielded(inner, names, mask, keys, expand),
         Query::And(left, right) => FieldedNode::And(vec![
-            compile_fielded(left, names, mask, keys),
-            compile_fielded(right, names, mask, keys),
+            compile_fielded(left, names, mask, keys, expand),
+            compile_fielded(right, names, mask, keys, expand),
         ]),
         Query::Or(left, right) => FieldedNode::Or {
             min: 1,
             children: vec![
-                compile_fielded(left, names, mask, keys),
-                compile_fielded(right, names, mask, keys),
+                compile_fielded(left, names, mask, keys, expand),
+                compile_fielded(right, names, mask, keys, expand),
             ],
         },
         Query::Conjunction(children) => FieldedNode::And(
             children
                 .iter()
-                .map(|child| compile_fielded(child, names, mask, keys))
+                .map(|child| compile_fielded(child, names, mask, keys, expand))
                 .collect(),
         ),
         Query::Disjunction { min, children } | Query::AtLeast { min, children } => {
@@ -531,17 +997,130 @@ fn compile_fielded(
                 min: *min,
                 children: children
                     .iter()
-                    .map(|child| compile_fielded(child, names, mask, keys))
+                    .map(|child| compile_fielded(child, names, mask, keys, expand))
                     .collect(),
             }
         }
-        Query::Not(inner) => FieldedNode::Not(Box::new(compile_fielded(inner, names, mask, keys))),
+        Query::Not(inner) => {
+            FieldedNode::Not(Box::new(compile_fielded(inner, names, mask, keys, expand)))
+        }
         Query::MatchAll => FieldedNode::All,
-        Query::Span { .. }
-        | Query::SpanExpr { .. }
-        | Query::Regex(_)
-        | Query::Range { .. }
-        | Query::Fuzzy { .. } => unsupported_fielded_query(),
+        Query::Regex(regex) => {
+            intern_expanded(keys, expand(FieldedExpansion::Regex(regex), mask), mask).0
+        }
+        Query::Range { lower, upper } => {
+            intern_expanded(
+                keys,
+                expand(FieldedExpansion::Range(lower, upper), mask),
+                mask,
+            )
+            .0
+        }
+        Query::Fuzzy {
+            term,
+            prefix,
+            distance,
+        } => {
+            intern_expanded(
+                keys,
+                expand(
+                    FieldedExpansion::Fuzzy {
+                        term,
+                        prefix: *prefix,
+                        distance: *distance,
+                    },
+                    mask,
+                ),
+                mask,
+            )
+            .0
+        }
+        Query::Span { term_slots, .. } | Query::SpanExpr { term_slots, .. } => {
+            compile_fielded_span(query, term_slots, mask, keys, expand)
+        }
+    }
+}
+
+fn compile_slot(
+    slot: &SpanTermSlot,
+    mask: u16,
+    keys: &mut Vec<(String, u16)>,
+    expand: &mut dyn FnMut(FieldedExpansion<'_>, u16) -> Vec<String>,
+) -> Vec<usize> {
+    match slot {
+        SpanTermSlot::Term(text) => vec![intern_fielded_key(keys, text, mask)],
+        SpanTermSlot::Regex(regex) => {
+            intern_expanded(keys, expand(FieldedExpansion::Regex(regex), mask), mask).1
+        }
+        SpanTermSlot::Range { lower, upper } => {
+            intern_expanded(
+                keys,
+                expand(FieldedExpansion::Range(lower, upper), mask),
+                mask,
+            )
+            .1
+        }
+        SpanTermSlot::Fuzzy {
+            term,
+            prefix,
+            distance,
+        } => {
+            intern_expanded(
+                keys,
+                expand(
+                    FieldedExpansion::Fuzzy {
+                        term,
+                        prefix: *prefix,
+                        distance: *distance,
+                    },
+                    mask,
+                ),
+                mask,
+            )
+            .1
+        }
+    }
+}
+
+fn compile_fielded_span(
+    query: &Query,
+    term_slots: &[SpanTermSlot],
+    mask: u16,
+    keys: &mut Vec<(String, u16)>,
+    expand: &mut dyn FnMut(FieldedExpansion<'_>, u16) -> Vec<String>,
+) -> FieldedNode {
+    let Some((kind, all_required)) = fielded_span_kind(query) else {
+        unsupported_fielded_query();
+    };
+    let slots: Vec<Vec<usize>> = term_slots
+        .iter()
+        .map(|slot| compile_slot(slot, mask, keys, expand))
+        .collect();
+    let inner = if all_required {
+        FieldedNode::And(slots.iter().map(|indices| slot_node(indices)).collect())
+    } else {
+        let union: Vec<usize> = slots.iter().flatten().copied().collect();
+        slot_node(&union)
+    };
+    FieldedNode::Span {
+        inner: Box::new(inner),
+        slots,
+        kind,
+        mask,
+    }
+}
+
+fn slot_node(indices: &[usize]) -> FieldedNode {
+    match indices.len() {
+        0 => FieldedNode::Or {
+            min: 1,
+            children: Vec::new(),
+        },
+        1 => FieldedNode::Leaf(indices[0]),
+        _ => FieldedNode::Or {
+            min: 1,
+            children: indices.iter().copied().map(FieldedNode::Leaf).collect(),
+        },
     }
 }
 
@@ -551,6 +1130,7 @@ fn collect_fielded_terms(
     mask: u16,
     boost: f32,
     out: &mut Vec<FieldedTerm>,
+    expand: &mut dyn FnMut(FieldedExpansion<'_>, u16) -> Vec<String>,
 ) {
     unsafe { pg_sys::check_stack_depth() };
     match query {
@@ -563,32 +1143,112 @@ fn collect_fielded_terms(
             let Some(ordinal) = names.iter().position(|stored| stored == name) else {
                 pgrx::error!("stannum: unknown field '{name}'");
             };
-            collect_fielded_terms(inner, names, 1u16 << ordinal, boost, out);
+            collect_fielded_terms(inner, names, 1u16 << ordinal, boost, out, expand);
         }
         Query::Boost { factor, inner } => {
-            collect_fielded_terms(inner, names, mask, boost * factor, out);
+            collect_fielded_terms(inner, names, mask, boost * factor, out, expand);
         }
         Query::And(left, right) => {
-            collect_fielded_terms(left, names, mask, boost, out);
-            collect_fielded_terms(right, names, mask, boost, out);
+            collect_fielded_terms(left, names, mask, boost, out, expand);
+            collect_fielded_terms(right, names, mask, boost, out, expand);
         }
         Query::Or(left, right) => {
-            collect_fielded_terms(left, names, mask, boost, out);
-            collect_fielded_terms(right, names, mask, boost, out);
+            collect_fielded_terms(left, names, mask, boost, out, expand);
+            collect_fielded_terms(right, names, mask, boost, out, expand);
         }
         Query::Conjunction(children)
         | Query::Disjunction { children, .. }
         | Query::AtLeast { children, .. } => {
             for child in children {
-                collect_fielded_terms(child, names, mask, boost, out);
+                collect_fielded_terms(child, names, mask, boost, out, expand);
             }
         }
         Query::Not(_) | Query::MatchAll => {}
-        Query::Span { .. }
-        | Query::SpanExpr { .. }
-        | Query::Regex(_)
-        | Query::Range { .. }
-        | Query::Fuzzy { .. } => unsupported_fielded_query(),
+        Query::Regex(regex) => collect_expanded(
+            expand(FieldedExpansion::Regex(regex), mask),
+            mask,
+            boost,
+            out,
+        ),
+        Query::Range { lower, upper } => collect_expanded(
+            expand(FieldedExpansion::Range(lower, upper), mask),
+            mask,
+            boost,
+            out,
+        ),
+        Query::Fuzzy {
+            term,
+            prefix,
+            distance,
+        } => collect_expanded(
+            expand(
+                FieldedExpansion::Fuzzy {
+                    term,
+                    prefix: *prefix,
+                    distance: *distance,
+                },
+                mask,
+            ),
+            mask,
+            boost,
+            out,
+        ),
+        Query::Span { term_slots, .. } | Query::SpanExpr { term_slots, .. } => {
+            for slot in term_slots {
+                collect_slot(slot, mask, boost, out, expand);
+            }
+        }
+    }
+}
+
+fn collect_expanded(texts: Vec<String>, mask: u16, boost: f32, out: &mut Vec<FieldedTerm>) {
+    for text in texts {
+        out.push(FieldedTerm { text, mask, boost });
+    }
+}
+
+fn collect_slot(
+    slot: &SpanTermSlot,
+    mask: u16,
+    boost: f32,
+    out: &mut Vec<FieldedTerm>,
+    expand: &mut dyn FnMut(FieldedExpansion<'_>, u16) -> Vec<String>,
+) {
+    match slot {
+        SpanTermSlot::Term(text) => out.push(FieldedTerm {
+            text: text.clone(),
+            mask,
+            boost,
+        }),
+        SpanTermSlot::Regex(regex) => collect_expanded(
+            expand(FieldedExpansion::Regex(regex), mask),
+            mask,
+            boost,
+            out,
+        ),
+        SpanTermSlot::Range { lower, upper } => collect_expanded(
+            expand(FieldedExpansion::Range(lower, upper), mask),
+            mask,
+            boost,
+            out,
+        ),
+        SpanTermSlot::Fuzzy {
+            term,
+            prefix,
+            distance,
+        } => collect_expanded(
+            expand(
+                FieldedExpansion::Fuzzy {
+                    term,
+                    prefix: *prefix,
+                    distance: *distance,
+                },
+                mask,
+            ),
+            mask,
+            boost,
+            out,
+        ),
     }
 }
 
@@ -619,6 +1279,7 @@ fn eval_fielded(
             }
             members
         }
+        FieldedNode::Span { inner, .. } => eval_fielded(inner, postings, universe),
         FieldedNode::Or { min, children } => {
             if *min == 0 {
                 return clone_tids_interruptible(universe);
@@ -706,21 +1367,48 @@ fn fielded_eval_inner(
     }
     let field_count = u8::try_from(fields.names.len()).unwrap_or(16);
     let default_mask = all_fields_mask(field_count);
+    let view = unsafe { crate::storage::view(index.oid()) };
+    if view.field_norms.iter().any(Option::is_none) {
+        pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
+    }
+    let sources: Vec<&dyn Index> = view.sources.iter().map(|(source, _)| &**source).collect();
+    let limit = usize::try_from(crate::score::MAX_EXPANSION_TERMS.get()).unwrap_or(0);
     let mut keys = Vec::new();
-    let root = compile_fielded(&parsed, &fields.names, default_mask, &mut keys);
+    let mut membership_expand = FieldedExpander {
+        sources: &sources,
+        field_count,
+        limit,
+        used: 0,
+    };
+    let root = compile_fielded(
+        &parsed,
+        &fields.names,
+        default_mask,
+        &mut keys,
+        &mut |expansion, mask| membership_expand.expand(expansion, mask),
+    );
     let mut terms = Vec::new();
     if want_scores {
         // Membership and scoring share the structural parse. A scoring parse
         // would keep `alpha AND alpha` as two clauses and double the BM25F
         // contribution; 0.4.0's IndexScorer saw the folded term list.
-        collect_fielded_terms(&parsed, &fields.names, default_mask, 1.0, &mut terms);
+        let mut scoring_expand = FieldedExpander {
+            sources: &sources,
+            field_count,
+            limit,
+            used: 0,
+        };
+        collect_fielded_terms(
+            &parsed,
+            &fields.names,
+            default_mask,
+            1.0,
+            &mut terms,
+            &mut |expansion, mask| scoring_expand.expand(expansion, mask),
+        );
         for term in &terms {
             intern_fielded_key(&mut keys, &term.text, term.mask);
         }
-    }
-    let view = unsafe { crate::storage::view(index.oid()) };
-    if view.field_norms.iter().any(Option::is_none) {
-        pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
     }
 
     let mut params = None;
@@ -775,7 +1463,14 @@ fn fielded_eval_inner(
                 },
             )
             .collect();
-        let mut walk = open_walk(&root, &logicals, dead.as_ref(), doc_count);
+        let mut walk = open_walk(
+            &root,
+            &logicals,
+            dead.as_ref(),
+            doc_count,
+            field_count,
+            norms.as_ref(),
+        );
         let mut score_cursors: Vec<Option<LogicalPostingCursor<'_>>> = if want_scores {
             terms
                 .iter()
@@ -1714,9 +2409,13 @@ mod tests {
     }
 
     fn search_ids(index: &str, query: &str) -> Vec<i32> {
+        search_ids_from("bool_docs", index, query)
+    }
+
+    fn search_ids_from(table: &str, index: &str, query: &str) -> Vec<i32> {
         Spi::get_one::<Vec<i32>>(&format!(
             "SELECT coalesce(array_agg(d.id ORDER BY d.id), '{{}}'::int[])
-             FROM bool_docs d
+             FROM {table} d
              JOIN stannum.search('{index}', $q${query}$q$, 50, 'none') s
              ON d.ctid = s.ctid"
         ))
@@ -1952,7 +2651,7 @@ mod tests {
     fn eval_query_on_fixture(query: &Query) -> Vec<i32> {
         let names: Vec<String> = Vec::new();
         let mut keys = Vec::new();
-        let root = compile_fielded(query, &names, 1, &mut keys);
+        let root = compile_fielded(query, &names, 1, &mut keys, &mut no_fielded_expand);
         let universe = tid_set(&[1, 2, 3, 4, 5, 6]);
         let mut postings = vec![FxHashSet::default(); keys.len()];
         for (text, ids) in [
@@ -2279,18 +2978,189 @@ mod tests {
     }
 
     #[pg_test]
-    fn fielded_dropped_construct_mixed_with_term_errors() {
+    fn fielded_mixed_prefix_is_not_dropped() {
         bool_fixture();
-        assert_query_error(
-            "bool_docs_multi",
-            "alpha AND foo*",
-            "stannum.search() does not support this query on a multi-column index",
+        // foo* matches nothing on this fixture; the mixed query must not error
+        // and must not equal `alpha` (the silent prefix-drop answer).
+        assert_ids_both("alpha AND foo*", &[]);
+        assert_ne!(
+            search_ids("bool_docs_multi", "alpha AND foo*"),
+            search_ids("bool_docs_multi", "alpha"),
         );
-        // Single-column still evaluates the regex; it must not equal `alpha`
-        // (the result of silently dropping the unsupported clause).
         assert_ne!(
             search_ids("bool_docs_single", "alpha AND foo*"),
             search_ids("bool_docs_single", "alpha"),
+        );
+    }
+
+    fn spans_fixture() {
+        Spi::run(
+            "CREATE TABLE spans_docs (
+                 id int primary key,
+                 title text,
+                 body text
+             );
+             INSERT INTO spans_docs VALUES
+               (1, 'alpha beta', 'other'),
+               (2, 'alpha', 'beta'),
+               (3, 'beta alpha', 'pad'),
+               (4, 'alpha xx beta', 'pad'),
+               (5, NULL, 'needle here'),
+               (6, 'needle', NULL),
+               (7, 'pad', 'alpha beta');
+             CREATE INDEX spans_docs_idx ON spans_docs USING stannum (title, body);",
+        )
+        .unwrap();
+    }
+
+    /// `alpha` ends title at 1 and `beta` sits at 2 in body. A naive
+    /// cross-channel join of the two position streams sees them adjacent and
+    /// answers this row; the same-field rule must not.
+    fn patterns_fixture() {
+        Spi::run(
+            "CREATE TABLE patterns_docs (
+                 id int primary key,
+                 title text,
+                 body text
+             );
+             INSERT INTO patterns_docs VALUES
+               (1, 'apple', 'other'),
+               (2, 'apply', 'zebra'),
+               (3, 'needle', 'alpha beta'),
+               (4, 'zzz', 'apple');
+             CREATE INDEX patterns_docs_idx ON patterns_docs USING stannum (title, body);",
+        )
+        .unwrap();
+    }
+
+    fn bool_expand_fixture() {
+        Spi::run(
+            "CREATE TABLE bool_expand (
+                 id int primary key,
+                 title text not null,
+                 body text not null,
+                 concat text generated always as (title || ' ' || body) stored
+             );
+             INSERT INTO bool_expand VALUES
+               (1, 'alpha', 'bravo'),
+               (2, 'alpha bravo', 'charlie'),
+               (3, 'charlie', 'alpha'),
+               (4, 'bravo', 'bravo'),
+               (5, 'other', 'other'),
+               (6, 'alpha charlie', 'bravo'),
+               (7, 'apple', 'other'),
+               (8, 'alpha', 'apple'),
+               (9, 'other', 'apple');
+             CREATE INDEX bool_expand_multi ON bool_expand USING stannum (title, body);
+             CREATE INDEX bool_expand_flat ON bool_expand USING stannum (concat);",
+        )
+        .unwrap();
+    }
+
+    fn assert_ids_from(table: &str, index: &str, query: &str, expected: &[i32]) {
+        assert_eq!(
+            search_ids_from(table, index, query),
+            expected,
+            "{index} {query}"
+        );
+        assert_eq!(
+            search_count_of(index, query),
+            expected.len() as i64,
+            "{index} {query} count"
+        );
+    }
+
+    /// Unscoped phrase matches inside one field only. Row 2 splits the pair
+    /// across title/body and must not match.
+    #[pg_test]
+    fn fielded_phrase_stays_inside_one_field() {
+        spans_fixture();
+        assert_ids_from("spans_docs", "spans_docs_idx", "\"alpha beta\"", &[1, 7]);
+        // Row 2 has the pair split across fields and, crucially, `alpha` at
+        // position 1 in title and `beta` at position 2 in body: joining the
+        // two channels' position streams would find them adjacent. The
+        // contract corpus's row 2 cannot pin this (both tokens sit at 1), so it
+        // is pinned here.
+        Spi::run("INSERT INTO spans_docs VALUES (10, 'alpha', 'zzz beta');").unwrap();
+        assert_ids_from("spans_docs", "spans_docs_idx", "\"alpha beta\"", &[1, 7]);
+        assert_ids_from("spans_docs", "spans_docs_idx", "alpha THEN/0 beta", &[1, 7]);
+    }
+
+    /// `title:("alpha beta")` opens only the title channel; row 7's hit is body.
+    #[pg_test]
+    fn fielded_scoped_phrase_opens_only_title() {
+        spans_fixture();
+        assert_ids_from(
+            "spans_docs",
+            "spans_docs_idx",
+            "title:(\"alpha beta\")",
+            &[1],
+        );
+    }
+
+    /// Then/0 uses the same same-field adjacency rule as the phrase, including
+    /// row 10, whose `alpha`@1 in title and `beta`@2 in body would otherwise
+    /// look adjacent once the channels are joined.
+    #[pg_test]
+    fn fielded_then_stays_inside_one_field() {
+        spans_fixture();
+        assert_ids_from("spans_docs", "spans_docs_idx", "alpha THEN/0 beta", &[1, 7]);
+    }
+
+    /// NEAR is order-insensitive and admits slop 1; row 2 is still cross-field.
+    #[pg_test]
+    fn fielded_near_is_symmetric_and_admits_slop() {
+        spans_fixture();
+        assert_ids_from(
+            "spans_docs",
+            "spans_docs_idx",
+            "alpha NEAR/1 beta",
+            &[1, 3, 4, 7],
+        );
+    }
+
+    /// Field-scoped prefix drops the body-only apple (row 4).
+    #[pg_test]
+    fn fielded_scoped_prefix_drops_body_only_hit() {
+        patterns_fixture();
+        assert_ids_from("patterns_docs", "patterns_docs_idx", "app*", &[1, 2, 4]);
+        assert_ids_from(
+            "patterns_docs",
+            "patterns_docs_idx",
+            "title:(app*)",
+            &[1, 2],
+        );
+        assert_ids_from(
+            "patterns_docs",
+            "patterns_docs_idx",
+            "title:(MATCHES app.*)",
+            &[1, 2],
+        );
+        assert_ids_from(
+            "patterns_docs",
+            "patterns_docs_idx",
+            "title:(apple~1)",
+            &[1, 2],
+        );
+        assert_ids_from(
+            "patterns_docs",
+            "patterns_docs_idx",
+            "title:(apple TO apply)",
+            &[1, 2],
+        );
+    }
+
+    /// Prefix expansion on a multi-column boolean corpus; mixed AND must not
+    /// drop the prefix.
+    #[pg_test]
+    fn fielded_boolean_prefix_and_mixed_term() {
+        bool_expand_fixture();
+        assert_ids_from("bool_expand", "bool_expand_multi", "app*", &[7, 8, 9]);
+        assert_ids_from("bool_expand", "bool_expand_flat", "app*", &[7, 8, 9]);
+        assert_ids_from("bool_expand", "bool_expand_multi", "alpha AND app*", &[8]);
+        assert_ne!(
+            search_ids_from("bool_expand", "bool_expand_multi", "alpha AND app*"),
+            search_ids_from("bool_expand", "bool_expand_multi", "alpha"),
         );
     }
 
@@ -2338,6 +3208,7 @@ mod tests {
             1,
             1.0,
             &mut skipped,
+            &mut no_fielded_expand,
         );
         assert!(
             skipped.is_empty(),

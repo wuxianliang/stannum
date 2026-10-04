@@ -93,10 +93,14 @@ fn stock_logical<'a>(
     Ok(terms)
 }
 
+fn box_term_filter(filter: impl Fn(&str) -> bool + 'static) -> Box<dyn Fn(&str) -> bool> {
+    Box::new(move |term: &str| filter(term))
+}
+
 fn expand_single<'a>(
     index: &'a dyn Index,
     window: SurfaceWindow<'_>,
-    filter: &'a dyn Fn(&str) -> bool,
+    filter: &dyn Fn(&str) -> bool,
     mask: u16,
     max_expansion: usize,
 ) -> Result<Lookup<'a>, AdapterError> {
@@ -109,7 +113,7 @@ fn expand_single<'a>(
 fn expand_in_single<'a>(
     index: &'a dyn Index,
     window: SurfaceWindow<'_>,
-    filter: &'a dyn Fn(&str) -> bool,
+    filter: &dyn Fn(&str) -> bool,
     mask: u16,
 ) -> Result<Vec<LogicalTerm<'a>>, AdapterError> {
     match index.expand(window.into(), filter, usize::MAX)? {
@@ -124,7 +128,7 @@ fn expand_in_single<'a>(
 fn expand_capped<'a>(
     index: &'a dyn Index,
     window: SurfaceWindow<'_>,
-    filter: &'a dyn Fn(&str) -> bool,
+    filter: impl Fn(&str) -> bool + 'static,
     mask: u16,
     field_count: u8,
     max_expansion: usize,
@@ -132,7 +136,7 @@ fn expand_capped<'a>(
     let mut kept = Vec::with_capacity(max_expansion);
     let mut overflow = false;
     let mut count = 0usize;
-    for item in index.scan_window(window.into(), filter)? {
+    for item in index.scan_window(window.into(), box_term_filter(filter))? {
         let (text, term) = item?;
         let logical = LogicalTerm::from_entry(text, mask, field_count, term)?;
         if logical.streams.is_empty() {
@@ -157,12 +161,12 @@ fn expand_capped<'a>(
 fn expand_uncapped<'a>(
     index: &'a dyn Index,
     window: SurfaceWindow<'_>,
-    filter: &'a dyn Fn(&str) -> bool,
+    filter: impl Fn(&str) -> bool + 'static,
     mask: u16,
     field_count: u8,
 ) -> Result<Vec<LogicalTerm<'a>>, AdapterError> {
     let mut scored = Vec::new();
-    for item in index.scan_window(window.into(), filter)? {
+    for item in index.scan_window(window.into(), box_term_filter(filter))? {
         let (text, term) = item?;
         let logical = LogicalTerm::from_entry(text, mask, field_count, term)?;
         if logical.streams.is_empty() {
@@ -177,14 +181,14 @@ fn expand_uncapped<'a>(
 pub(crate) fn expand<'a>(
     index: &'a dyn Index,
     window: SurfaceWindow<'_>,
-    filter: &'a dyn Fn(&str) -> bool,
+    filter: impl Fn(&str) -> bool + 'static,
     mask: u16,
     field_count: u8,
     max_expansion: usize,
 ) -> Result<Lookup<'a>, AdapterError> {
     field_count_ok(field_count)?;
     if field_count == 1 {
-        return expand_single(index, window, filter, mask, max_expansion);
+        return expand_single(index, window, &filter, mask, max_expansion);
     }
     expand_capped(index, window, filter, mask, field_count, max_expansion)
 }
@@ -193,13 +197,13 @@ pub(crate) fn expand<'a>(
 pub(crate) fn expand_in<'a>(
     index: &'a dyn Index,
     window: SurfaceWindow<'_>,
-    filter: &'a dyn Fn(&str) -> bool,
+    filter: impl Fn(&str) -> bool + 'static,
     mask: u16,
     field_count: u8,
 ) -> Result<Vec<LogicalTerm<'a>>, AdapterError> {
     field_count_ok(field_count)?;
     if field_count == 1 {
-        return expand_in_single(index, window, filter, mask);
+        return expand_in_single(index, window, &filter, mask);
     }
     expand_uncapped(index, window, filter, mask, field_count)
 }
@@ -279,7 +283,7 @@ mod tests {
         field_count: u8,
         max_expansion: usize,
     ) -> Lookup<'a> {
-        expand(index, window, &ALWAYS, mask, field_count, max_expansion).unwrap()
+        expand(index, window, ALWAYS, mask, field_count, max_expansion).unwrap()
     }
 
     #[test]
@@ -481,7 +485,7 @@ mod tests {
             expand_all(&index, SurfaceWindow::Prefix("fo"), mask, FIELDS, 2),
             Lookup::Overflow
         ));
-        let scored = expand_in(&index, SurfaceWindow::Prefix("fo"), &ALWAYS, mask, FIELDS).unwrap();
+        let scored = expand_in(&index, SurfaceWindow::Prefix("fo"), ALWAYS, mask, FIELDS).unwrap();
         assert_eq!(
             scored.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
             vec!["foo", "food", "fool"]
@@ -601,13 +605,13 @@ mod tests {
         let index = scoped_cap_index(&title, &body);
         let mask = 1u16 << 0;
         let Lookup::Terms(terms) =
-            expand(&index, SurfaceWindow::All, &ends_with_x, mask, FIELDS, 2).unwrap()
+            expand(&index, SurfaceWindow::All, ends_with_x, mask, FIELDS, 2).unwrap()
         else {
             panic!("title regex fits");
         };
         assert_eq!(title_texts(&Lookup::Terms(terms)), vec!["ax", "bx"]);
         assert!(matches!(
-            expand(&index, SurfaceWindow::All, &ends_with_x, mask, FIELDS, 1).unwrap(),
+            expand(&index, SurfaceWindow::All, ends_with_x, mask, FIELDS, 1).unwrap(),
             Lookup::Overflow
         ));
     }
@@ -638,13 +642,13 @@ mod tests {
         let index = scoped_cap_index(&title, &body);
         let mask = 1u16 << 0;
         let Lookup::Terms(terms) =
-            expand(&index, SurfaceWindow::All, &fuzzy_cat, mask, FIELDS, 2).unwrap()
+            expand(&index, SurfaceWindow::All, fuzzy_cat, mask, FIELDS, 2).unwrap()
         else {
             panic!("title fuzzy fits");
         };
         assert_eq!(title_texts(&Lookup::Terms(terms)), vec!["cat", "cot"]);
         assert!(matches!(
-            expand(&index, SurfaceWindow::All, &fuzzy_cat, mask, FIELDS, 1).unwrap(),
+            expand(&index, SurfaceWindow::All, fuzzy_cat, mask, FIELDS, 1).unwrap(),
             Lookup::Overflow
         ));
     }
@@ -679,7 +683,7 @@ mod tests {
             expand_all(&index, SurfaceWindow::Prefix("t"), mask, FIELDS, 2),
             Lookup::Overflow
         ));
-        let scored = expand_in(&index, SurfaceWindow::Prefix("t"), &ALWAYS, mask, FIELDS).unwrap();
+        let scored = expand_in(&index, SurfaceWindow::Prefix("t"), ALWAYS, mask, FIELDS).unwrap();
         assert_eq!(
             scored.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
             title
@@ -710,9 +714,9 @@ mod tests {
         add_fielded(&index, 2, &["zzz", ""]);
         plant_corrupt(&index, "zzz");
         let mask = 1u16 << 0;
-        let capped = expand(&index, SurfaceWindow::All, &ALWAYS, mask, FIELDS, 16);
+        let capped = expand(&index, SurfaceWindow::All, ALWAYS, mask, FIELDS, 16);
         assert!(capped.is_err(), "capped consumer surfaces channel error");
-        let uncapped = expand_in(&index, SurfaceWindow::All, &ALWAYS, mask, FIELDS);
+        let uncapped = expand_in(&index, SurfaceWindow::All, ALWAYS, mask, FIELDS);
         assert!(uncapped.is_err(), "scoring consumer surfaces channel error");
     }
 
@@ -725,7 +729,7 @@ mod tests {
         add_fielded(&index, 3, &["zzz", ""]);
         plant_corrupt(&index, "zzz");
         let mask = 1u16 << 0;
-        let capped = expand(&index, SurfaceWindow::All, &ALWAYS, mask, FIELDS, 2);
+        let capped = expand(&index, SurfaceWindow::All, ALWAYS, mask, FIELDS, 2);
         assert!(
             capped.is_err(),
             "error beats Overflow after the cap is already exceeded"
@@ -734,7 +738,7 @@ mod tests {
             matches!(capped, Err(AdapterError::Index(_))),
             "expected Index error, got {capped:?}"
         );
-        assert!(expand_in(&index, SurfaceWindow::All, &ALWAYS, mask, FIELDS).is_err());
+        assert!(expand_in(&index, SurfaceWindow::All, ALWAYS, mask, FIELDS).is_err());
     }
 
     #[test]
@@ -784,7 +788,7 @@ mod tests {
             terms.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
             vec!["aa", "ab"]
         );
-        let scored = expand_in(&index, SurfaceWindow::Prefix("a"), &ALWAYS, mask, 1).unwrap();
+        let scored = expand_in(&index, SurfaceWindow::Prefix("a"), ALWAYS, mask, 1).unwrap();
         assert_eq!(
             scored.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
             vec!["aa", "ab"]

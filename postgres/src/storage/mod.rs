@@ -2056,7 +2056,7 @@ impl Index for MemoizedSegment {
     fn scan_window<'a>(
         &'a self,
         window: Window<'_>,
-        filter: &'a dyn Fn(&str) -> bool,
+        filter: Box<dyn Fn(&str) -> bool>,
     ) -> segment::Result<segment::index::ScanWindow<'a>> {
         Index::scan_window(&*self.reader, window, filter)
     }
