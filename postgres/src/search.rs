@@ -815,13 +815,20 @@ impl Ord for FieldedRanked {
 }
 
 /// The `k` best scored indexed tids, same total order as a full sort by [`rank`].
-fn fielded_topk_indexed(scores: &FxHashMap<Tid, f32>, k: usize) -> Vec<(f32, Tid)> {
+/// `step` runs once per candidate so a backend can service interrupts; the pure
+/// entry point passes a no-op so plain unit tests can exercise it outside a
+/// backend, which is what keeps the test binary free of the interrupt symbol.
+fn fielded_topk_indexed_with(
+    scores: &FxHashMap<Tid, f32>,
+    k: usize,
+    mut step: impl FnMut(usize),
+) -> Vec<(f32, Tid)> {
     if k == 0 || scores.is_empty() {
         return Vec::new();
     }
     let mut heap = BinaryHeap::with_capacity(k.min(scores.len()) + 1);
     for (i, (&tid, &score)) in scores.iter().enumerate() {
-        interrupt_at(i);
+        step(i);
         let entry = FieldedRanked(score, tid);
         if heap.len() < k {
             heap.push(entry);
@@ -869,7 +876,7 @@ fn try_fielded_topk_visible(
     heap_oid: pg_sys::Oid,
     limit: usize,
 ) -> Option<Vec<(f32, VisibleTid)>> {
-    let selected = fielded_topk_indexed(scores, limit);
+    let selected = fielded_topk_indexed_with(scores, limit, interrupt_at);
     if selected.len() < limit {
         return None;
     }
@@ -2315,12 +2322,17 @@ mod tests {
 
 #[cfg(test)]
 mod fielded_topk_select_tests {
-    use super::{fielded_topk_indexed, rank};
+    use super::{fielded_topk_indexed_with, rank};
     use rustc_hash::FxHashMap;
     use segment::Tid;
 
     fn tid(n: u16) -> Tid {
         Tid::new(0, n).unwrap()
+    }
+
+    /// The pure entry point, as a plain unit test must call it.
+    fn topk(scores: &FxHashMap<Tid, f32>, k: usize) -> Vec<(f32, Tid)> {
+        fielded_topk_indexed_with(scores, k, |_| {})
     }
 
     #[test]
@@ -2334,8 +2346,16 @@ mod fielded_topk_select_tests {
         let mut expected: Vec<(f32, Tid)> = scores.iter().map(|(&t, &s)| (s, t)).collect();
         expected.sort_by(rank);
         expected.truncate(10);
-        assert_eq!(fielded_topk_indexed(&scores, 10), expected);
-        assert!(fielded_topk_indexed(&scores, 0).is_empty());
-        assert_eq!(fielded_topk_indexed(&scores, 100).len(), scores.len());
+        assert_eq!(topk(&scores, 10), expected);
+        assert!(topk(&scores, 0).is_empty());
+        assert_eq!(topk(&scores, 100).len(), scores.len());
+        // The step hook fires once per candidate; that is what the production
+        // entry uses to service interrupts across a large result set.
+        let mut steps = 0usize;
+        assert_eq!(
+            fielded_topk_indexed_with(&scores, 5, |_| steps += 1).len(),
+            5
+        );
+        assert_eq!(steps, scores.len());
     }
 }

@@ -13423,5 +13423,1597 @@
       "install": "script/pgrx-lock.py -- cargo pgrx install --package stannum --no-default-features --features pg18 --pg-config /tmp/stn3-a2-prefix/bin/pg_config --release",
       "acceptance_dsn": "host=/tmp/stn4-c2-topk/sockets port=28985 user=wxl dbname=poc"
     }
+  },
+  "pg18_final_acceptance": {
+    "protocol": "C2-build-v2 + C.2 advisory p50 + boolean contract census + cargo pgrx test pg18",
+    "protocol_ref": "docs/plans/stn4-per-field-payload-execution-2026-10-02.md — 'Build-measurement protocol C2-build-v2' and C.2 ranked p50 (concurrency 1, default GUCs, warmup discarded, 20 timed runs, nearest-rank)",
+    "engine": "18.4",
+    "prefix": "/tmp/stn3-a2-prefix",
+    "pgrx_home": "/tmp/stn3-a2-pgrx",
+    "head_sha": "fceb4dbcd12000e8afa3716c0692dbf007358ebb",
+    "instrumentation": "off",
+    "profile_env": {
+      "STANNUM_BUILD_PROFILE": null,
+      "STANNUM_FIELDED_PROFILE": null
+    },
+    "corpus_hashes": {
+      "english": "52775c8a17077f09f028f5758eb53df65f94dc37c5a1f3e800990f5a39f0bbeb",
+      "chinese": "0b2e37b54dde76b3cd59603681dd4580b3b36f690f738f22530489a483141dd4",
+      "paths": {
+        "english": "/tmp/stn4-c2-clean/en.csv",
+        "chinese": "/tmp/stn4-c2-clean/zh.csv"
+      }
+    },
+    "install": "script/pgrx-lock.py -- cargo pgrx install --package stannum --no-default-features --features pg18 --pg-config /tmp/stn3-a2-prefix/bin/pg_config --release",
+    "c2_build_v2": {
+      "seed": 20261004,
+      "pairs_per_corpus": 64,
+      "counterbalancing": "32 four-build blocks per corpus, MSSM / SMMS, 8 shuffled batches, fresh table load per build, one untimed warm-up build per system per batch",
+      "statistic": "median of adjacent paired ratios r_i = T_multi,i / T_single,i",
+      "uncertainty": "95% batch-cluster bootstrap, 10000 resamples, resampling whole batches with pairs intact",
+      "acceptance_rule": "PASS only when the bootstrap upper bound <= 1.8",
+      "raw_report": "/tmp/stn4-c2-build-v2-report.json (diagnostic host copy; the numbers below are the artifact of record)",
+      "campaign_window_start": "2026-10-04T15:46:11+0800",
+      "campaign_window_end": "2026-10-04T15:54:57+0800",
+      "campaign_loadavg_start": [
+        5.05517578125,
+        4.39404296875,
+        4.47705078125
+      ],
+      "campaign_loadavg_end": [
+        3.525390625,
+        4.0390625,
+        4.25048828125
+      ],
+      "postgres_settings": [
+        {
+          "name": "DateStyle",
+          "setting": "ISO, MDY",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 781,
+          "pending_restart": false
+        },
+        {
+          "name": "TimeZone",
+          "setting": "Asia/Shanghai",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 783,
+          "pending_restart": false
+        },
+        {
+          "name": "archive_mode",
+          "setting": "off",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "autovacuum_worker_slots",
+          "setting": "16",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 687,
+          "pending_restart": false
+        },
+        {
+          "name": "checkpoint_completion_target",
+          "setting": "0.9",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "300",
+          "unit": "s",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "default_text_search_config",
+          "setting": "pg_catalog.english",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 807,
+          "pending_restart": false
+        },
+        {
+          "name": "dynamic_shared_memory_type",
+          "setting": "posix",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 155,
+          "pending_restart": false
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "524288",
+          "unit": "8kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "effective_io_concurrency",
+          "setting": "16",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "huge_pages",
+          "setting": "try",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "jit",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "lc_messages",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 797,
+          "pending_restart": false
+        },
+        {
+          "name": "lc_monetary",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 799,
+          "pending_restart": false
+        },
+        {
+          "name": "lc_numeric",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 800,
+          "pending_restart": false
+        },
+        {
+          "name": "lc_time",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 801,
+          "pending_restart": false
+        },
+        {
+          "name": "listen_addresses",
+          "setting": "",
+          "unit": null,
+          "source": "command line",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "log_timezone",
+          "setting": "Asia/Shanghai",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 645,
+          "pending_restart": false
+        },
+        {
+          "name": "maintenance_work_mem",
+          "setting": "65536",
+          "unit": "kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "max_connections",
+          "setting": "100",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 65,
+          "pending_restart": false
+        },
+        {
+          "name": "max_parallel_maintenance_workers",
+          "setting": "2",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "max_parallel_workers",
+          "setting": "8",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "max_parallel_workers_per_gather",
+          "setting": "2",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "max_wal_senders",
+          "setting": "10",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "1024",
+          "unit": "MB",
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 271,
+          "pending_restart": false
+        },
+        {
+          "name": "max_worker_processes",
+          "setting": "8",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "min_wal_size",
+          "setting": "80",
+          "unit": "MB",
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 272,
+          "pending_restart": false
+        },
+        {
+          "name": "port",
+          "setting": "28994",
+          "unit": null,
+          "source": "command line",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "4",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "seq_page_cost",
+          "setting": "1",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "16384",
+          "unit": "8kB",
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-v2-cluster/data/postgresql.conf",
+          "sourceline": 132,
+          "pending_restart": false
+        },
+        {
+          "name": "shared_preload_libraries",
+          "setting": "",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "unix_socket_directories",
+          "setting": "/tmp/stn4-c2-v2-cluster",
+          "unit": null,
+          "source": "command line",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "wal_buffers",
+          "setting": "512",
+          "unit": "8kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "wal_level",
+          "setting": "replica",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null,
+          "pending_restart": false
+        }
+      ],
+      "english": {
+        "n_pairs": 64,
+        "median_ratio": 1.606606916898511,
+        "median_multi_s": 1.1645076459972188,
+        "median_single_s": 0.7333846664841985,
+        "bootstrap95": {
+          "lo": 1.561259370886971,
+          "hi": 1.6378607578255187,
+          "n": 10000,
+          "seed": 20261004
+        },
+        "pairs_above_1_8": 7,
+        "decision": "PASS",
+        "dict_bytes_multi": 27184,
+        "dict_bytes_single": 27168,
+        "dict_ratio": 1.0005889281507656,
+        "paired_ratios": [
+          1.6914557082365826,
+          1.629887403550519,
+          1.4745463642841428,
+          1.4625915871107735,
+          1.5452765020258492,
+          1.5645967549449544,
+          1.620947398250743,
+          1.3108373213104718,
+          1.4844551152327072,
+          1.6147868678126207,
+          1.2542493945608912,
+          1.7436778568750095,
+          1.6933733295688316,
+          1.4297835776699652,
+          1.6442120729866023,
+          1.330215664099032,
+          1.803072922838133,
+          1.752805437744243,
+          1.486179468924841,
+          1.6704090800003888,
+          1.4588023307598195,
+          1.5754335950297493,
+          1.3284460691936855,
+          1.5912907645452805,
+          1.4487523214631515,
+          1.5182971973466857,
+          1.6302678899648797,
+          1.6038053614628789,
+          1.6444384124262692,
+          1.6465026206263778,
+          1.388363684822869,
+          1.5484991467423106,
+          1.596666093841411,
+          1.6094084723341435,
+          1.738493783388394,
+          1.6456851930160328,
+          1.5715433461738832,
+          1.862039809145948,
+          1.8817887846916868,
+          1.714619674600309,
+          1.377377039953113,
+          1.4840517582432058,
+          1.7101202136642009,
+          1.6306377780513868,
+          1.2804208938869102,
+          1.7891520318869387,
+          1.5489374725142144,
+          1.5579219868289877,
+          1.8010240026784743,
+          1.855633625483901,
+          1.6263358621806936,
+          1.74173342452769,
+          1.6378607578255187,
+          1.639224607579348,
+          1.4385956418836787,
+          1.5305182120704022,
+          1.7475316613388905,
+          2.0181610995418073,
+          1.738580654353214,
+          1.8065512816046785,
+          1.5010444012787705,
+          1.5958594631981686,
+          1.409468554991484,
+          1.3707765029804464
+        ],
+        "query_answers": {
+          "the": [
+            "1925",
+            "4022",
+            "4901",
+            "1142",
+            "3219",
+            "6166",
+            "14362",
+            "1838",
+            "2039",
+            "16320"
+          ],
+          "history": [
+            "10369",
+            "17449",
+            "3789",
+            "7758",
+            "9892",
+            "2279",
+            "2139",
+            "19041",
+            "8066",
+            "11628"
+          ],
+          "telescope": [
+            "11630",
+            "12175",
+            "2619",
+            "4376",
+            "11638",
+            "19092",
+            "8414",
+            "4811",
+            "3310",
+            "10927"
+          ],
+          "computer AND science": [
+            "17887",
+            "1822",
+            "6148",
+            "12423",
+            "863",
+            "2035",
+            "13816",
+            "5135",
+            "11508",
+            "4866"
+          ],
+          "quasar": [
+            "10784",
+            "11940",
+            "9581",
+            "7525",
+            "10075",
+            "11598",
+            "8911",
+            "10731",
+            "10780",
+            "11133"
+          ],
+          "nebula": [
+            "5993",
+            "10041",
+            "13705",
+            "17004",
+            "915",
+            "11452",
+            "14061",
+            "9307",
+            "5891",
+            "2819"
+          ],
+          "history AND telescope": [
+            "2619",
+            "19092",
+            "15760",
+            "8354",
+            "18594",
+            "8414",
+            "1211",
+            "2189",
+            "11628",
+            "15561"
+          ],
+          "war AND history": [
+            "17449",
+            "9892",
+            "6079",
+            "729",
+            "17923",
+            "14261",
+            "10256",
+            "11604",
+            "12029",
+            "3088"
+          ],
+          "(index OR query) AND search": [
+            "19117",
+            "6495",
+            "18970",
+            "1988",
+            "10514",
+            "10836",
+            "16341",
+            "17768",
+            "11195",
+            "6010"
+          ],
+          "telescope OR astronomy": [
+            "14245",
+            "13143",
+            "7148",
+            "8414",
+            "16711",
+            "10861",
+            "6937",
+            "1926",
+            "10124",
+            "10872"
+          ],
+          "quasar OR nebula": [
+            "12343",
+            "5993",
+            "10784",
+            "11940",
+            "10041",
+            "9581",
+            "7525",
+            "10075",
+            "11598",
+            "13705"
+          ],
+          "python OR database": [
+            "14619",
+            "8974",
+            "10066",
+            "17057",
+            "4059",
+            "9756",
+            "11025",
+            "18243",
+            "16994",
+            "9176"
+          ]
+        },
+        "window_start": "2026-10-04T15:46:12+0800",
+        "window_end": "2026-10-04T15:49:15+0800",
+        "loadavg_start": [
+          5.05517578125,
+          4.39404296875,
+          4.47705078125
+        ],
+        "loadavg_end": [
+          4.40380859375,
+          4.2158203125,
+          4.36962890625
+        ]
+      },
+      "chinese": {
+        "n_pairs": 64,
+        "median_ratio": 1.264028381410137,
+        "median_multi_s": 1.982128958494286,
+        "median_single_s": 1.5694628749915864,
+        "bootstrap95": {
+          "lo": 1.2488942652156099,
+          "hi": 1.2781287609223955,
+          "n": 10000,
+          "seed": 20261004
+        },
+        "pairs_above_1_8": 0,
+        "decision": "PASS",
+        "dict_bytes_multi": 28173,
+        "dict_bytes_single": 28158,
+        "dict_ratio": 1.000532708288941,
+        "paired_ratios": [
+          1.2678656976920657,
+          1.3826386944629965,
+          1.5071797881167162,
+          1.2902560224003004,
+          1.2678339883958158,
+          1.1931917796338554,
+          1.2321744953304075,
+          1.2221825358686944,
+          1.2381743526462754,
+          1.312720480074412,
+          1.1963154160859877,
+          1.197862672736001,
+          1.2781287609223955,
+          1.2971010598435417,
+          1.3172126039572185,
+          1.2888511273693761,
+          1.2114528294245315,
+          1.2422311952785994,
+          1.2741295746531212,
+          1.2059603347675412,
+          1.2923286920709258,
+          1.2972620958169703,
+          1.2348524155720164,
+          1.3538908252544395,
+          1.2014687041257595,
+          1.30276223677674,
+          1.2121335752262152,
+          1.2848587288979183,
+          1.3395738427248431,
+          1.2473903772671673,
+          1.3032253720790714,
+          1.249781726164789,
+          1.2822523652447813,
+          1.2459654384160694,
+          1.263077839641321,
+          1.2375913356622974,
+          1.3716478258963498,
+          1.2518230920151503,
+          1.192374575489299,
+          1.2254935765879482,
+          1.3188967400862823,
+          1.137197296227025,
+          1.208788526380982,
+          1.2149349321988179,
+          1.207133174810934,
+          1.2408778173871118,
+          1.2884413590170274,
+          1.2626535136776438,
+          1.3625992367608253,
+          1.2338452391106627,
+          1.2954644251002636,
+          1.2885256182187694,
+          1.1653503943747132,
+          1.247871673156049,
+          1.264978923178953,
+          1.3331366329277916,
+          1.2671622691880515,
+          1.224018300771167,
+          1.303136239192308,
+          1.4724193019978578,
+          1.2801767443237315,
+          1.2620290536319747,
+          1.2409401184112374,
+          1.3465946069134984
+        ],
+        "query_answers": {
+          "我们": [
+            "14891",
+            "15580",
+            "6569",
+            "11932",
+            "4267",
+            "15156",
+            "18566",
+            "5004",
+            "17799",
+            "18459"
+          ],
+          "历史": [
+            "9704",
+            "11677",
+            "19864",
+            "1337",
+            "16124",
+            "11628",
+            "7750",
+            "2419",
+            "12887",
+            "12151"
+          ],
+          "望远镜": [
+            "2789",
+            "3969",
+            "15378",
+            "19563",
+            "18586",
+            "9888",
+            "8202",
+            "11768",
+            "19066",
+            "5058"
+          ],
+          "计算机 AND 科学": [
+            "18124",
+            "17792",
+            "13990",
+            "4875",
+            "11188",
+            "4216",
+            "1343",
+            "19326",
+            "12131",
+            "13867"
+          ],
+          "彗星": [
+            "6733",
+            "1322",
+            "19404",
+            "18052",
+            "7007",
+            "18438",
+            "11822",
+            "3835",
+            "5513",
+            "12977"
+          ],
+          "星云": [
+            "1769",
+            "2312",
+            "17996",
+            "16911",
+            "12448",
+            "18138",
+            "866",
+            "2584",
+            "1099",
+            "10201"
+          ],
+          "历史 AND 望远镜": [
+            "15378",
+            "12620",
+            "6580",
+            "18686",
+            "19279",
+            "4057",
+            "18542",
+            "19671",
+            "19426",
+            "18465"
+          ],
+          "战争 AND 历史": [
+            "19864",
+            "18748",
+            "19117",
+            "17772",
+            "11838",
+            "4425",
+            "9716",
+            "11818",
+            "16997",
+            "14890"
+          ],
+          "(索引 OR 查询) AND 搜索": [
+            "4254",
+            "11599"
+          ],
+          "望远镜 OR 天文学": [
+            "2789",
+            "3969",
+            "15030",
+            "17723",
+            "15378",
+            "19404",
+            "19563",
+            "18586",
+            "2591",
+            "3911"
+          ],
+          "类星体 OR 星云": [
+            "1818",
+            "1769",
+            "8183",
+            "1164",
+            "15271",
+            "18057",
+            "2312",
+            "17996",
+            "19340",
+            "16911"
+          ],
+          "脉冲星 OR 数据库": [
+            "12046",
+            "6295",
+            "1567",
+            "12072",
+            "7484",
+            "13103",
+            "10150",
+            "5021",
+            "8223",
+            "12224"
+          ]
+        },
+        "window_start": "2026-10-04T15:49:15+0800",
+        "window_end": "2026-10-04T15:54:57+0800",
+        "loadavg_start": [
+          4.40380859375,
+          4.2158203125,
+          4.36962890625
+        ],
+        "loadavg_end": [
+          3.525390625,
+          4.0390625,
+          4.25048828125
+        ]
+      },
+      "vs_2ea40e0_c2_build_v2_acceptance": {
+        "english_median_before": 1.6203769269930006,
+        "english_median_after": 1.606606916898511,
+        "english_bootstrap95_before": {
+          "lo": 1.5635985563147916,
+          "hi": 1.6523518804849373,
+          "n": 10000,
+          "seed": 20261004
+        },
+        "english_bootstrap95_after": {
+          "lo": 1.561259370886971,
+          "hi": 1.6378607578255187,
+          "n": 10000,
+          "seed": 20261004
+        },
+        "english_decision_before": "PASS",
+        "english_decision_after": "PASS",
+        "chinese_median_before": 1.2616166197885814,
+        "chinese_median_after": 1.264028381410137,
+        "chinese_bootstrap95_before": {
+          "lo": 1.2395871806096745,
+          "hi": 1.286277838059669,
+          "n": 10000,
+          "seed": 20261004
+        },
+        "chinese_bootstrap95_after": {
+          "lo": 1.2488942652156099,
+          "hi": 1.2781287609223955,
+          "n": 10000,
+          "seed": 20261004
+        },
+        "chinese_decision_before": "PASS",
+        "chinese_decision_after": "PASS",
+        "reproduces": true,
+        "note": "Same PASS decisions on both corpora; both CIs lie entirely below 1.8 and overlap the 2ea40e0 intervals. Query answers on stn4_multi match the 2ea40e0 recorded answers bit-for-bit."
+      }
+    },
+    "advisory_p50": {
+      "protocol": {
+        "pg": "18.4",
+        "concurrency": 1,
+        "gucs": "defaults (effective settings recorded)",
+        "warmup": 1,
+        "timed_runs": 20,
+        "nearest_rank": "p50=ceil(0.50*n)th, p99=ceil(0.99*n)th of sorted samples; n=20 → 10th and 20th",
+        "cold": "labeled first SELECT of each query after CREATE INDEX and CHECKPOINT; not mixed into the 20",
+        "server_topology": "isolated PG18.4 prefix /tmp/stn3-a2-prefix; PGRX_HOME=/tmp/stn3-a2-pgrx; fresh datadir /tmp/stn4-c2-final/pgdata port 28986 unix_socket_directories /tmp/stn4-c2-final/sockets; STANNUM_FIELDED_PROFILE and STANNUM_BUILD_PROFILE unset; leftover idle a2-prefix servers on /tmp/stn4-c2-topk/pgdata:28985 and /tmp/stn4-c2-clean/pgdata:51828 were not stopped (not started by this run); B.3-era census pid 24716 was already gone; v040 not rerun; HEAD stn4_multi vs stn3_single only",
+        "timed_sql": "SELECT d.id FROM documents d JOIN stannum.search('idx'::regclass, %s, 10) AS s ON d.ctid = s.ctid",
+        "search_limit": 10,
+        "field_weights": "defaults",
+        "instrumentation": "unset"
+      },
+      "dsn": "host=/tmp/stn4-c2-final/sockets port=28986 user=wxl dbname=poc",
+      "postgres_settings": [
+        {
+          "name": "DateStyle",
+          "setting": "ISO, MDY",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 781
+        },
+        {
+          "name": "TimeZone",
+          "setting": "Asia/Shanghai",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 783
+        },
+        {
+          "name": "archive_mode",
+          "setting": "off",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "autovacuum_worker_slots",
+          "setting": "16",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 687
+        },
+        {
+          "name": "checkpoint_completion_target",
+          "setting": "0.9",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "checkpoint_timeout",
+          "setting": "300",
+          "unit": "s",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "default_text_search_config",
+          "setting": "pg_catalog.english",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 807
+        },
+        {
+          "name": "dynamic_shared_memory_type",
+          "setting": "posix",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 155
+        },
+        {
+          "name": "effective_cache_size",
+          "setting": "524288",
+          "unit": "8kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "effective_io_concurrency",
+          "setting": "16",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "fsync",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "full_page_writes",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "huge_pages",
+          "setting": "try",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "jit",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "lc_messages",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 797
+        },
+        {
+          "name": "lc_monetary",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 799
+        },
+        {
+          "name": "lc_numeric",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 800
+        },
+        {
+          "name": "lc_time",
+          "setting": "C",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 801
+        },
+        {
+          "name": "listen_addresses",
+          "setting": "",
+          "unit": null,
+          "source": "command line",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "log_timezone",
+          "setting": "Asia/Shanghai",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 645
+        },
+        {
+          "name": "maintenance_work_mem",
+          "setting": "65536",
+          "unit": "kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "max_connections",
+          "setting": "100",
+          "unit": null,
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 65
+        },
+        {
+          "name": "max_parallel_maintenance_workers",
+          "setting": "2",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "max_parallel_workers",
+          "setting": "8",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "max_parallel_workers_per_gather",
+          "setting": "2",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "max_wal_senders",
+          "setting": "10",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "max_wal_size",
+          "setting": "1024",
+          "unit": "MB",
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 271
+        },
+        {
+          "name": "max_worker_processes",
+          "setting": "8",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "min_wal_size",
+          "setting": "80",
+          "unit": "MB",
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 272
+        },
+        {
+          "name": "port",
+          "setting": "28986",
+          "unit": null,
+          "source": "command line",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "random_page_cost",
+          "setting": "4",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "seq_page_cost",
+          "setting": "1",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "shared_buffers",
+          "setting": "16384",
+          "unit": "8kB",
+          "source": "configuration file",
+          "sourcefile": "/tmp/stn4-c2-final/pgdata/postgresql.conf",
+          "sourceline": 132
+        },
+        {
+          "name": "shared_preload_libraries",
+          "setting": "",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "synchronous_commit",
+          "setting": "on",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "unix_socket_directories",
+          "setting": "/tmp/stn4-c2-final/sockets",
+          "unit": null,
+          "source": "command line",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "wal_buffers",
+          "setting": "512",
+          "unit": "8kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "wal_level",
+          "setting": "replica",
+          "unit": null,
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        },
+        {
+          "name": "work_mem",
+          "setting": "4096",
+          "unit": "kB",
+          "source": "default",
+          "sourcefile": null,
+          "sourceline": null
+        }
+      ],
+      "environment": {
+        "measurement_window_start": "2026-10-04T15:57:29+0800",
+        "measurement_window_end": "2026-10-04T15:57:55+0800",
+        "loadavg_start": [
+          5.76220703125,
+          5.46240234375,
+          4.83935546875
+        ],
+        "loadavg_end": [
+          6.81640625,
+          5.7177734375,
+          4.94677734375
+        ],
+        "uptime_start": "15:57  up 2 days,  7:55, 1 user, load averages: 5.76 5.46 4.84",
+        "uptime_end": "15:57  up 2 days,  7:55, 1 user, load averages: 6.82 5.72 4.95",
+        "ncpu": 8,
+        "uname": {
+          "system": "Darwin",
+          "node": "xianliangdeMac-mini.local",
+          "release": "25.6.0",
+          "version": "Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:43 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8112",
+          "machine": "arm64",
+          "processor": "arm"
+        }
+      },
+      "english": {
+        "aggregate": {
+          "mean_multi_p50_s": 0.001372326255174509,
+          "mean_single_p50_s": 0.0015043193343444727,
+          "ratio": 0.9122572739999506,
+          "threshold": 1.3,
+          "pass": true,
+          "waiver": null
+        },
+        "per_query": {
+          "the": {
+            "multi_p50_s": 0.0072351669950876385,
+            "single_p50_s": 0.008257875015260652,
+            "ratio": 0.876153608733114,
+            "multi_p99_s": 0.007590458000777289,
+            "single_p99_s": 0.009494249999988824,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "history": {
+            "multi_p50_s": 0.0007465830130968243,
+            "single_p50_s": 0.0010961660009343177,
+            "ratio": 0.6810857228380317,
+            "multi_p99_s": 0.0008488339954055846,
+            "single_p99_s": 0.0014789999986533076,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "telescope": {
+            "multi_p50_s": 0.0007236660167109221,
+            "single_p50_s": 0.0010732080263551325,
+            "ratio": 0.6743017187158603,
+            "multi_p99_s": 0.0007723330054432154,
+            "single_p99_s": 0.0010969580034725368,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "computer AND science": {
+            "multi_p50_s": 0.0009615000162739307,
+            "single_p50_s": 0.0006393330113496631,
+            "ratio": 1.5039111061137878,
+            "multi_p99_s": 0.0009863339946605265,
+            "single_p99_s": 0.0016690420161467046,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "quasar": {
+            "multi_p50_s": 0.00019566697301343083,
+            "single_p50_s": 0.00024774999474175274,
+            "ratio": 0.7897758916902835,
+            "multi_p99_s": 0.0002586659975349903,
+            "single_p99_s": 0.00031516599119640887,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "nebula": {
+            "multi_p50_s": 0.00020666600903496146,
+            "single_p50_s": 0.0002632089890539646,
+            "ratio": 0.7851783853498621,
+            "multi_p99_s": 0.00023145898012444377,
+            "single_p99_s": 0.001389917015330866,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "history AND telescope": {
+            "multi_p50_s": 0.0009238749917130917,
+            "single_p50_s": 0.0005871249886695296,
+            "ratio": 1.5735576062035166,
+            "multi_p99_s": 0.0009459999855607748,
+            "single_p99_s": 0.0008210419910028577,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "war AND history": {
+            "multi_p50_s": 0.0009078750154003501,
+            "single_p50_s": 0.0005475000070873648,
+            "ratio": 1.6582191847451064,
+            "multi_p99_s": 0.000996166025288403,
+            "single_p99_s": 0.0006085839995648712,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "(index OR query) AND search": {
+            "multi_p50_s": 0.0015374580107163638,
+            "single_p50_s": 0.0008489169995300472,
+            "ratio": 1.811081662362147,
+            "multi_p99_s": 0.0017854170000646263,
+            "single_p99_s": 0.0012644579983316362,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "telescope OR astronomy": {
+            "multi_p50_s": 0.0014484160055872053,
+            "single_p50_s": 0.0021142079785931855,
+            "ratio": 0.6850868127699505,
+            "multi_p99_s": 0.0015232499863486737,
+            "single_p99_s": 0.0022478330065496266,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "quasar OR nebula": {
+            "multi_p50_s": 0.0002462920092511922,
+            "single_p50_s": 0.0003573329886421561,
+            "ratio": 0.689250690755105,
+            "multi_p99_s": 0.000305124995065853,
+            "single_p99_s": 0.00047608299064449966,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "python OR database": {
+            "multi_p50_s": 0.0013347500062081963,
+            "single_p50_s": 0.0020192080119159073,
+            "ratio": 0.6610265006534571,
+            "multi_p99_s": 0.00147387501783669,
+            "single_p99_s": 0.0026974999927915633,
+            "rows": 10,
+            "rows_match_single": true
+          }
+        },
+        "dict_bytes_multi": 27184,
+        "dict_bytes_single": 27168
+      },
+      "chinese": {
+        "aggregate": {
+          "mean_multi_p50_s": 0.003697760410432238,
+          "mean_single_p50_s": 0.0015227082500738713,
+          "ratio": 2.428410307918702,
+          "threshold": 1.3,
+          "pass": false,
+          "waiver": null
+        },
+        "per_query": {
+          "我们": {
+            "multi_p50_s": 0.014464249979937449,
+            "single_p50_s": 0.007304750004550442,
+            "ratio": 1.9801156741746189,
+            "multi_p99_s": 0.021955167001578957,
+            "single_p99_s": 0.007542333012679592,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "历史": {
+            "multi_p50_s": 0.004898958984995261,
+            "single_p50_s": 0.002961791993584484,
+            "ratio": 1.6540523425030726,
+            "multi_p99_s": 0.009493542020209134,
+            "single_p99_s": 0.003224666987080127,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "望远镜": {
+            "multi_p50_s": 0.0015083749894984066,
+            "single_p50_s": 0.0006470830121543258,
+            "ratio": 2.331037843933797,
+            "multi_p99_s": 0.0015749580052215606,
+            "single_p99_s": 0.0007062919903546572,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "计算机 AND 科学": {
+            "multi_p50_s": 0.004121750011108816,
+            "single_p50_s": 0.0012992080010008067,
+            "ratio": 3.1725097197167402,
+            "multi_p99_s": 0.01435433400911279,
+            "single_p99_s": 0.0013405419886112213,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "彗星": {
+            "multi_p50_s": 0.001788416993804276,
+            "single_p50_s": 0.0007330419903155416,
+            "ratio": 2.439719712419807,
+            "multi_p99_s": 0.001963957998668775,
+            "single_p99_s": 0.0008181669982150197,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "星云": {
+            "multi_p50_s": 0.001375416002701968,
+            "single_p50_s": 0.0006460419972427189,
+            "ratio": 2.1289885310431638,
+            "multi_p99_s": 0.0015207090182229877,
+            "single_p99_s": 0.0007772080134600401,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "历史 AND 望远镜": {
+            "multi_p50_s": 0.005180624983040616,
+            "single_p50_s": 0.0011449170124251395,
+            "ratio": 4.524891260081046,
+            "multi_p99_s": 0.022837791999336332,
+            "single_p99_s": 0.001309542014496401,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "战争 AND 历史": {
+            "multi_p50_s": 0.004575667000608519,
+            "single_p50_s": 0.0010784159821923822,
+            "ratio": 4.242951770156769,
+            "multi_p99_s": 0.014509041997371241,
+            "single_p99_s": 0.0011972920037806034,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "(索引 OR 查询) AND 搜索": {
+            "multi_p50_s": 0.0009523750049993396,
+            "single_p50_s": 0.000300083018373698,
+            "ratio": 3.1737050972119065,
+            "multi_p99_s": 0.01265070799854584,
+            "single_p99_s": 0.0004483330121729523,
+            "rows": 2,
+            "rows_match_single": true
+          },
+          "望远镜 OR 天文学": {
+            "multi_p50_s": 0.0018627909885253757,
+            "single_p50_s": 0.0007261249993462116,
+            "ratio": 2.5653861114857572,
+            "multi_p99_s": 0.002377124998020008,
+            "single_p99_s": 0.0012869579950347543,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "类星体 OR 星云": {
+            "multi_p50_s": 0.001968915981706232,
+            "single_p50_s": 0.0007504579843953252,
+            "ratio": 2.6236192067336965,
+            "multi_p99_s": 0.0023982920101843774,
+            "single_p99_s": 0.0008120829879771918,
+            "rows": 10,
+            "rows_match_single": true
+          },
+          "脉冲星 OR 数据库": {
+            "multi_p50_s": 0.0016755840042605996,
+            "single_p50_s": 0.0006805830053053796,
+            "ratio": 2.461983316067024,
+            "multi_p99_s": 0.011232291988562793,
+            "single_p99_s": 0.0007295839895959944,
+            "rows": 10,
+            "rows_match_single": true
+          }
+        },
+        "dict_bytes_multi": 28173,
+        "dict_bytes_single": 28158
+      },
+      "waiver": null
+    },
+    "census": {
+      "command": "CONFORMANCE_DSN=host=/tmp/stn4-c2-final/sockets port=28986 user=wxl dbname=poc /tmp/contract-venv2/bin/python contract/run.py --engine stannum --check contract/expected/stannum-0.4.0",
+      "summary": "6 FAIL, 4 GAP, 44 PASS of 54 cases",
+      "fail": [
+        "fields.boolean_duplicate_leaf",
+        "fields.phrase_no_cross",
+        "fields.phrase_scoped",
+        "fields.then_no_cross",
+        "fields.near_no_cross",
+        "fields.patterns"
+      ],
+      "gap": [
+        "fields.boolean_regex_on_multi",
+        "fields.boolean_mixed_regex_and_term",
+        "catalog.functions",
+        "catalog.gucs"
+      ],
+      "note": "Same ids as pg18_after_tf_bucket_optimization and pg18_after_topk_optimization."
+    },
+    "pgrx_test": {
+      "command": "PGRX_HOME=/tmp/stn3-a2-pgrx script/pgrx-lock.py -- cargo pgrx test pg18 -p stannum",
+      "result": "ok. 341 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 121.87s",
+      "window_start": "2026-10-04T15:59:06+0800",
+      "window_end": "2026-10-04T16:01:16+0800",
+      "loadavg_start": [
+        6.28,
+        5.8,
+        5.04
+      ],
+      "loadavg_end": [
+        7.02,
+        6.64,
+        5.51
+      ],
+      "note": "pgrx test installs a debug pg_test build into the prefix; this ran after the release-build measurements."
+    },
+    "gates": {
+      "mandatory_dictionary_and_build": {
+        "rule": "dict_ratio <= 1.8 and C2-build-v2 bootstrap upper bound <= 1.8 on each corpus",
+        "english": {
+          "dict_ratio": 1.0005889281507656,
+          "build_median_ratio": 1.606606916898511,
+          "build_ci": {
+            "lo": 1.561259370886971,
+            "hi": 1.6378607578255187,
+            "n": 10000,
+            "seed": 20261004
+          },
+          "decision": "PASS"
+        },
+        "chinese": {
+          "dict_ratio": 1.000532708288941,
+          "build_median_ratio": 1.264028381410137,
+          "build_ci": {
+            "lo": 1.2488942652156099,
+            "hi": 1.2781287609223955,
+            "n": 10000,
+            "seed": 20261004
+          },
+          "decision": "PASS"
+        },
+        "pass": true
+      },
+      "advisory_ranked_p50": {
+        "rule": "mean-of-per-query p50_s(stn4_multi) / mean-of-per-query p50_s(stn3_single) <= 1.3, or a named waiver in this object",
+        "english": {
+          "mean_multi_p50_s": 0.001372326255174509,
+          "mean_single_p50_s": 0.0015043193343444727,
+          "ratio": 0.9122572739999506,
+          "threshold": 1.3,
+          "pass": true,
+          "waiver": null
+        },
+        "chinese": {
+          "mean_multi_p50_s": 0.003697760410432238,
+          "mean_single_p50_s": 0.0015227082500738713,
+          "ratio": 2.428410307918702,
+          "threshold": 1.3,
+          "pass": false,
+          "waiver": null
+        },
+        "waiver": null,
+        "pass": false
+      }
+    }
   }
 }
