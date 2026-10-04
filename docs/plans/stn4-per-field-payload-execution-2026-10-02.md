@@ -939,6 +939,38 @@ channels (design §4).
       stop and get a case-specific positional divergence adjudicated — do not
       concatenate positions to reproduce it and never rewrite a frozen
       recording.
+  - **Controller pre-derivation (2026-10-04): all five target answers were
+    independently derived from the `spans` / `patterns` corpora and design §4,
+    and no recorded answer contradicts §4. D.2 targets exact match.** `spans`
+    corpus: 1 `title="alpha beta"`/`other`, 2 `alpha`/`beta`, 3 `"beta alpha"`/`pad`,
+    4 `"alpha xx beta"`/`pad`, 5 `null`/`"needle here"`, 6 `needle`/`null`,
+    7 `pad`/`"alpha beta"`. `"alpha beta"` → `[1,7]`: 1 and 7 have the phrase
+    inside one field; 2 has `alpha` in title and `beta` in body, which §4
+    forbids joining; 3 has them reversed in one field (not adjacent); 4 has
+    `beta` two tokens later. `title:("alpha beta")` → `1`, because 7's hit is
+    in body. `alpha THEN/0 beta` → `[1,7]`, the same adjacency rule.
+    `alpha NEAR/1 beta` → `[1,3,4,7]`: 3 is in one field with the pair
+    reversed (NEAR is symmetric) and 4 has one token between, so NEAR/1's slop
+    admits distance 2; 2 is still excluded as cross-field, which is the
+    property the case exists to pin. `patterns` corpus: 1 `apple`/`other`,
+    2 `apply`/`zebra`, 3 `needle`/`"alpha beta"`, 4 `zzz`/`apple`.
+    `app*` → `[1,2,4]` (any-field union: row 4's `apple` is in body);
+    `title:(app*)`, `title:(MATCHES app.*)`, `title:(apple~1)`,
+    `title:(apple TO apply)` → `[1,2]` (title only, so row 4 drops).
+    Consequence for D.2's implementation: the four field-scoped pattern shapes
+    and the two boolean regex cases all require **expansion to carry the
+    field mask per expanded term**, which is why D.1 must land first.
+    **Lowering facts the controller verified in `tinql/src/runtime/lower.rs`**
+    (so D.2 binds positions per field instead of re-deriving them): `Then(l,
+    r, gap)` lowers to `MaxGaps { max_gaps: gap, inner: Ordered([l, r]) }` —
+    ordered, non-overlapping, gaps ≤ n; `Near(l, r, gap)` lowers to the same
+    filter over `Unordered([l, r])` — order-insensitive, which is why `beta
+    alpha` matches NEAR/1 and why `alpha xx beta` (one intervening position,
+    gap count 1) also matches. A phrase lowers to an `Ordered` chain with the
+    gap budget pinned. All three are positional over **one field's** position
+    stream, so §4's "OR of per-field bindings" means evaluating the span
+    expression once per channel and unioning the documents, never
+    concatenating the channels' position streams.
   - Review focus: design §4 phrases/spans;
 
 - [ ] **D.3 Field-aware highlights + snippets**
