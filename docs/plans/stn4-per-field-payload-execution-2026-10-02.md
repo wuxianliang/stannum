@@ -475,6 +475,44 @@ D.\* after C.2. E.1 may already have started after A.4.
     superlinear jump; English body volume dominates). Gate fields unchanged;
     Phase D.* still not started.
 
+- [ ] **C.2-R Fielded boolean correctness — remediation** (user-authorized
+  repair, unlocked while C.2 stays RED: it fixes a defect, it is not Phase D
+  feature work)
+  - Goal: multi-column `stannum.search()` / `stannum_count()` must never return
+    a silently wrong boolean answer. Either evaluate the query correctly or
+    raise the existing `does not support this query on a multi-column index`
+    error before any scan.
+  - Defect: `collect_fielded_terms` flattened `And` and `Or` identically and
+    collected `Not` as a positive leaf, conjunction-ness came from the root node
+    only, and `hits >= terms.len()` then required every leaf. Net semantics were
+    "root AND → AND of all leaves, else OR of all leaves, NOT → positive", so
+    `(A OR B) AND C` answered `A AND B AND C`, `A OR (B AND C)` answered
+    `A OR B OR C`, and `C AND NOT A` answered `C AND A`. Introduced by STN3 4.5
+    `1212a25` (multi-column unlock), not by STN4; a regression against 0.4.0,
+    which had no fielded path.
+  - Repair: whole-tree allowlist validator + recursive `eval_fielded` over the
+    fielded postings (And = intersect, Or/`Disjunction{min}`/`AtLeast` = count
+    satisfied direct children, `Not` = complement over the indexed universe,
+    `MatchAll` = universe, `Field` = leaf mask only, `Boost` = score only), one
+    shared membership path for `search()` and `search_count()`, and
+    `Regex`/`Range`/`Fuzzy`/`Span`/`SpanExpr` rejected loudly anywhere in the
+    tree. Scores and row order for the previously correct shapes are unchanged.
+    Bounded-interval `check_for_interrupts!` covers the new in-memory set work.
+  - Done when: pgrx pg_test suite green (336 passed / 0 failed / 5 ignored);
+    `script/test-all quick` green; fmt + clippy clean; census unchanged from the
+    pre-repair build on the same install (verified by control experiment: both
+    give `7 FAIL, 1 GAP, 31 PASS` on PG17.11 Homebrew — the plan ledger's
+    `5 FAIL / 2 GAP / 32 PASS` was measured on a PG18.4 engine and does not
+    reproduce here for `calls.stop_words` and `catalog.functions`; both
+    pre-date this step and need their own look).
+  - Field-scope surface note locked by test: field scope requires `name:(…)`
+    (`grammar.pest` `field_head`); a bare `name:term` is a colon-bearing token
+    and matches nothing, on both single- and multi-column indexes.
+  - Review focus: design §9 (fielded query correctness); contract gap — the
+    suite has **no boolean coverage at all** (all 14 distinct query literals in
+    `contract/cases/**` contain no `OR`/`AND`), which is why this survived
+    until a benchmark query surfaced it.
+
 - [ ] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
   exports and fixtures, **AND the STNF-v1 df-sidecar query reader +
   query-facing `DfEntry` APIs**; retain only the isolated STNF-v1 trailer
@@ -758,6 +796,7 @@ work.
 | B.1 | 0555857 | 6 | 1 | 32 | arithmetic+expansion recovered; phrase/span/patterns still `search()` unsupported |
 | B.3 | | | | | informational |
 | C.1 | 547f080 | 5 | 2 | 32 | five §5.2 rows bit-exact vs 0.4.0; FAIL = phrase/span/patterns (Phase D); GAP = catalog.gucs + catalog.functions |
+| C.2-R (PG17.11 control) | 8ba6683 | 7 | 1 | 31 | **Same before and after the C.2-R repair** (control experiment: identical FAIL ids on both builds). Extra vs the C.1 row: `calls.stop_words` (`builtin_stop_words('auto')` = zh+en since 0b37be0, an ancestor of the C.1 commit) and `catalog.functions` (documented GAP whose `expected.extra` no longer matches). Both pre-date C.2-R; the C.1 row was measured on a PG18.4 engine and does not reproduce on PG17.11. Unresolved. |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
 | E.4 | | 0 | ≤2 | | release gate |
 
