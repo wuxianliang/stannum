@@ -1151,7 +1151,7 @@ channels (design §4).
     now PASS, so their divergence entries are removed (the plan's D.2
     done-when requires this; it overrides a brief's blanket "leave
     `contract/divergences/**` alone").
-- [ ] **D.3 Field-aware highlights + snippets**
+- [x] **D.3 Field-aware highlights + snippets**
   - Goal: 5-arg/bound forms with field; wrapper-field / no-mark / first-mark
     / first-non-NULL / NULL-skip snippet selection; `search()` multi-column
     form unstubbed for supported queries.
@@ -1164,6 +1164,45 @@ channels (design §4).
       `--area fields` 0 FAIL; multi-column `search` cases from Phase 2.4
       stubs green.
   - Review focus: design §4 highlights; parent §4.1 SQL forms.
+  - Result (**code @ 1431229**, box checked separately): **DONE-WHEN MET.**
+    `--case fields.snippets --case fields.highlight_spans` → **2 PASS of 2**;
+    `--area fields` → **7 PASS of 7, 0 FAIL**; full census unchanged at
+    **1 FAIL / 2 GAP / 51 PASS of 54** (the ruled duplicate-leaf FAIL and E.2's
+    two catalog GAPs). TIN conformance unchanged, **exit 0**, 169/189.
+    `project_to_field` was placed in **`tinql/src/runtime/eval.rs`**, beside the
+    evaluation it feeds — the same seam 0.4.0 used — not in `score.rs`; it
+    unwraps exactly one `Query::Field` wrapper naming the field, replaces a
+    wrapper naming another field with `MatchAll` (no marks), and leaves
+    unscoped parts marking, so an unscoped query on a named field still marks.
+    Nested `title:(title:(x))` is deliberately not deepened, matching 0.4.0.
+    Snippet selection reads the heap text of the chosen column (wrapper field,
+    else first field with a mark, else first non-NULL) and never reads a
+    dictionary key, satisfying design §7; `postgres/src/fields/*` needed no new
+    accessor because `LogicalPostingCursor::field_hits()` is not required for
+    offsets inside one field's text.
+    **Three Phase-2.4 stubs un-ignored and now green:**
+    `search_shape_accepts_multiple_keys_with_snippets`,
+    `search_shape_rejects_non_text_keys_with_snippets` (with its expected error),
+    and `search_snippets_skip_null_fields`. **Left ignored (D.4's):**
+    `title_body_operator_scope_custom_scan` and `_bitmap`. The bound five-arg
+    highlight form now validates field names against the index's field plan
+    instead of erroring on every name.
+    Gates: lib **136/0** (131 + 5 `cfg(test)`; `fields` 64/0), workspace 14
+    suites, fmt + clippy clean, `script/test-all quick` 7/7, headers 2/2,
+    `nm -u` test binary **0** `InterruptPending`, `cargo pgrx test pg18`
+    **370 passed / 0 failed / 2 ignored (209s), exit 0 including doctests**,
+    release build verified (42 `pg_proc`, no `pg_test`-only UDFs).
+    Mutation proof, controller-run: making `project_to_field` treat every
+    wrapper as "this" fails `project_to_field_unwraps_this_wrapper_and_drops_others`
+    (`Term("needle")` vs `MatchAll`) and
+    `project_to_field_confines_highlight_marks` (`[("needle",0),("extra",2)]`
+    vs `[("extra",2)]`); restored. The agent's own three proofs (wrapper
+    confusion, NULL-before-mark snippet order, off-by-one mark offset) all
+    failed as intended.
+    Minor wart, accepted: `positions_from_query_for_field` takes a `_field: u16`
+    it does not use, documented as the caller's field id while highlighting uses
+    token offsets inside the text. Harmless, but a future signature cleanup
+    could drop it.
 
 - [ ] **D.4 Full planner coverage**
   - Goal: bitmap scope + recheck bits end-to-end; heap fallback + recheck;
@@ -1455,6 +1494,7 @@ the build gate; this section only governs ranked p50.
 | C.3 | 7fdee28 | 6 | 4 | 44 | **Measured on PG18.4 against the release build** (see the two census-measurement rules above) — no case-id delta from the boolean-coverage row's PG18 equivalent, as expected of a pure deletion. FAIL ids: `fields.phrase_no_cross`, `fields.phrase_scoped`, `fields.then_no_cross`, `fields.near_no_cross`, `fields.patterns` (Phase D.2), plus `fields.boolean_duplicate_leaf` — which the 2026-10-04 adjudication reassigns to **D.1** (restore the fold; the controller proved the cause against 0.4.0: `bool_multi` is bit-exact while `bool_flat` scores ≈1.97×). GAP ids: `catalog.functions` (**correct as written** — live 42 vs recorded 41, lost = 0, the only gain `capabilities()`; no divergence edit needed), `catalog.gucs`, `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term` (D.2 converts both to assertions). Controller gates on the C.3 tree: `cargo test -p stannum --lib` 131/0 (61 in `fields`, 14 in `bound`), workspace 14 suites, `cargo pgrx test pg18` **347 passed / 0 failed / 5 ignored** (145.68s), `script/test-all quick` 7/7, headers 2/2, fmt + clippy (`pg18 pg_test`, `-D warnings`) clean, `nm -u`: plain test binary **0** `InterruptPending`, release `.so` **1**. Oracle reviewed twice in the controller's session: 1 P0 + 3 P1 (empty-token error category; shared candidate oracle; `.max(exact)` bound floor; no interval-skip coverage), all repaired with mutation proofs; final verdict **no P0**, residual P1 (no production boolean-WAND orchestration loop to pin, because it does not exist yet) assigned to **D.4**. |
 | D.1 | 6783b2f | 6 | 4 | 44 | Measured on PG18.4 against the release build (controller re-run). Identical to the C.3 row: field scope changes no membership the census observes, and the adjudicated duplicate-leaf raw FAIL is unchanged. FAIL = `fields.boolean_duplicate_leaf` (ruled) + D.2's five; GAP = `catalog.functions`, `catalog.gucs`, `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term`. TIN conformance stayed exit 0 with `catalog.S-12` PASS. |
 | D.2 | fac90a7 | 1 | 2 | 51 | **Measured on PG18.4 against the release build.** The big drop: the five phrase/span/pattern FAILs and both regex GAPs are gone. Remaining FAIL = the adjudicated `fields.boolean_duplicate_leaf`; remaining GAPs = `catalog.functions` and `catalog.gucs`, both E.2's. TIN conformance unchanged, exit 0, 169/189 PASS. |
+| D.3 | 1431229 | 1 | 2 | 51 | Unchanged from D.2, which is the expected result for a step whose gate is "do not regress": `fields.snippets` and `fields.highlight_spans` still PASS and `--area fields` is 7 PASS / 0 FAIL. Three Phase-2.4 `#[ignore]`d shape tests un-ignored and green; `am.rs`-level title/body operator-scope tests stay ignored for D.4. |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
 | E.4 | | 0 | ≤2 | | release gate |
 
