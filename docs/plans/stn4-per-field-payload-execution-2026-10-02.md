@@ -789,6 +789,21 @@ Both were caught and corrected by re-measuring; they are now discipline:
    `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term`).
    The *only* legitimate PG17.11 readings are the explicitly labelled C.2-R
    control rows in the census ledger.
+3. **The shared pgembed prefix holds exactly one stannum build, and
+   `cargo pgrx test` / `cargo pgrx install` / a pgembed wheel build all**
+   **overwrite it.** `cargo pgrx test pg18` leaves a **`pg_test`** build,
+   which is *not* the release build — it carries `#[cfg(feature = "pg_test")]`
+   UDFs (`corrupt_index_page`, `index_page_kinds`) that change the catalog, and
+   after an STN4 step it may be stale. Rule: after any `cargo pgrx test`, and
+   before any census or pgembed run, reinstall the release build
+   (`cargo pgrx install --release --package stannum --no-default-features
+   --features pg18 --pg-config <prefix>/bin/pg_config`). Sequence a C.4/D.5
+   wheel build (which installs a commit-pinned build into the same prefix)
+   **after** the concurrent step's gates and census, then reinstall the release
+   build again before measuring anything. Sanity check before trusting a census:
+   `select count(*) from pg_proc where pronamespace = 'stannum'::regnamespace`
+   must be **42** on a release build and must not contain
+   `corrupt_index_page` / `index_page_kinds`.
 
 **Planner fallbacks.** Correctness is release-critical; not every optimization
 is. Release-critical for E.5: heap/sequential evaluation of supported scoped
