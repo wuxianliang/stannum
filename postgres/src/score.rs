@@ -26,7 +26,7 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::{CStr, CString, c_void};
-use tinql::runtime::plan::{Limits, plan};
+use tinql::runtime::plan::{Limits, NamedFields, page_plan_scoped, plan_scoped};
 use tinql::runtime::{
     CompiledRegex, FuzzyMatcher, Query, RangeBound, SpanPositionFilter, SpanTermSlot, evaluate,
     parse_tinql_to_query, parse_tinql_to_scoring_query, range_matches, tokenize_doc,
@@ -34,7 +34,7 @@ use tinql::runtime::{
 use tokenizer::Tokenizer;
 
 use crate::fields::{all_fields_mask, fused_interval_bound_from_term, fused_score_from_term};
-use crate::storage::View;
+use crate::storage::{FieldMeta, View};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CacheKey {
@@ -4772,16 +4772,19 @@ fn build_index_scorer_inner(
     if !key.full && !dense.is_valid() {
         pgrx::error!("dense_ratio must be finite and non-negative");
     }
-    let query = scope_scan_query(
-        parse_tinql_to_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
-            crate::operator::raise_query_error(
-                &error,
-                format!("Stannum score query error: {error}"),
-            )
-        }),
-        key.field,
+    let field_meta = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    let query = parse_tinql_to_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
+        crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
+    });
+    check_query_fields_on(
+        &query,
+        field_meta.as_ref().map(|meta| meta.names.as_slice()),
     );
-    check_query_fields(&query);
+    let query = scope_scan_query(query, field_meta.as_ref(), key.field);
+    // 0.5.0: every scoring surface preserves additive duplicate-term weights so
+    // search(), score(), full_score() and score_inspect() agree by document on
+    // the same index and snapshot. Boolean membership may still fold duplicate
+    // predicates (`query`, Structural) but never discards an additive weight.
     let scoring =
         parse_tinql_to_scoring_query(&key.query, tokenizer.as_ref()).unwrap_or_else(|error| {
             crate::operator::raise_query_error(
@@ -4854,7 +4857,6 @@ fn build_index_scorer_inner(
         term_boosts.push(term.boost());
     }
     drop(segments);
-    let field_meta = unsafe { crate::storage::fields_meta(index.as_ptr()) };
     let field_count = field_meta
         .as_ref()
         .map(|meta| u8::try_from(meta.weights.len()).unwrap_or(16))
@@ -4905,8 +4907,12 @@ impl IndexScorer {
         }
         let mut candidates = BTreeSet::new();
         for ((segment, dead), label) in self.view.sources.iter().zip(&self.view.labels) {
-            let planned = plan(&self.query, &**segment, &Limits::default())
-                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let planned = plan_with_names(
+                &self.query,
+                &**segment,
+                &Limits::default(),
+                &self.view.field_names,
+            );
             let mut cursor = planned.cursor;
             if let Some(dead) = dead {
                 let dead = segment_error_in(
@@ -4947,8 +4953,12 @@ impl IndexScorer {
         let mut candidates = BTreeSet::new();
         for ((segment, dead), label) in self.view.sources.iter().zip(&self.view.labels) {
             pgrx::check_for_interrupts!();
-            let planned = plan(&self.query, &**segment, &Limits::default())
-                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let planned = plan_with_names(
+                &self.query,
+                &**segment,
+                &Limits::default(),
+                &self.view.field_names,
+            );
             let mut cursor = planned.cursor;
             if let Some(dead) = dead {
                 let dead = segment_error_in(
@@ -5019,7 +5029,11 @@ fn build_corpus(
     let query = parse_tinql_to_query(&key.query, &tokenizer).unwrap_or_else(|error| {
         crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
     });
-    check_query_fields(&query);
+    let field_meta = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    check_query_fields_on(
+        &query,
+        field_meta.as_ref().map(|meta| meta.names.as_slice()),
+    );
     let scoring = parse_tinql_to_scoring_query(&key.query, &tokenizer).unwrap_or_else(|error| {
         crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
     });
@@ -5437,6 +5451,11 @@ fn score_inspect(
             format!("stannum.score_inspect() query error: {error}"),
         )
     });
+    let field_meta = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    check_query_fields_on(
+        &parsed,
+        field_meta.as_ref().map(|meta| meta.names.as_slice()),
+    );
     let edit = TermSetEdit::from_bound_arrays(
         unwrap("term_add", term_add),
         unwrap("term_replace", term_replace),
@@ -5584,10 +5603,6 @@ pub(crate) unsafe fn pick_index(
 
 /// Field syntax on a fieldless (single-column) index is the 0.4.0 error.
 /// A recorded plan accepts a named field or reports `unknown field`.
-pub(crate) fn check_query_fields(query: &Query) {
-    check_query_fields_on(query, None);
-}
-
 pub(crate) fn check_query_fields_on(query: &Query, fields: Option<&[String]>) {
     walk_query_fields(query, fields);
 }
@@ -5625,18 +5640,24 @@ fn walk_query_fields(query: &Query, fields: Option<&[String]>) {
     }
 }
 
-/// Surface-AST form of [`check_query_fields`], used when the planner sees
+/// Surface-AST form of [`check_query_fields_on`], used when the planner sees
 /// field syntax before the query is lowered.
-pub(crate) fn check_expr_fields(expr: &tinql::Expr) {
-    walk_expr_fields(expr);
+pub(crate) fn check_expr_fields(expr: &tinql::Expr, fields: Option<&[String]>) {
+    walk_expr_fields(expr, fields);
 }
 
-fn walk_expr_fields(expr: &tinql::Expr) {
+fn walk_expr_fields(expr: &tinql::Expr, fields: Option<&[String]>) {
     use tinql::Expr;
     match expr {
-        Expr::Field { .. } => {
-            pgrx::error!("stannum: field syntax requires a multi-column index");
-        }
+        Expr::Field { name, inner } => match fields {
+            None => pgrx::error!("stannum: field syntax requires a multi-column index"),
+            Some(names) => {
+                if !names.iter().any(|stored| stored == name) {
+                    pgrx::error!("stannum: unknown field '{name}'");
+                }
+                walk_expr_fields(inner, fields);
+            }
+        },
         Expr::And(operands)
         | Expr::Or(operands)
         | Expr::Alternatives(operands)
@@ -5644,7 +5665,7 @@ fn walk_expr_fields(expr: &tinql::Expr) {
             exprs: operands, ..
         } => {
             for operand in operands {
-                walk_expr_fields(operand);
+                walk_expr_fields(operand, fields);
             }
         }
         Expr::AndNot {
@@ -5665,20 +5686,20 @@ fn walk_expr_fields(expr: &tinql::Expr) {
         | Expr::NotOverlapping { a, b }
         | Expr::Before { a, b }
         | Expr::After { a, b } => {
-            walk_expr_fields(a);
-            walk_expr_fields(b);
+            walk_expr_fields(a, fields);
+            walk_expr_fields(b, fields);
         }
         Expr::First { inner, .. }
         | Expr::Last { inner, .. }
         | Expr::Middle { inner, .. }
         | Expr::Between { inner, .. }
         | Expr::Within { inner, .. }
-        | Expr::Boost { inner, .. } => walk_expr_fields(inner),
+        | Expr::Boost { inner, .. } => walk_expr_fields(inner, fields),
         Expr::Phrase { elements, .. } => {
             for element in elements {
                 if let tinql::PhraseElement::Alternatives(exprs) = element {
                     for inner in exprs {
-                        walk_expr_fields(inner);
+                        walk_expr_fields(inner, fields);
                     }
                 }
             }
@@ -5693,13 +5714,75 @@ fn walk_expr_fields(expr: &tinql::Expr) {
     }
 }
 
-/// Restricts a `==>` scan query to key ordinal `field`.
-///
-/// Single-column indexes have no field metadata, so this is the identity and
-/// every match is ordinal 0. Phase 5 applies Appendix A's implicit scope.
-pub(crate) fn scope_scan_query(query: Query, field: u8) -> Query {
+/// Restricts a `==>` scan query to the field its scan key names: unscoped
+/// terms keep that channel; a field group naming another column is rejected.
+/// A single-column index has no field plan, so this is the identity.
+pub(crate) fn scope_scan_query(query: Query, fields: Option<&FieldMeta>, field: u8) -> Query {
     debug_assert!(field < 16);
-    query
+    let Some(plan) = fields else {
+        return query;
+    };
+    let Some(name) = plan.names.get(usize::from(field)) else {
+        pgrx::error!("stannum: this ==> clause's column is not a field of its index");
+    };
+    reject_foreign_fields(&query, name);
+    Query::Field {
+        name: name.clone(),
+        inner: Box::new(query),
+    }
+}
+
+/// Rejects a field group that names a field other than the scan key's.
+fn reject_foreign_fields(query: &Query, name: &str) {
+    match query {
+        Query::Field { name: other, inner } => {
+            if other != name {
+                pgrx::error!(
+                    "stannum: this ==> clause answers '{name}'; use stannum.search() for '{other}'"
+                );
+            }
+            reject_foreign_fields(inner, name);
+        }
+        Query::And(left, right) | Query::Or(left, right) => {
+            reject_foreign_fields(left, name);
+            reject_foreign_fields(right, name);
+        }
+        Query::Conjunction(children)
+        | Query::Disjunction { children, .. }
+        | Query::AtLeast { children, .. } => {
+            for child in children {
+                reject_foreign_fields(child, name);
+            }
+        }
+        Query::Not(inner) | Query::Boost { inner, .. } => reject_foreign_fields(inner, name),
+        Query::Term(_)
+        | Query::Span { .. }
+        | Query::SpanExpr { .. }
+        | Query::MatchAll
+        | Query::Regex(_)
+        | Query::Range { .. }
+        | Query::Fuzzy { .. } => {}
+    }
+}
+
+pub(crate) fn plan_with_names<'a, I: Index + ?Sized>(
+    query: &Query,
+    segment: &'a I,
+    limits: &Limits,
+    names: &[String],
+) -> tinql::runtime::plan::Plan<'a> {
+    plan_scoped(query, segment, limits, &NamedFields(names))
+        .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"))
+}
+
+pub(crate) fn page_plan_with_names<'a, I: Index + ?Sized>(
+    query: &Query,
+    segment: &'a I,
+    limits: &Limits,
+    names: &[String],
+) -> tinql::runtime::plan::PagePlan<'a> {
+    page_plan_scoped(query, segment, limits, &NamedFields(names))
+        .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"))
 }
 
 /// Every valid, ready stannum index of `heap_oid` one of whose keys is

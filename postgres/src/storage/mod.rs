@@ -73,7 +73,7 @@ use segment::segment::{Segment, SegmentBuilder};
 use segment::set::{Cursor, Difference, Intersection};
 use tinql::runtime::Query;
 
-use tinql::runtime::plan::{Limits, plan};
+use tinql::runtime::plan::Limits;
 use tokenizer::{CompiledTokenizerPipeline, Tokenizer};
 
 /// Encoded forward-record bytes buffered before folding.
@@ -2021,6 +2021,10 @@ struct MemoizedSegment {
 impl Index for MemoizedSegment {
     fn document_count(&self) -> u32 {
         self.reader.document_count()
+    }
+
+    fn field_count(&self) -> u8 {
+        Index::field_count(&*self.reader)
     }
 
     fn total_length(&self) -> u64 {
@@ -4205,6 +4209,8 @@ pub struct View {
     pub dead_sets: Vec<DeadSet>,
     /// STNF norms per source, aligned with `sources`.
     pub(crate) field_norms: Vec<Option<FieldNorms>>,
+    /// Envelope field names, empty on a single-column index.
+    pub(crate) field_names: Vec<String>,
     /// Index identity and generation per immutable source.
     pub keys: Vec<(u64, u32)>,
     /// The dead run each immutable source's dead list was read from.
@@ -4463,6 +4469,9 @@ unsafe fn view_inner(index_oid: pg_sys::Oid) -> View {
                 labels,
                 dead_sets,
                 field_norms,
+                field_names: FieldMeta::from_envelope(&meta.fields)
+                    .map(|meta| meta.names)
+                    .unwrap_or_default(),
                 keys,
                 dead_runs,
                 buffer_epoch: meta.buffer.epoch,
@@ -4510,8 +4519,8 @@ pub unsafe fn scan(
             let mut exact = true;
             let mut cursors: Vec<Box<dyn Cursor>> = Vec::with_capacity(queries.len());
             for query in queries {
-                let plan = plan(query, segment, &limits)
-                    .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+                let plan =
+                    crate::score::plan_with_names(query, segment, &limits, &view.field_names);
                 exact &= plan.exact;
                 cursors.push(plan.cursor);
             }

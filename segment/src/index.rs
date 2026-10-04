@@ -46,6 +46,11 @@ pub type ScanWindow<'a> = Box<dyn Iterator<Item = ScanItem<'a>> + 'a>;
 
 pub trait Index {
     fn document_count(&self) -> u32;
+    /// Envelope field count. `1` is a stock single-column index; `2..=16`
+    /// unpacks posting channels via [`Term::channels`].
+    fn field_count(&self) -> u8 {
+        1
+    }
     fn total_length(&self) -> u64;
     fn term(&self, term: &str) -> Result<Option<Term<'_>>>;
     /// Terms in `window` accepted by `filter`, in order, up to `limit`.
@@ -173,6 +178,12 @@ impl<S: Source> Index for Reader<S> {
         Reader::document_count(self)
     }
 
+    fn field_count(&self) -> u8 {
+        self.trailer()
+            .map(|trailer| trailer.field_count)
+            .unwrap_or(1)
+    }
+
     fn page_table(&self) -> Result<PageTable<'_>> {
         Reader::page_table(self)
     }
@@ -258,6 +269,9 @@ impl<I: Index + ?Sized> Index for &I {
     fn document_count(&self) -> u32 {
         (**self).document_count()
     }
+    fn field_count(&self) -> u8 {
+        (**self).field_count()
+    }
     fn total_length(&self) -> u64 {
         (**self).total_length()
     }
@@ -304,6 +318,9 @@ impl<I: Index + ?Sized> Index for Box<I> {
     fn document_count(&self) -> u32 {
         (**self).document_count()
     }
+    fn field_count(&self) -> u8 {
+        (**self).field_count()
+    }
     fn total_length(&self) -> u64 {
         (**self).total_length()
     }
@@ -349,6 +366,9 @@ impl<I: Index + ?Sized> Index for Box<I> {
 impl<I: Index + ?Sized> Index for std::rc::Rc<I> {
     fn document_count(&self) -> u32 {
         (**self).document_count()
+    }
+    fn field_count(&self) -> u8 {
+        (**self).field_count()
     }
     fn total_length(&self) -> u64 {
         (**self).total_length()
@@ -1156,6 +1176,10 @@ impl Index for MutableIndex {
             return self.fielded_documents.borrow().len() as u32;
         }
         self.documents.borrow().len() as u32
+    }
+
+    fn field_count(&self) -> u8 {
+        self.field_count
     }
 
     fn total_length(&self) -> u64 {

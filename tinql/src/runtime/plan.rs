@@ -52,6 +52,40 @@ pub enum PlanError {
     Segment(#[from] segment::Error),
     #[error("span evaluation failed: {0}")]
     Span(#[from] boldi_vigna::SpanError),
+    #[error("unknown field '{0}'")]
+    UnknownField(String),
+    #[error("field scopes are not supported for this query shape")]
+    FieldScopeShape,
+}
+
+/// Resolves the field names a query scopes against (`title:(…)`).
+///
+/// The segment format stores field ids, not names, so the name plan of an
+/// index comes from its metadata.
+pub trait FieldScope {
+    /// The field id `name` names, or `None` when this index has no such field.
+    fn field_id(&self, name: &str) -> Option<u8>;
+}
+
+/// The scope of an index with no field names: every name is unknown.
+pub struct NoFields;
+
+impl FieldScope for NoFields {
+    fn field_id(&self, _name: &str) -> Option<u8> {
+        None
+    }
+}
+
+/// Resolves names in left-to-right index column order.
+pub struct NamedFields<'a>(pub &'a [String]);
+
+impl FieldScope for NamedFields<'_> {
+    fn field_id(&self, name: &str) -> Option<u8> {
+        self.0
+            .iter()
+            .position(|stored| stored == name)
+            .and_then(|ordinal| u8::try_from(ordinal).ok())
+    }
 }
 
 type Result<T> = std::result::Result<T, PlanError>;
@@ -65,13 +99,29 @@ pub struct Plan<'a> {
     pub estimate: u64,
 }
 
-/// Compiles `query` against `segment`.
+/// Compiles `query` against `segment` with no field names: a `Query::Field`
+/// node cannot be resolved and fails as an unknown field.
 pub fn plan<'a, I: Index + ?Sized>(
     query: &Query,
     segment: &'a I,
     limits: &Limits,
 ) -> Result<Plan<'a>> {
-    Planner { segment, limits }.query(query)
+    plan_scoped(query, segment, limits, &NoFields)
+}
+
+/// Compiles `query` against `segment` with its field names.
+pub fn plan_scoped<'a, I: Index + ?Sized>(
+    query: &Query,
+    segment: &'a I,
+    limits: &Limits,
+    fields: &dyn FieldScope,
+) -> Result<Plan<'a>> {
+    Planner {
+        segment,
+        limits,
+        fields,
+    }
+    .query(query)
 }
 
 /// Prefer bulk execution when a Boolean term is dense enough to be stored as
@@ -188,9 +238,19 @@ pub fn page_plan<'a, I: Index + ?Sized>(
     segment: &'a I,
     limits: &Limits,
 ) -> Result<PagePlan<'a>> {
+    page_plan_scoped(query, segment, limits, &NoFields)
+}
+
+/// [`page_plan`] with the index's field names for `Query::Field` nodes.
+pub fn page_plan_scoped<'a, I: Index + ?Sized>(
+    query: &Query,
+    segment: &'a I,
+    limits: &Limits,
+    fields: &dyn FieldScope,
+) -> Result<PagePlan<'a>> {
     use segment::pages;
     let scalar = || -> Result<PagePlan<'a>> {
-        let plan = plan(query, segment, limits)?;
+        let plan = plan_scoped(query, segment, limits, fields)?;
         Ok(PagePlan {
             cursor: Box::new(pages::Rows::new(plan.cursor)?),
             exact: plan.exact,
@@ -199,7 +259,7 @@ pub fn page_plan<'a, I: Index + ?Sized>(
     let children = |queries: Vec<&Query>, intersection: bool| -> Result<PagePlan<'a>> {
         let plans = queries
             .into_iter()
-            .map(|q| page_plan(q, segment, limits))
+            .map(|q| page_plan_scoped(q, segment, limits, fields))
             .collect::<Result<Vec<_>>>()?;
         let exact = plans.iter().all(|p| p.exact);
         let cursors = plans.into_iter().map(|p| p.cursor).collect();
@@ -233,11 +293,16 @@ pub fn page_plan<'a, I: Index + ?Sized>(
             children: items,
         } => children(items.iter().collect(), false),
         Query::Not(inner) => {
-            let inner = page_plan(inner, segment, limits)?;
+            let inner = page_plan_scoped(inner, segment, limits, fields)?;
             if !inner.exact {
                 return scalar();
             }
-            let universe = Planner { segment, limits }.universe()?;
+            let universe = Planner {
+                segment,
+                limits,
+                fields,
+            }
+            .universe()?;
             Ok(PagePlan {
                 cursor: Box::new(pages::Difference::new(
                     pages::Rows::new(universe.cursor)?,
@@ -246,9 +311,8 @@ pub fn page_plan<'a, I: Index + ?Sized>(
                 exact: true,
             })
         }
-        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
-            page_plan(inner, segment, limits)
-        }
+        Query::Boost { inner, .. } => page_plan_scoped(inner, segment, limits, fields),
+        Query::Field { .. } => scalar(),
         _ => scalar(),
     }
 }
@@ -266,6 +330,7 @@ pub fn matches<I: Index + ?Sized>(
 struct Planner<'a, 'l, I: Index + ?Sized> {
     segment: &'a I,
     limits: &'l Limits,
+    fields: &'l dyn FieldScope,
 }
 
 enum Expansion<'a> {
@@ -452,15 +517,64 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
     }
 
     fn query(&self, query: &Query) -> Result<Plan<'a>> {
+        self.query_scoped(query, None)
+    }
+
+    /// A term's plan, restricted to `scope`'s channels when one is set.
+    /// Unscoped multi-column terms keep the parent stream (search() uses the
+    /// fielded evaluator). `==>` wraps the query so this path sees a mask.
+    fn term_scoped(&self, term: Option<Term<'a>>, scope: Option<u16>) -> Result<Plan<'a>> {
+        let Some(term) = term else {
+            return Ok(Self::empty());
+        };
+        let Some(mask) = scope else {
+            return Self::term_plan(Some(term));
+        };
+        let field_count = self.segment.field_count();
+        if field_count < 2 {
+            return if mask & 1 != 0 {
+                Self::term_plan(Some(term))
+            } else {
+                Ok(Self::empty())
+            };
+        }
+        let children = term
+            .channels(field_count)?
+            .into_iter()
+            .filter(|(field, _)| mask & (1u16 << field) != 0)
+            .map(|(_, child)| Self::term_plan(Some(child)))
+            .collect::<Result<Vec<_>>>()?;
+        match children.len() {
+            0 => Ok(Self::empty()),
+            1 => Ok(children.into_iter().next().expect("length checked")),
+            _ => self.or(children),
+        }
+    }
+
+    fn scoped_shape(&self, scope: Option<u16>) -> Result<()> {
+        if scope.is_some() {
+            Err(PlanError::FieldScopeShape)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn query_scoped(&self, query: &Query, scope: Option<u16>) -> Result<Plan<'a>> {
         crate::limits::check_stack();
         match query {
-            Query::Term(term) => Self::term_plan(self.segment.term(term)?),
-            Query::And(left, right) => self.and(vec![self.query(left)?, self.query(right)?]),
-            Query::Or(left, right) => self.or(vec![self.query(left)?, self.query(right)?]),
+            Query::Term(term) => self.term_scoped(self.segment.term(term)?, scope),
+            Query::And(left, right) => self.and(vec![
+                self.query_scoped(left, scope)?,
+                self.query_scoped(right, scope)?,
+            ]),
+            Query::Or(left, right) => self.or(vec![
+                self.query_scoped(left, scope)?,
+                self.query_scoped(right, scope)?,
+            ]),
             Query::Conjunction(children) => self.and(
                 children
                     .iter()
-                    .map(|c| self.query(c))
+                    .map(|c| self.query_scoped(c, scope))
                     .collect::<Result<_>>()?,
             ),
             Query::Disjunction { min, children } | Query::AtLeast { min, children } => self
@@ -468,19 +582,24 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                     *min,
                     children
                         .iter()
-                        .map(|c| self.query(c))
+                        .map(|c| self.query_scoped(c, scope))
                         .collect::<Result<_>>()?,
                 ),
             Query::Not(inner) => {
-                let inner = self.query(inner)?;
+                let inner = self.query_scoped(inner, scope)?;
                 self.not(inner)
             }
-            Query::MatchAll => self.universe(),
+            Query::MatchAll => {
+                self.scoped_shape(scope)?;
+                self.universe()
+            }
             Query::Regex(regex) => {
+                self.scoped_shape(scope)?;
                 let expansion = self.expand_regex(regex)?;
                 self.expansion_plan(expansion)
             }
             Query::Range { lower, upper } => {
+                self.scoped_shape(scope)?;
                 let expansion = self.expand_range(lower, upper)?;
                 self.expansion_plan(expansion)
             }
@@ -489,15 +608,23 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                 prefix,
                 distance,
             } => {
+                self.scoped_shape(scope)?;
                 let expansion = self.expand_fuzzy(term, *prefix, *distance)?;
                 self.expansion_plan(expansion)
             }
-            Query::Boost { inner, .. } | Query::Field { inner, .. } => self.query(inner),
+            Query::Boost { inner, .. } => self.query_scoped(inner, scope),
+            Query::Field { name, inner } => {
+                let Some(field) = self.fields.field_id(name) else {
+                    return Err(PlanError::UnknownField(name.clone()));
+                };
+                self.query_scoped(inner, Some(1u16 << field))
+            }
             Query::Span {
                 term_slots,
                 span_query,
                 position_filter,
             } => {
+                self.scoped_shape(scope)?;
                 let Some(slots) = self.slots(term_slots)? else {
                     return self.inexact_universe();
                 };
@@ -524,6 +651,7 @@ impl<'a, I: Index + ?Sized> Planner<'a, '_, I> {
                 term_slots,
                 span_expr,
             } => {
+                self.scoped_shape(scope)?;
                 let Some(slots) = self.slots(term_slots)? else {
                     return self.inexact_universe();
                 };
@@ -911,6 +1039,16 @@ fn span_to_segment_error(error: PlanError) -> segment::Error {
     match error {
         PlanError::Segment(error) => error,
         PlanError::Span(_) => segment::Error::Corrupt("span solver failed after planning"),
+        // Plan-time validation errors cannot reach a cursor: the plan is built
+        // before any traversal and both are decided while building it. Keep the
+        // arm loud in tests and honest in release rather than unwrap.
+        PlanError::UnknownField(_) | PlanError::FieldScopeShape => {
+            debug_assert!(
+                false,
+                "plan-time field-scope error reached cursor traversal: {error}"
+            );
+            segment::Error::Corrupt("plan-time field-scope error reached cursor traversal")
+        }
     }
 }
 
@@ -918,6 +1056,7 @@ fn span_to_segment_error(error: PlanError) -> segment::Error {
 mod tests {
     use super::*;
     use crate::runtime::{evaluate, parse_tinql_to_query_default, tokenize_doc};
+    use segment::index::MutableIndex;
     use segment::segment::{Segment, SegmentBuilder};
     use tokenizer::presets::default_pipeline;
 
@@ -1462,5 +1601,66 @@ mod tests {
         assert_eq!(plan.cursor.current(), Some(tid(2)));
         plan.cursor.seek(tid(4)).unwrap();
         assert_eq!(plan.cursor.current(), Some(tid(8)));
+    }
+
+    fn add_fielded(index: &MutableIndex, id: u32, columns: &[&str]) {
+        index
+            .begin_fielded_document(Tid::new(id, 1).unwrap())
+            .unwrap();
+        for (field, text) in columns.iter().enumerate() {
+            let mut by_term: std::collections::BTreeMap<&str, Vec<u32>> =
+                std::collections::BTreeMap::new();
+            let mut len = 0u32;
+            for (i, word) in text.split_whitespace().enumerate() {
+                len += 1;
+                by_term.entry(word).or_default().push(i as u32 + 1);
+            }
+            if len == 0 {
+                continue;
+            }
+            for (word, positions) in by_term {
+                index
+                    .add_occurrence(word, field as u8, &positions, len)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn field_scope_keeps_one_channel() {
+        let names = ["title".to_owned(), "body".to_owned()];
+        let fields = NamedFields(&names);
+        let index = MutableIndex::with_field_count(2).unwrap();
+        add_fielded(&index, 0, &["alpha", "bravo"]);
+        add_fielded(&index, 1, &["bravo", "alpha"]);
+        let title = parse_tinql_to_query_default("title:(alpha)").unwrap();
+        let body = parse_tinql_to_query_default("body:(alpha)").unwrap();
+        let title_ids = segment::set::collect(
+            plan_scoped(&title, &index, &Limits::default(), &fields)
+                .unwrap()
+                .cursor,
+        )
+        .unwrap();
+        let body_ids = segment::set::collect(
+            plan_scoped(&body, &index, &Limits::default(), &fields)
+                .unwrap()
+                .cursor,
+        )
+        .unwrap();
+        assert_eq!(title_ids, vec![Tid::new(0, 1).unwrap()]);
+        assert_eq!(body_ids, vec![Tid::new(1, 1).unwrap()]);
+        let unknown = parse_tinql_to_query_default("nope:(alpha)").unwrap();
+        assert!(matches!(
+            plan_scoped(&unknown, &index, &Limits::default(), &fields),
+            Err(PlanError::UnknownField(name)) if name == "nope"
+        ));
+        let and_query = parse_tinql_to_query_default("title:(alpha) AND title:(alpha)").unwrap();
+        let and_ids = segment::set::collect(
+            plan_scoped(&and_query, &index, &Limits::default(), &fields)
+                .unwrap()
+                .cursor,
+        )
+        .unwrap();
+        assert_eq!(and_ids, title_ids);
     }
 }

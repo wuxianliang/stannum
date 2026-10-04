@@ -767,6 +767,47 @@ mod tests {
     }
 
     #[test]
+    fn structural_simplify_keeps_field_wrappers_through_boolean_nodes() {
+        let inner = Query::Conjunction(vec![
+            Query::Term("alpha".into()),
+            Query::Not(Box::new(Query::Term("bravo".into()))),
+        ]);
+        let query = Query::Or(
+            Box::new(Query::Field {
+                name: "title".into(),
+                inner: Box::new(inner.clone()),
+            }),
+            Box::new(Query::Field {
+                name: "body".into(),
+                inner: Box::new(Query::AtLeast {
+                    min: 1,
+                    children: vec![Query::Term("charlie".into())],
+                }),
+            }),
+        );
+        let simplified = simplify(query, SimplificationProfile::Structural);
+        assert_eq!(
+            simplified,
+            Query::Disjunction {
+                min: 1,
+                children: vec![
+                    Query::Field {
+                        name: "title".into(),
+                        inner: Box::new(inner),
+                    },
+                    Query::Field {
+                        name: "body".into(),
+                        inner: Box::new(Query::AtLeast {
+                            min: 1,
+                            children: vec![Query::Term("charlie".into())],
+                        }),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn multiplicity_preserving_simplify_keeps_scored_or_child_with_match_all() {
         let query = Query::Disjunction {
             min: 1,

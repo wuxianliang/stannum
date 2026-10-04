@@ -238,6 +238,8 @@ unsafe extern "C-unwind" fn amrescan(
     let selective = unsafe { selective(scan) };
     let spec = selective.then(|| unsafe { crate::storage::index_spec((*scan).indexRelation) });
     let tokenizer = spec.as_ref().map(crate::storage::tokenizer_for);
+    let fields = unsafe { crate::storage::fields_meta((*scan).indexRelation) };
+    let names = fields.as_ref().map(|meta| meta.names.as_slice());
     let mut queries = Vec::with_capacity(keys.len());
     for key in keys {
         if key.sk_flags != 0 {
@@ -262,10 +264,18 @@ unsafe extern "C-unwind" fn amrescan(
             unsafe { String::from_datum(key.sk_argument, false) }.expect("non-null search key")
         };
         let query = match &tokenizer {
-            Some(tokenizer) => crate::operator::parse_or_raise(&text, tokenizer.as_ref()),
-            None => crate::operator::parse_or_raise(&text, tokenizer::presets::default_pipeline()),
+            Some(tokenizer) => crate::operator::parse_or_raise(&text, tokenizer.as_ref(), names),
+            None => crate::operator::parse_or_raise(
+                &text,
+                tokenizer::presets::default_pipeline(),
+                names,
+            ),
         };
-        queries.push(crate::score::scope_scan_query(query, key_field(key)));
+        queries.push(crate::score::scope_scan_query(
+            query,
+            fields.as_ref(),
+            key_field(key),
+        ));
     }
     state.plan = if selective {
         ScanPlan::Queries(queries)

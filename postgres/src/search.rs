@@ -1793,6 +1793,105 @@ mod tests {
         }
     }
 
+    fn search_score_bits_on(table: &str, index: &str, query: &str) -> Vec<(i32, u32)> {
+        Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT d.id, s.score FROM {table} d
+                         JOIN stannum.search('{index}', $q${query}$q$, 50, 'none') s
+                         ON d.ctid = s.ctid
+                         ORDER BY d.id"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| {
+                    (
+                        row.get::<i32>(1).unwrap().unwrap(),
+                        row.get::<f32>(2).unwrap().unwrap().to_bits(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn sql_score_bits(table: &str, column: &str, query: &str) -> Vec<(i32, u32)> {
+        Spi::run(
+            "SET LOCAL enable_seqscan = off; SET LOCAL enable_indexscan = off;
+             SET LOCAL enable_bitmapscan = on",
+        )
+        .unwrap();
+        Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT d.id, stannum.score(d.ctid) FROM {table} d
+                         WHERE {column} ==> $q${query}$q$
+                         ORDER BY d.id"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| {
+                    (
+                        row.get::<i32>(1).unwrap().unwrap(),
+                        row.get::<f32>(2).unwrap().unwrap().to_bits(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn inspect_weights(index: &str, query: &str) -> Vec<(String, f32)> {
+        Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT term, weight FROM stannum.score_inspect('{index}'::regclass, $q${query}$q$, 1.0)"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| {
+                    (
+                        row.get::<String>(1).unwrap().unwrap(),
+                        row.get::<f32>(2).unwrap().unwrap(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn explain_analyze(sql: &str) -> String {
+        Spi::connect(|client| {
+            client
+                .select(&format!("EXPLAIN (ANALYZE, VERBOSE) {sql}"), None, &[])
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| row.get::<String>(1).unwrap().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    fn ranked_id_scores(sql: &str) -> Vec<(i32, u32)> {
+        Spi::connect(|client| {
+            client
+                .select(sql, None, &[])
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| {
+                    (
+                        row.get::<i32>(1).unwrap().unwrap(),
+                        row.get::<f32>(2).unwrap().unwrap().to_bits(),
+                    )
+                })
+                .collect()
+        })
+    }
+
     fn assert_boosted_and_scores(index: &str, factor: f32) {
         let query = format!("(alpha AND bravo)^{factor}");
         let base = search_score_bits(index, "alpha AND bravo");
@@ -1966,15 +2065,217 @@ mod tests {
     fn fielded_duplicate_leaf_membership() {
         bool_fixture();
         assert_ids_both("alpha AND alpha", &[1, 2, 3, 6]);
-        // Multi-column fielded scoring uses the structural term list (0.4.0
-        // parity): a duplicate conjunct is one contribution. Single-column
-        // IndexScorer still scores the repeated clause twice. That 2× behaviour
-        // is a pre-existing divergence from 0.4.0 (which folded duplicates on
-        // both paths); this step did not introduce it, and the contract suite
-        // does not yet pin it on the IndexScorer path except by recording
-        // fields.boolean_duplicate_leaf flat_ranked.
+        // Multi-column fielded scoring uses the structural term list: a
+        // duplicate conjunct is one contribution. Single-column IndexScorer
+        // keeps additive duplicate-term weights, so `alpha AND alpha` scores
+        // twice `alpha`. That 2× is the deliberate 0.5.0 contract, not a
+        // divergence.
         assert_same_as_term_score("bool_docs_multi", "alpha AND alpha", "alpha");
         assert_twice_the_term_score("bool_docs_single", "alpha AND alpha", "alpha");
+    }
+
+    #[pg_test]
+    fn additive_duplicate_weights_agree_across_scoring_surfaces() {
+        bool_fixture();
+        assert_twice_the_term_score("bool_docs_single", "alpha AND alpha", "alpha");
+
+        Spi::run(
+            "CREATE TABLE agree_docs (id int primary key, body text);
+             INSERT INTO agree_docs VALUES
+               (1, 'alpha bravo'),
+               (2, 'alpha bravo charlie'),
+               (3, 'charlie alpha'),
+               (6, 'alpha charlie bravo');
+             INSERT INTO agree_docs SELECT 100 + n, 'pad' || n
+               FROM generate_series(1, 90) n;
+             CREATE INDEX agree_docs_idx ON agree_docs USING stannum (body);",
+        )
+        .unwrap();
+        let search_rows = search_score_bits_on("agree_docs", "agree_docs_idx", "alpha AND alpha");
+        let score_rows = sql_score_bits("agree_docs", "body", "alpha AND alpha");
+        assert_eq!(
+            search_rows, score_rows,
+            "search() and score() must agree by document for alpha AND alpha"
+        );
+        let once_rows = search_score_bits_on("agree_docs", "agree_docs_idx", "alpha");
+        assert_eq!(search_rows.len(), once_rows.len());
+        for ((id, twice), (once_id, once_score)) in search_rows.iter().zip(once_rows.iter()) {
+            assert_eq!(id, once_id);
+            let added = f32::from_bits(*once_score) + f32::from_bits(*once_score);
+            assert_eq!(*twice, added.to_bits(), "agree_docs id={id}");
+        }
+
+        Spi::run(
+            "CREATE TABLE mix_docs (id int primary key, body text);
+             INSERT INTO mix_docs VALUES
+               (1, 'alpha'),
+               (2, 'alpha beta'),
+               (3, 'alpha beta beta beta');
+             INSERT INTO mix_docs SELECT 10 + n, 'beta pad' || n
+               FROM generate_series(1, 30) n;
+             CREATE INDEX mix_docs_idx ON mix_docs USING stannum (body);",
+        )
+        .unwrap();
+        let simple = search_score_bits_on("mix_docs", "mix_docs_idx", "alpha AND beta");
+        let mixed = search_score_bits_on("mix_docs", "mix_docs_idx", "alpha AND alpha AND beta");
+        assert_eq!(simple.len(), mixed.len());
+        let simple_map: FxHashMap<_, _> = simple.iter().copied().collect();
+        let mixed_map: FxHashMap<_, _> = mixed.iter().copied().collect();
+        let mut saw_non_uniform = false;
+        for (id, simple_bits) in &simple {
+            let twice = (f32::from_bits(*simple_bits) + f32::from_bits(*simple_bits)).to_bits();
+            if mixed_map[id] != twice {
+                saw_non_uniform = true;
+            }
+        }
+        assert!(
+            saw_non_uniform,
+            "alpha AND alpha AND beta must not be a uniform 2× of alpha AND beta: simple={simple:?} mixed={mixed:?}"
+        );
+        let gap_mixed = f32::from_bits(mixed_map[&3]) - f32::from_bits(mixed_map[&2]);
+        let gap_twice = 2.0 * (f32::from_bits(simple_map[&3]) - f32::from_bits(simple_map[&2]));
+        assert_ne!(
+            gap_mixed.to_bits(),
+            gap_twice.to_bits(),
+            "duplication must change the relative gap between docs 2 and 3"
+        );
+
+        assert_eq!(
+            inspect_weights("bool_docs_single", "alpha"),
+            vec![("alpha".into(), 1.0)]
+        );
+        assert_eq!(
+            inspect_weights("bool_docs_single", "alpha AND alpha"),
+            vec![("alpha".into(), 2.0)]
+        );
+        assert_eq!(
+            inspect_weights("bool_docs_single", "alpha^2 AND alpha"),
+            vec![("alpha".into(), 3.0)]
+        );
+        assert_eq!(
+            search_score_bits("bool_docs_single", "alpha AND alpha"),
+            search_score_bits("bool_docs_single", "alpha^2"),
+            "score_inspect weight 2.0 must be the weight ranking uses"
+        );
+        assert_eq!(
+            search_score_bits("bool_docs_single", "alpha^2 AND alpha"),
+            search_score_bits("bool_docs_single", "alpha^3"),
+            "score_inspect weight 3.0 must be the weight ranking uses"
+        );
+
+        let once = search_score_bits("bool_docs_single", "alpha");
+        let boosted = search_score_bits("bool_docs_single", "alpha^2 AND alpha");
+        assert_eq!(once.len(), boosted.len());
+        for ((id, once_bits), (boosted_id, boosted_bits)) in once.iter().zip(boosted.iter()) {
+            assert_eq!(id, boosted_id);
+            assert_ne!(
+                once_bits, boosted_bits,
+                "differently boosted conjuncts must keep multiplicity id={id}"
+            );
+        }
+        Spi::run(
+            "CREATE TABLE phrase_dup (id int primary key, body text);
+             INSERT INTO phrase_dup VALUES (1, 'alpha'), (2, 'alpha alpha');
+             CREATE INDEX phrase_dup_idx ON phrase_dup USING stannum (body);",
+        )
+        .unwrap();
+        let phrase = search_score_bits_on("phrase_dup", "phrase_dup_idx", "\"alpha alpha\"");
+        let once_phrase = search_score_bits_on("phrase_dup", "phrase_dup_idx", "alpha");
+        assert_eq!(phrase.len(), 1, "the phrase matches only the repeated row");
+        assert_eq!(phrase[0].0, 2);
+        assert_eq!(
+            once_phrase.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the unigram still matches both rows"
+        );
+    }
+
+    #[pg_test]
+    fn search_scores_are_plan_invariant_across_custom_scan() {
+        Spi::run(
+            "CREATE TABLE plan_inv_docs (id int primary key, body text);
+             INSERT INTO plan_inv_docs VALUES
+               (1, 'alpha'),
+               (2, 'alpha beta'),
+               (3, 'alpha beta beta beta');
+             INSERT INTO plan_inv_docs SELECT 10 + n, 'beta pad' || n
+               FROM generate_series(1, 30) n;
+             CREATE INDEX plan_inv_idx ON plan_inv_docs USING stannum (body);",
+        )
+        .unwrap();
+        let search_sql = "SELECT d.id, s.score FROM plan_inv_docs d
+             JOIN stannum.search('plan_inv_idx', 'alpha AND alpha AND beta', 50, 'none') s
+             ON d.ctid = s.ctid
+             ORDER BY s.score DESC, d.ctid";
+        let operator_sql = "SELECT id, stannum.full_score(ctid) FROM plan_inv_docs
+             WHERE body ==> 'alpha AND alpha AND beta'
+             ORDER BY stannum.full_score(ctid) DESC, ctid
+             LIMIT 50";
+        let mut search_by_guc = Vec::new();
+        let mut operator_by_guc = Vec::new();
+        for custom in ["on", "off"] {
+            Spi::run(&format!(
+                "SET LOCAL enable_seqscan = off;
+                 SET LOCAL enable_indexscan = off;
+                 SET LOCAL enable_bitmapscan = on;
+                 SET LOCAL stannum.enable_custom_scan = {custom}"
+            ))
+            .unwrap();
+            let search_plan = explain_analyze(search_sql);
+            assert!(
+                search_plan.contains("Function Scan"),
+                "search() must execute as Function Scan ({custom}): {search_plan}"
+            );
+            assert!(
+                !search_plan.contains("Stannum Text Search Scan"),
+                "search() must not be rewritten to the custom scan ({custom}): {search_plan}"
+            );
+            let operator_plan = explain_analyze(operator_sql);
+            if custom == "on" {
+                assert!(
+                    operator_plan.contains("Stannum Text Search Scan"),
+                    "custom scan on must execute Stannum Text Search Scan: {operator_plan}"
+                );
+            } else {
+                assert!(
+                    !operator_plan.contains("Stannum Text Search Scan"),
+                    "custom scan off must not use Stannum Text Search Scan: {operator_plan}"
+                );
+                assert!(
+                    operator_plan.contains("Bitmap Heap Scan"),
+                    "custom scan off must execute Bitmap Heap Scan: {operator_plan}"
+                );
+            }
+            search_by_guc.push(ranked_id_scores(search_sql));
+            operator_by_guc.push(ranked_id_scores(operator_sql));
+        }
+        assert_eq!(
+            search_by_guc[0], search_by_guc[1],
+            "search() scores or ranked order differ across enable_custom_scan"
+        );
+        assert_eq!(
+            operator_by_guc[0], operator_by_guc[1],
+            "==> / score() ranked order differs across enable_custom_scan"
+        );
+        assert_eq!(
+            search_by_guc[0], operator_by_guc[0],
+            "search() and custom-scan/bitmap score() must agree by document and rank"
+        );
+    }
+
+    #[pg_test]
+    fn unknown_field_fails_deterministically() {
+        bool_fixture();
+        assert_query_error(
+            "bool_docs_multi",
+            "nope:(alpha)",
+            "stannum: unknown field 'nope'",
+        );
+        assert_query_error(
+            "bool_docs_multi",
+            "title:(alpha) AND nope:(bravo)",
+            "stannum: unknown field 'nope'",
+        );
     }
 
     #[pg_test]

@@ -1657,6 +1657,39 @@ mod tests {
         .unwrap();
     }
 
+    #[pg_test(error = "stannum: this ==> clause answers 'title'; use stannum.search() for 'body'")]
+    fn operator_rejects_foreign_field_scope() {
+        Spi::run(
+            "CREATE TABLE scoped_op (id int, title text, body text);
+             INSERT INTO scoped_op VALUES (1, 'alpha', 'beta');
+             CREATE INDEX scoped_op_idx ON scoped_op USING stannum (title, body);
+             SELECT id FROM scoped_op WHERE title ==> 'body:(alpha)';",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(error = "stannum: unknown field 'nope'")]
+    fn operator_rejects_unknown_field_scope() {
+        Spi::run(
+            "CREATE TABLE scoped_unk (id int, title text, body text);
+             INSERT INTO scoped_unk VALUES (1, 'alpha', 'beta');
+             CREATE INDEX scoped_unk_idx ON scoped_unk USING stannum (title, body);
+             SELECT id FROM scoped_unk WHERE title ==> 'nope:(alpha)';",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(error = "stannum: field syntax requires a multi-column index")]
+    fn operator_single_column_rejects_field_syntax() {
+        Spi::run(
+            "CREATE TABLE single_op (id int, body text);
+             INSERT INTO single_op VALUES (1, 'needle');
+             CREATE INDEX single_op_idx ON single_op USING stannum(body);
+             SELECT id FROM single_op WHERE body ==> 'title:(needle)';",
+        )
+        .unwrap();
+    }
+
     /// Scaffold until Phase 5. `amcanmulticol` stays false, so these cannot run.
     #[pg_test]
     #[ignore]

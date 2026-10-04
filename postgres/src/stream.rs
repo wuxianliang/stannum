@@ -8,13 +8,13 @@
 //! would observe a different mutable buffer/directory, and retaining only a
 //! borrowed cursor would leave references dangling after the first call.
 
+use crate::score::{page_plan_with_names, plan_with_names};
+use crate::storage::{View, codec_in};
 use segment::{Tid, pages, set};
 use tinql::runtime::{
     Query,
-    plan::{Limits, page_plan, plan, prefers_pages},
+    plan::{Limits, prefers_pages},
 };
-
-use crate::storage::{View, codec_in};
 
 enum Cursor {
     Rows(Box<dyn set::Cursor>),
@@ -68,8 +68,7 @@ impl CandidateStream {
             let mut inputs: Vec<Box<dyn pages::Cursor>> = Vec::new();
             for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
                 pgrx::check_for_interrupts!();
-                let planned = page_plan(&self.query, source, &limits)
-                    .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+                let planned = page_plan_with_names(&self.query, source, &limits, &view.field_names);
                 self.recheck |= !planned.exact;
                 let mut cursor = planned.cursor;
                 if let Some(dead) = dead {
@@ -83,8 +82,7 @@ impl CandidateStream {
             let mut inputs: Vec<Box<dyn set::Cursor>> = Vec::new();
             for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
                 pgrx::check_for_interrupts!();
-                let planned = plan(&self.query, source, &limits)
-                    .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+                let planned = plan_with_names(&self.query, source, &limits, &view.field_names);
                 self.recheck |= !planned.exact;
                 let mut cursor = planned.cursor;
                 if let Some(dead) = dead {

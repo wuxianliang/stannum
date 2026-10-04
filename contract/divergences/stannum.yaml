@@ -183,20 +183,3 @@ divergences:
       message: stannum.search() does not support this query on a multi-column index
   engines:
   - 0.5.0
-- id: fields.boolean_duplicate_leaf
-  against: stannum-0.4.0
-  kind: gap
-  captures:
-  - flat_ranked
-  summary: >-
-    Pre-existing duplicate-clause scoring divergence on the single-column
-    IndexScorer path (`postgres/src/score.rs`). 0.4.0 folded `alpha AND alpha`
-    to one contribution on both indexes; 0.5.0 IndexScorer keeps the repeated
-    clause (TIN `a a` weighs `a` 2.0). Fielded bool_multi matches 0.4.0. This
-    step did not introduce the IndexScorer 2× behaviour.
-  expected:
-    flat_ranked:
-      sqlstate: XX000
-      message: IndexScorer scores duplicated conjuncts twice versus 0.4.0 fold
-  engines:
-  - 0.5.0

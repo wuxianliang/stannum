@@ -136,10 +136,15 @@ pub(crate) fn raise_query_error(error: &QueryError, message: String) -> ! {
 }
 
 /// Parses `text` with `tokenizer`, or raises the error of an invalid query.
-pub(crate) fn parse_or_raise<T: tokenizer::Tokenizer>(text: &str, tokenizer: &T) -> Query {
+/// `fields` is the index's recorded names, or `None` on a single-column index.
+pub(crate) fn parse_or_raise<T: tokenizer::Tokenizer>(
+    text: &str,
+    tokenizer: &T,
+    fields: Option<&[String]>,
+) -> Query {
     let query = parse_tinql_to_query(text, tokenizer)
         .unwrap_or_else(|error| raise_query_error(&error, invalid_query(text, &error)));
-    crate::score::check_query_fields(&query);
+    crate::score::check_query_fields_on(&query, fields);
     query
 }
 
@@ -165,7 +170,6 @@ fn parsed_query(
     }
     let query = parse_tinql_to_query(text, tokenizer)
         .map_err(|error| (query_error_code(&error), invalid_query(text, &error)))?;
-    crate::score::check_query_fields(&query);
     let query = Rc::new(query);
     QUERIES.with_borrow_mut(|memo| {
         let queries = memo.entry(spec).or_default();
@@ -182,8 +186,10 @@ fn evaluate_with(
     query: &str,
     spec: [u8; SPEC_BYTES],
     tokenizer: &CompiledTokenizerPipeline,
+    fields: Option<&[String]>,
 ) -> Result<bool, Failure> {
     let query = parsed_query(spec, tokenizer, query)?;
+    crate::score::check_query_fields_on(&query, fields);
     let document = tokenize_doc(document, tokenizer);
     evaluate(&query, &document)
         .map(|result| result.matched)
@@ -205,6 +211,7 @@ fn evaluate_text(document: &str, query_text: &str) -> Result<bool, Failure> {
         query_text,
         default_spec(),
         tokenizer::presets::default_pipeline(),
+        None,
     )
 }
 
@@ -223,7 +230,15 @@ pub fn stannum_text_cmpfunc_indexed(document: &str, query: indexed_query) -> boo
     crate::udfs::validate_stannum_index(&index, "indexed_query");
     let spec = unsafe { crate::storage::spec_by_oid(pg_sys::Oid::from(query.index)) };
     let tokenizer = crate::storage::tokenizer_for(&spec);
-    evaluate_with(document, &query.query, spec, &tokenizer).unwrap_or_else(|failure| raise(failure))
+    let fields = unsafe { crate::storage::fields_meta(index.as_ptr()) };
+    evaluate_with(
+        document,
+        &query.query,
+        spec,
+        &tokenizer,
+        fields.as_ref().map(|meta| meta.names.as_slice()),
+    )
+    .unwrap_or_else(|failure| raise(failure))
 }
 
 /// Binds a non-constant query expression to an index at plan time.
@@ -609,27 +624,126 @@ pub(crate) unsafe fn bind_to_index(
     }
 }
 
-/// Rejects a `==>` query that uses field syntax on a single-column index.
-/// Multi-column field resolution is Phase 5; the 0.4.0 single-column error
-/// is `field syntax requires a multi-column index`.
+/// The field names a query text scopes, in the order they appear.
+fn field_scope_names(text: &str) -> Vec<String> {
+    fn walk(expr: &tinql::Expr, out: &mut Vec<String>) {
+        match expr {
+            tinql::Expr::Field { name, inner } => {
+                out.push(name.clone());
+                walk(inner, out);
+            }
+            tinql::Expr::And(items) | tinql::Expr::Or(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            tinql::Expr::Then {
+                left: a, right: b, ..
+            }
+            | tinql::Expr::Near {
+                left: a, right: b, ..
+            } => {
+                walk(a, out);
+                walk(b, out);
+            }
+            tinql::Expr::AndNot { positive, negative } => {
+                walk(positive, out);
+                walk(negative, out);
+            }
+            tinql::Expr::Encloses { big, little }
+            | tinql::Expr::NotEncloses { big, little }
+            | tinql::Expr::EnclosedBy { little, big }
+            | tinql::Expr::NotEnclosedBy { little, big }
+            | tinql::Expr::Overlapping { a: big, b: little }
+            | tinql::Expr::NotOverlapping { a: big, b: little }
+            | tinql::Expr::Before { a: big, b: little }
+            | tinql::Expr::After { a: big, b: little } => {
+                walk(big, out);
+                walk(little, out);
+            }
+            tinql::Expr::First { inner, .. }
+            | tinql::Expr::Last { inner, .. }
+            | tinql::Expr::Middle { inner, .. }
+            | tinql::Expr::Between { inner, .. }
+            | tinql::Expr::Within { inner, .. }
+            | tinql::Expr::Boost { inner, .. } => walk(inner, out),
+            tinql::Expr::Alternatives(items) | tinql::Expr::AtLeast { exprs: items, .. } => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            tinql::Expr::Phrase { elements, .. } => {
+                for element in elements {
+                    if let tinql::PhraseElement::Alternatives(items) = element {
+                        for item in items {
+                            walk(item, out);
+                        }
+                    }
+                }
+            }
+            tinql::Expr::Term(_)
+            | tinql::Expr::MatchAll
+            | tinql::Expr::MatchNone
+            | tinql::Expr::Fuzzy { .. }
+            | tinql::Expr::Wildcard(_)
+            | tinql::Expr::Regex(_)
+            | tinql::Expr::Range { .. } => {}
+        }
+    }
+    let Ok(expr) = tinql::parse(text, tinql::ImplicitOp::And) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    walk(&expr, &mut names);
+    names
+}
+
+/// Errors when a `==>` clause's query scopes a field other than the column
+/// the clause answers: the operator has one left operand, and
+/// `stannum.search()` is the all-fields form.
 fn check_clause_field_scope(
-    _document: *mut pg_sys::Node,
+    document: *mut pg_sys::Node,
     query: *mut pg_sys::Node,
-    _index: pg_sys::Oid,
+    index: pg_sys::Oid,
 ) {
     unsafe {
-        if query.is_null() || (*query).type_ != pg_sys::NodeTag::T_Const {
-            return;
-        }
-        let value = &*query.cast::<pg_sys::Const>();
-        if value.constisnull || value.consttype != pg_sys::TEXTOID {
-            return;
-        }
-        let Some(text) = String::from_datum(value.constvalue, false) else {
+        let Some(text) = crate::customscan::const_text(query) else {
             return;
         };
+        let names = field_scope_names(&text);
+        if names.is_empty() {
+            return;
+        }
+        let relation = pgrx::PgRelation::with_lock(index, pg_sys::AccessShareLock as _);
+        let fields = crate::storage::fields_meta(relation.as_ptr());
+        let Some(fields) = fields else {
+            pgrx::error!("stannum: field syntax requires a multi-column index");
+        };
         if let Ok(expr) = tinql::parse(&text, tinql::ImplicitOp::And) {
-            crate::score::check_expr_fields(&expr);
+            crate::score::check_expr_fields(&expr, Some(&fields.names));
+        }
+        let document = pg_sys::strip_implicit_coercions(document);
+        let attnum = if !document.is_null() && (*document).type_ == pg_sys::NodeTag::T_Var {
+            (*document.cast::<pg_sys::Var>()).varattno
+        } else {
+            0
+        };
+        let Some(metadata) = (*relation.as_ptr()).rd_index.as_ref() else {
+            return;
+        };
+        let keys = std::slice::from_raw_parts(
+            metadata.indkey.values.as_ptr(),
+            metadata.indnkeyatts as usize,
+        );
+        let ordinal = keys.iter().position(|key| *key == attnum);
+        let column = ordinal.and_then(|field| fields.names.get(field));
+        for name in &names {
+            if column != Some(name) {
+                let column = column.map_or("", String::as_str);
+                pgrx::error!(
+                    "stannum: this ==> clause answers '{column}'; use stannum.search() for '{name}'"
+                );
+            }
         }
     }
 }

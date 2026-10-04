@@ -33,7 +33,7 @@ use rustc_hash::FxHashSet;
 use segment::Tid;
 use segment::set::Cursor as _;
 use tinql::runtime::Query;
-use tinql::runtime::plan::{Limits, plan};
+use tinql::runtime::plan::Limits;
 
 use crate::score::rank;
 
@@ -1468,9 +1468,14 @@ unsafe fn scan_query(exec: &ScanExec) -> Query {
         let index_oid = pg_sys::Oid::from(exec.private.index_oid);
         let index = pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _);
         let tokenizer = crate::storage::index_tokenizer(index);
+        let fields = crate::storage::fields_meta(index);
         pg_sys::index_close(index, pg_sys::AccessShareLock as _);
-        let query = crate::operator::parse_or_raise(&exec.private.query, tokenizer.as_ref());
-        crate::score::scope_scan_query(query, exec.private.field)
+        let query = crate::operator::parse_or_raise(
+            &exec.private.query,
+            tokenizer.as_ref(),
+            fields.as_ref().map(|meta| meta.names.as_slice()),
+        );
+        crate::score::scope_scan_query(query, fields.as_ref(), exec.private.field)
     }
 }
 
@@ -1501,8 +1506,7 @@ fn candidates_in_view(exec: &mut ScanExec, query: &Query, view: &crate::storage:
     let mut tids = Vec::new();
     for ((segment, dead), label) in view.sources.iter().zip(&view.labels) {
         pgrx::check_for_interrupts!();
-        let planned = plan(query, segment, &limits)
-            .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+        let planned = crate::score::plan_with_names(query, segment, &limits, &view.field_names);
         let mut cursor: Box<dyn segment::set::Cursor> = planned.cursor;
         // A capped expansion yields a superset; those rows are rechecked.
         exec.recheck |= !planned.exact;
@@ -2085,8 +2089,7 @@ unsafe fn fold_count(
                     continue;
                 }
             }
-            let planned = plan(query, source, &limits)
-                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+            let planned = crate::score::plan_with_names(query, source, &limits, &view.field_names);
             let mut cursor = planned.cursor;
             if let Some(dead) = dead_list {
                 let dead = crate::storage::codec_in(
@@ -2224,11 +2227,12 @@ unsafe extern "C-unwind" fn exec_count(
                     let mut sources: Vec<Box<dyn segment::pages::Cursor>> = Vec::new();
                     for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
                         pgrx::check_for_interrupts!();
-                        let planned =
-                            tinql::runtime::plan::page_plan(&query, source, &Limits::default())
-                                .unwrap_or_else(|error| {
-                                    pgrx::error!("Stannum query plan: {error}")
-                                });
+                        let planned = crate::score::page_plan_with_names(
+                            &query,
+                            source,
+                            &Limits::default(),
+                            &view.field_names,
+                        );
                         exec.recheck |= !planned.exact;
                         let mut cursor = planned.cursor;
                         if let Some(dead) = dead {
