@@ -12,6 +12,8 @@
 #   full    quick + pgrx install cluster conformance     (installs the extension)
 #   gates   install cluster conformance oracle           (benchmarks/local/gates.sh)
 #
+# two-artifact  0.4.0 then 0.5.0 against one data directory (STN4 E.1; not in full)
+#
 # Steps that install the extension or use the installed one (pgrx, install,
 # cluster, conformance, oracle) run under script/pgrx-lock.py, in one hold.
 # The pgrx step leaves a pg_test build installed; `full` and `gates` install
@@ -37,7 +39,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 2
 
 QUICK=(headers fmt clippy rust-unit python-unit)
-LOCKED=(pgrx install cluster conformance oracle)
+LOCKED=(pgrx install cluster conformance oracle two-artifact)
 ALL_STEPS=("${QUICK[@]}" "${LOCKED[@]}")
 
 usage() {
@@ -194,6 +196,14 @@ step() {
             run ranked-fuzz-smoke python3 postgres/tests/ranked_fuzz.py --smoke
             run vacuum-cleanup-pins python3 postgres/tests/vacuum_cleanup_pins.py
             run mutation-targets python3 benchmarks/mutation_targets.py ;;
+        two-artifact)
+            need_pg two-artifact || return
+            if [ -z "${STANNUM_0_4_0_SRC:-}" ]; then
+                echo "test-all: two-artifact needs STANNUM_0_4_0_SRC (0.4.0 source tree)" >&2
+                return 1
+            fi
+            run two-artifact-migration python3 postgres/tests/two_artifact_migration.py \
+                --old-src "$STANNUM_0_4_0_SRC" ;;
         conformance)
             run conformance conformance_check ;;
         oracle)

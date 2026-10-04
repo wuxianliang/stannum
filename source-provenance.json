@@ -951,9 +951,17 @@
    "owner": "ben",
    "evidence": "Port of the pgembed jieba tokenizer symmetry fixtures onto STN3's private-cluster unittest pattern. Not copied from Lead."
   },
+  "postgres/tests/test_two_artifact_migration.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum E.1 two-artifact codec and error-string pin tests. Not copied from Lead."
+  },
   "postgres/tests/test_wide_cursor.py": {
    "owner": "ben",
    "evidence": "Original Stannum wide-query fuzzer generation regression tests. Moved from benchmarks/test_wide_cursor.py."
+  },
+  "postgres/tests/two_artifact_migration.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum E.1 two-artifact 0.4.0/0.5.0 migration CI. Not copied from Lead."
   },
   "postgres/tests/vacuum_cleanup_pins.py": {
    "owner": "ben",
