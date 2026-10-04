@@ -1046,7 +1046,7 @@ channels (design §4).
     error-shaped `fields.boolean_duplicate_leaf` entry, whose account is now
     the ledger.
 
-- [ ] **D.2 Same-field phrases + spans**
+- [x] **D.2 Same-field phrases + spans**
   - Goal: unscoped phrase = OR of per-field bindings (never cross-field
     adjacency); unscoped NEAR/THEN must not cross fields; field-scoped phrase
     confined; positions stay per-field through the cursor (`field_hits`).
@@ -1102,7 +1102,55 @@ channels (design §4).
     expression once per channel and unioning the documents, never
     concatenating the channels' position streams.
   - Review focus: design §4 phrases/spans;
-
+    controller §"duplicate-leaf ruling".
+  - Result (**code @ fac90a7**, box checked separately): **DONE-WHEN MET — 7 PASS
+    of 7 cases, 0 FAIL.** Full census **1 FAIL / 2 GAP / 51 PASS of 54** (was
+    6 FAIL / 4 GAP / 44 PASS), the single FAIL being the adjudicated
+    `fields.boolean_duplicate_leaf` and the two GAPs the E.2 catalog items.
+    TIN conformance unchanged at **exit 0**, `12 DIFF / 3 GAP / 5 IMPROVED /
+    169 PASS of 189` — no regression. Design: a phrase / `THEN` / `NEAR` is
+    evaluated **per channel** and matches when any eligible field satisfies it,
+    so positions never join across fields; `title:(…)` opens only that channel;
+    `LogicalPostingCursor::field_hits` (which had no consumer before this step)
+    supplies per-field positions to `fielded_span_holds`, which walks
+    `fields_in_mask` and returns on the first field whose position lists satisfy
+    the span. Expansion (wildcard, prefix, regex, fuzzy, range) carries the
+    field mask per expanded term via `compile_slot` / `collect_slot`, so
+    `title:(app*)` drops body-only hits and `alpha AND app*` no longer drops
+    the prefix. The regex path first tries `pure_prefix()` to keep the window
+    narrow. `Index::scan_window` now takes its filter **by value**
+    (`Box<dyn Fn(&str) -> bool>`, six implementations updated) so the expansion
+    closure's lifetime is decoupled from the index borrow *without* letting the
+    iterator skip filtering before it resolves a term.
+    **Controller findings from the mutation proofs** (the implementing agent
+    died on transport before running them):
+    1. **The contract corpus does not pin the same-field rule.** Its
+       cross-field row (2: `title=alpha`, `body=beta`) has both tokens at
+       position 1, so even an implementation that joins the channels finds no
+       adjacency and still answers `[1,7]`. A mutation merging each slot's
+       positions across fields passed every existing test until the controller
+       added a row with `title='alpha'`, `body='zzz beta'` (positions 1 and 2),
+       which the joining implementation falsely matches. That row and its
+       assertions are in the pgrx suite now.
+    2. **A scoring-only prefix drop is unobserved.** Dropping the expanded term
+       from `collect_fielded_terms` alone changes only scores, and
+       `fields.boolean_mixed_regex_and_term` records ids and count, so nothing
+       catches it. The membership-level drop — the historical 8ba6683 defect —
+       **is** caught (`fielded_boolean_prefix_and_mixed_term`, `[]` vs
+       `[7,8,9]`). Recorded as a residual gap for D.3/E.2 if a score-level
+       assertion is wanted.
+    Mutation proofs, all caught after the additions: merging per-slot positions
+    across fields → `[1,7,10]` vs `[1,7]`; dropping the field mask on a span's
+    term slots → `[1,7]` vs `[1]`; dropping `Regex` from membership → `[]` vs
+    `[7,8,9]`. Gates: lib 131/0, workspace 14 suites, fmt + clippy
+    (`pg18 pg_test`, `-D warnings`) clean, `script/test-all quick` 7/7, headers
+    2/2, `nm -u` test binary **0** `InterruptPending`, `cargo pgrx test pg18`
+    **359 passed / 0 failed / 5 ignored (254s), exit 0 including the doctest
+    phase**, release build verified (42 `pg_proc`, no `pg_test`-only UDFs).
+    `fields.boolean_regex_on_multi` and `fields.boolean_mixed_regex_and_term`
+    now PASS, so their divergence entries are removed (the plan's D.2
+    done-when requires this; it overrides a brief's blanket "leave
+    `contract/divergences/**` alone").
 - [ ] **D.3 Field-aware highlights + snippets**
   - Goal: 5-arg/bound forms with field; wrapper-field / no-mark / first-mark
     / first-non-NULL / NULL-skip snippet selection; `search()` multi-column
@@ -1154,7 +1202,12 @@ channels (design §4).
 
 **Phase gate PD** (normative: design §4 + parent Appendix A): phrase/span/
 highlight/planner contract cases match 0.4.0; census 0 FAIL; pgembed official
-suite green.
+suite green. **"Census 0 FAIL" is now unreachable and is rewritten by the
+adjudication section**: `fields.boolean_duplicate_leaf` is a ruled,
+machine-accounted raw FAIL, so PD's accounting gate is the adjudication's
+accounting rule — every case accounted, zero **unapproved** failures, every
+remaining GAP named and owned — with `fields.boolean_duplicate_leaf` the one
+approved failure, owned by E.2.
 
 ---
 
@@ -1401,6 +1454,7 @@ the build gate; this section only governs ranked p50.
 | Boolean coverage (PG17.11, controller re-run) | 7e6438f | 7 | 4 | 43 | New `contract/cases/boolean.yaml` (15 cases; truth-table corpus derivations independently re-derived by the controller and matched) + `contract/expected/stannum-0.4.0/boolean.json` recorded from the 0.4.0 build at `/tmp/stannum-main-46` @ `7ab511b` (answers verified against the hand-derived table; existing recordings byte-identical). Contributions: 1 new FAIL = `fields.boolean_duplicate_leaf` `flat_ranked` only — pre-existing single-column IndexScorer duplicate-clause 2x vs the 0.4.0 fold, documented in `contract/divergences/stannum.yaml`, not introduced here; 2 new GAPs = `fields.boolean_regex_on_multi` / `fields.boolean_mixed_regex_and_term` (0.5.0 rejects instead of silently dropping; D.2 owns). The other 12 boolean cases PASS bit-exact vs 0.4.0. `fields.boolean_mixed_regex_and_term` FAILed silently on the pre-repair build (5 rows from the dropped prefix) — this is the hole the coverage closes. Controller re-run differs from the implementer's `6 FAIL / 4 GAP / 44 PASS` only by `calls.stop_words`, the pre-existing PG17 environment difference. Caveat: `boolean.json`'s `source.extension_commit` is the suite repo's postgres HEAD, not the producer commit. |
 | C.3 | 7fdee28 | 6 | 4 | 44 | **Measured on PG18.4 against the release build** (see the two census-measurement rules above) — no case-id delta from the boolean-coverage row's PG18 equivalent, as expected of a pure deletion. FAIL ids: `fields.phrase_no_cross`, `fields.phrase_scoped`, `fields.then_no_cross`, `fields.near_no_cross`, `fields.patterns` (Phase D.2), plus `fields.boolean_duplicate_leaf` — which the 2026-10-04 adjudication reassigns to **D.1** (restore the fold; the controller proved the cause against 0.4.0: `bool_multi` is bit-exact while `bool_flat` scores ≈1.97×). GAP ids: `catalog.functions` (**correct as written** — live 42 vs recorded 41, lost = 0, the only gain `capabilities()`; no divergence edit needed), `catalog.gucs`, `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term` (D.2 converts both to assertions). Controller gates on the C.3 tree: `cargo test -p stannum --lib` 131/0 (61 in `fields`, 14 in `bound`), workspace 14 suites, `cargo pgrx test pg18` **347 passed / 0 failed / 5 ignored** (145.68s), `script/test-all quick` 7/7, headers 2/2, fmt + clippy (`pg18 pg_test`, `-D warnings`) clean, `nm -u`: plain test binary **0** `InterruptPending`, release `.so` **1**. Oracle reviewed twice in the controller's session: 1 P0 + 3 P1 (empty-token error category; shared candidate oracle; `.max(exact)` bound floor; no interval-skip coverage), all repaired with mutation proofs; final verdict **no P0**, residual P1 (no production boolean-WAND orchestration loop to pin, because it does not exist yet) assigned to **D.4**. |
 | D.1 | 6783b2f | 6 | 4 | 44 | Measured on PG18.4 against the release build (controller re-run). Identical to the C.3 row: field scope changes no membership the census observes, and the adjudicated duplicate-leaf raw FAIL is unchanged. FAIL = `fields.boolean_duplicate_leaf` (ruled) + D.2's five; GAP = `catalog.functions`, `catalog.gucs`, `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term`. TIN conformance stayed exit 0 with `catalog.S-12` PASS. |
+| D.2 | fac90a7 | 1 | 2 | 51 | **Measured on PG18.4 against the release build.** The big drop: the five phrase/span/pattern FAILs and both regex GAPs are gone. Remaining FAIL = the adjudicated `fields.boolean_duplicate_leaf`; remaining GAPs = `catalog.functions` and `catalog.gucs`, both E.2's. TIN conformance unchanged, exit 0, 169/189 PASS. |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
 | E.4 | | 0 | ≤2 | | release gate |
 
