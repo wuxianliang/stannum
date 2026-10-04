@@ -53,6 +53,12 @@ in the same machine-wide pgrx lock. A release workflow must also test migrations
 against a database and representative indexes created by the previous tagged
 *binary*: the SQL bootstrap alone cannot prove binary or data compatibility.
 
+Operators cutting a 0.4.0 cluster over to 0.5.0 follow
+[the upgrade runbook](upgrade.md): downtime, a clean shutdown, one
+`stannum.so`, `ALTER EXTENSION`, then non-concurrent `REINDEX`. Rollback is
+restore; there is no downgrade. Replicas are rebuilt from the upgraded
+primary, not replayed across the library swap.
+
 ## On-disk compatibility
 
 | Extension | Page signature/version read | Segment signatures read | Formats written |

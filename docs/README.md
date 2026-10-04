@@ -30,6 +30,8 @@ search. Run commands from the repository root.
   temporary and unlogged indexes, hot standbys and parallel scans.
 - [Releasing and upgrades](RELEASING.md): versioning, the release checklist
   and on-disk compatibility.
+- [Upgrading 0.4.0 to 0.5.0](upgrade.md): downtime cutover, replica rebuild,
+  rollback, and the REINDEX runbook including development fielded-terms.
 
 ## Internals and decisions
 

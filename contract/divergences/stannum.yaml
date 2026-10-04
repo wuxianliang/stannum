@@ -13,9 +13,19 @@ divergences:
   kind: gap
   captures:
   - settings
-  summary: 'STN3 exposes twelve engine GUCs that 0.4.0 never registered. Design 4.1:
-    a GUC that arrives with upstream is newly exposed and may be added; it inherits
-    no 0.4.0 meaning. The nine frozen GUCs match the recording field for field.'
+  summary: 'STN3/0.5.0 exposes twelve engine GUCs that 0.4.0 never registered.
+    E.2 classified each against the live define_*_guc registration (name, type,
+    default, min/max, context). All twelve match expected.extra field for field;
+    none is accidental catalog drift. Eight are the deliberate 0.5.0 production
+    surface: count_fold, deferred_merge_docs, max_expansion_terms, read_cache_mb,
+    reader_cache_mb, reclaim_pages, warmup_chunks, warmup_min_matches. Four are
+    a deliberate diagnostic/measurement surface that ships with 0.5.0:
+    profile_count_selection, count_page_threshold, force_count_pages
+    (experimental count-strategy controls; they do not change a correct count)
+    and debug_seed_score (SUSET; can change ranked results). Design 4.1: a newly
+    exposed GUC inherits no 0.4.0 meaning. The nine frozen GUCs match the
+    recording field for field. stannum.wal_rmgr_id stays unregistered without
+    shared_preload_libraries (wal_rmgr_guc_absent: true).'
   expected:
     settings:
       extra:

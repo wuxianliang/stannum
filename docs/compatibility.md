@@ -20,6 +20,21 @@ extensions define `==>` in `pg_catalog`, Stannum and TIN (or Lead) need
 separate databases. There is no in-place migration: create a fresh database,
 load the data, and build indexes with `USING stannum`.
 
+## Stannum 0.4.0 to 0.5.0
+
+The [upgrade runbook](upgrade.md) is the operator procedure: downtime, one
+`stannum.so`, `ALTER EXTENSION`, then non-concurrent `REINDEX`. Released
+0.4.0 indexes — single-column and multi-column — are a supported rebuild.
+Development fielded-terms indexes left on `stn3` are a documented `REINDEX`,
+not a supported upgrade and not a SQL script.
+
+The contract census against `stannum-0.4.0` keeps two catalog GAPs, both
+intentional 0.5.0 surface rather than TIN gaps:
+
+- `catalog.functions` — `capabilities()`, invoker rights, no `SECURITY DEFINER`.
+- `catalog.gucs` — twelve settings 0.4.0 never registered, classified in
+  [`contract/divergences/stannum.yaml`](../contract/divergences/stannum.yaml).
+
 ## Conformance summary
 
 Checked against TIN 1.0.3's recorded answers:

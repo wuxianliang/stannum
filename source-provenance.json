@@ -678,6 +678,10 @@
    "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
    "evidence": "Relocated/adapted Lead query-language documentation with Stannum SQL names and navigation."
   },
+  "docs/upgrade.md": {
+   "owner": "ben",
+   "evidence": "Original Stannum 0.4.0→0.5.0 operator cutover and REINDEX runbook (STN4 E.2). Not copied from Lead."
+  },
   "postgres/Cargo.toml": {
    "owner": "mixed",
    "upstream_path": "postgres/Cargo.toml",
