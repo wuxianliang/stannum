@@ -1921,6 +1921,7 @@ name = "stannum"
 version = "0.5.0"
 dependencies = [
  "boldi-vigna",
+ "libc",
  "pgrx",
  "pgrx-tests",
  "postgres",

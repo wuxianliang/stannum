@@ -505,6 +505,23 @@ D.\* after C.2. E.1 may already have started after A.4.
     candidate/scoring work reduction for query → uninstrumented acceptance under
     `C2-build-v2`. Off-limits: BM25F formula, thresholds, corpora, protocols'
     workloads, fielded term keys, `contract/expected/**`.
+  - **2026-10-04 (third entry) — MANDATORY build gate now genuinely PASSES under
+    `C2-build-v2`.** Build-stage instrumentation located the premium in the
+    mutable-index intern path (multi 400.2 ms vs single 170.5 ms, +230.7 ms),
+    caused by a per-token `to_owned()` plus a second `BTreeMap` copy that the
+    single-column arm does not make — it already used `Cow` + `get_mut`. Removing
+    it (per-field `BTreeMap<Cow>`, key moved only on a miss) took that stage to
+    310.1 ms vs 155.9 ms and the whole-build premium from 570 ms to 492 ms.
+    FCH1 directories (1.57 ms) and the STNF v2 norms trailer (0.11 ms) are
+    negligible, so encoding volume was never the cost. Acceptance with
+    instrumentation disabled: **English median 1.6204x, 95% CI 1.5636-1.6524,
+    4 of 64 pairs above 1.8 -> PASS** (upper bound <= 1.8 and inside the <=1.70
+    margin target); **Chinese median 1.2616x, CI 1.2396-1.2863, 0 above -> PASS**.
+    Dictionary bytes and every query answer are unchanged. Recorded in
+    `docs/benchmarks/stn4-per-field-poc.json` under `c2_build_v2_acceptance`
+    with the raw paired ratios. **Remaining blocker: advisory ranked p50 on both
+    corpora** (EN 3.256x / ZH 2.363x vs 1.3x, `waiver: null`), now the only thing
+    between the project and a green C.2.
   - **2026-10-04 — PG18 re-measurement (first adjudication; superseded by the entry
     above) — MANDATORY gate appeared to PASS on PG18, C.2 still incomplete.** Owner decision: PostgreSQL 18 is
     the only sanctioned engine for every gate/benchmark/census/checkpoint (see §0).

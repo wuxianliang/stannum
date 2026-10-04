@@ -843,6 +843,10 @@
    "owner": "ben",
    "evidence": "STN4 format delta: \u00a76.3.1 durable write-buffer generation classifier (tag decoding order, write-path decision, legacy fielded-key shape validator). No upstream counterpart."
   },
+  "postgres/src/storage/build_profile.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum CREATE INDEX stage counters (exclusive timers, STANNUM_BUILD_PROFILE sink). Not copied from Lead."
+  },
   "postgres/src/storage/classify.rs": {
    "owner": "ben",
    "evidence": "STN4 format delta: \u00a76.3 relation classification (per-segment ValidV2/ValidV1/Stock/Malformed labels, generation predicates, mutually exclusive classes). No upstream counterpart."
@@ -1012,6 +1016,10 @@
   "segment/src/bound.rs": {
    "owner": "ben",
    "evidence": "Original Stannum implementation; reviewed new-path history, no upstream counterpart. Introduced in b961ded6db3c05c4ab918f680c01ef309ffba9cb."
+  },
+  "segment/src/build_trace.rs": {
+   "owner": "ben",
+   "evidence": "Original Stannum optional build-path trace hooks for CREATE INDEX stage attribution. Not copied from Lead."
   },
   "segment/src/cache.rs": {
    "owner": "ben",

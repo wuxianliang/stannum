@@ -40,6 +40,7 @@
 //! standbys serve segmented reads only then (see [`index_reads_allowed`]).
 
 pub mod buffer_label;
+pub(crate) mod build_profile;
 pub(crate) mod classify;
 pub mod layout;
 pub mod verify;
@@ -1036,7 +1037,7 @@ unsafe fn key_texts(
             .as_ref()
             .map_or(1, |info| info.indnkeyatts as usize)
             .max(1);
-        (0..keys)
+        let texts: Vec<Option<String>> = (0..keys)
             .map(|ordinal| {
                 if *isnull.add(ordinal) {
                     None
@@ -1047,7 +1048,14 @@ unsafe fn key_texts(
                     )
                 }
             })
-            .collect()
+            .collect();
+        let input_bytes = texts
+            .iter()
+            .filter_map(|text| text.as_ref().map(String::len))
+            .sum::<usize>() as u64;
+        let copies = texts.iter().filter(|text| text.is_some()).count() as u64;
+        build_profile::add_heap_row(input_bytes, copies);
+        texts
     }
 }
 
@@ -1087,16 +1095,23 @@ fn fielded_record(
             continue;
         };
         let ordinal = u8::try_from(ordinal).expect("key count ≤ 16");
+        build_profile::add_tokenize_call();
         let mut by_term: std::collections::BTreeMap<String, Vec<u32>> =
             std::collections::BTreeMap::new();
         let mut field_length = 0u32;
-        for token in tokenizer.tokenize(text) {
-            field_length += 1;
-            by_term
-                .entry(token.text.as_ref().to_owned())
-                .or_default()
-                .push(token.pos);
+        {
+            let _tokenize = build_profile::span(build_profile::Stage::Tokenize);
+            for token in tokenizer.tokenize(text) {
+                field_length += 1;
+                match by_term.get_mut(token.text.as_ref()) {
+                    Some(positions) => positions.push(token.pos),
+                    None => {
+                        by_term.insert(token.text.into_owned(), vec![token.pos]);
+                    }
+                }
+            }
         }
+        build_profile::add_tokens(ordinal, u64::from(field_length));
         if field_length == 0 {
             continue;
         }
@@ -1120,10 +1135,48 @@ fn add_fielded_stream(
 ) {
     if texts.len() < 2 {
         let text = texts.first().and_then(|text| text.as_deref()).unwrap_or("");
+        build_profile::add_tokenize_call();
         codec(builder.add_token_stream(tid, tokens_of(tokenizer, text)));
         return;
     }
-    add_fielded_record(builder, &fielded_record(tokenizer, tid, texts));
+    let field_count = builder.field_count();
+    if texts.iter().enumerate().any(|(ordinal, text)| {
+        text.is_some() && u8::try_from(ordinal).is_ok_and(|field| field >= field_count)
+    }) {
+        pgrx::error!("stannum: fielded record names field past the envelope");
+    }
+    codec(builder.begin_fielded_document(tid));
+    let mut by_term: std::collections::BTreeMap<Cow<'_, str>, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for (ordinal, text) in texts.iter().enumerate() {
+        let Some(text) = text.as_deref() else {
+            continue;
+        };
+        let field = u8::try_from(ordinal).expect("key count ≤ 16");
+        by_term.clear();
+        build_profile::add_tokenize_call();
+        let mut field_length = 0u32;
+        {
+            let _tokenize = build_profile::span(build_profile::Stage::Tokenize);
+            for token in tokenizer.tokenize(text) {
+                field_length += 1;
+                match by_term.get_mut(token.text.as_ref()) {
+                    Some(positions) => positions.push(token.pos),
+                    None => {
+                        by_term.insert(token.text, vec![token.pos]);
+                    }
+                }
+            }
+        }
+        build_profile::add_tokens(field, u64::from(field_length));
+        if field_length == 0 {
+            continue;
+        }
+        let _mutable = build_profile::span(build_profile::Stage::Mutable);
+        for (term, positions) in std::mem::take(&mut by_term) {
+            codec(builder.add_occurrence_cow(term, field, positions, field_length));
+        }
+    }
 }
 
 /// Replays one decoded STN4 record into the segment builder. Every group is
@@ -1295,12 +1348,18 @@ unsafe fn write_run_with_map(index: pg_sys::Relation, data: &[u8]) -> (Run, Vec<
 /// Writes a segment run and its page table; returns both runs.
 unsafe fn write_segment_run(index: pg_sys::Relation, data: &[u8]) -> (Run, Run) {
     unsafe {
+        let _storage = build_profile::span(build_profile::Stage::Storage);
         let (run, blocks) = write_run_with_map(index, data);
         let mut table = Vec::with_capacity(blocks.len() * 4);
         for block in blocks {
             table.extend_from_slice(&block.to_le_bytes());
         }
-        (run, write_run(index, &table))
+        let map = write_run(index, &table);
+        build_profile::add_write(
+            u64::from(run.bytes).saturating_add(u64::from(map.bytes)),
+            u64::from(run.blocks).saturating_add(u64::from(map.blocks)),
+        );
+        (run, map)
     }
 }
 
@@ -2768,7 +2827,11 @@ unsafe fn replace_buffer(index: pg_sys::Relation, state: &mut BufferState, data:
 
 fn finish_builder(builder: SegmentBuilder) -> (Vec<u8>, u32, u64) {
     let docs = builder.document_count() as u32;
-    let blob = builder.finish();
+    build_profile::add_flush(u64::from(docs));
+    let blob = {
+        let _fold = build_profile::span(build_profile::Stage::Fold);
+        builder.finish()
+    };
     let total_length = codec(Segment::parse(&blob)).total_length();
     (blob, docs, total_length)
 }
@@ -3039,6 +3102,11 @@ unsafe fn merge_unlocked(
         };
         positions.sort_unstable();
         let inputs: Vec<SegmentEntry> = positions.iter().map(|p| meta.segments[*p]).collect();
+        build_profile::add_merge_input(
+            inputs.iter().map(|entry| u64::from(entry.docs)).sum(),
+            inputs.iter().map(|entry| u64::from(entry.run.bytes)).sum(),
+        );
+        let _merge = build_profile::span(build_profile::Stage::Merge);
         unsafe { replace_entries(index, meta.identity, &inputs) };
     }
 }
@@ -3144,6 +3212,7 @@ unsafe fn merge_segments_direct(
         .iter()
         .map(|(bytes, dead)| MergeInput { bytes, dead })
         .collect::<Vec<_>>();
+    let _encode = build_profile::span(build_profile::Stage::Encode);
     let blob = segment::merge::merge(&inputs, limits, || {
         // PostgreSQL defers interrupts while the metadata LWLock is held.
         // Do not bypass that protection; insert checks again after release.
@@ -3204,6 +3273,7 @@ unsafe fn merge_segments_reconstructed(
 /// The caller holds the meta page of `index` exclusively; `meta` is what it
 /// records, and the buffer holds a document.
 unsafe fn fold(index: pg_sys::Relation, meta: &mut Meta, record: &[u8]) {
+    let _fold = build_profile::span(build_profile::Stage::Fold);
     unsafe {
         let stream = read_buffer_stream(index, &meta.buffer);
         let mut builder = segment_builder(meta.fields.len());
@@ -3384,6 +3454,7 @@ pub unsafe fn build_init_fork(index: pg_sys::Relation) {
             );
             pg_sys::pfree(raw.cast());
         }
+        build_profile::add_sync_wait();
         pg_sys::smgrimmedsync(smgr, pg_sys::ForkNumber::INIT_FORKNUM);
     }
 }
@@ -3404,6 +3475,10 @@ impl Builder {
             .as_ref()
             .map(|_| unsafe { read_meta(index, false).1.fields.len() })
             .unwrap_or(1);
+        build_profile::set_field_count(u8::try_from(field_count).unwrap_or(1));
+        if tokenizer.is_some() {
+            build_profile::add_tokenizer_init();
+        }
         Self {
             tokenizer,
             segment: segment_builder(field_count),
@@ -3474,7 +3549,10 @@ impl Builder {
             unsafe {
                 self.flush(index);
                 lock_maintenance(index);
-                compact(index);
+                {
+                    let _merge = build_profile::span(build_profile::Stage::Merge);
+                    compact(index);
+                }
                 unlock_maintenance(index);
                 let (meta_buffer, mut meta) = read_meta(index, true);
                 // No reader holds a view of an index being created, so every
@@ -3491,6 +3569,7 @@ impl Builder {
                         verify::chain_pages(index, retired.run.first, retired.run.blocks, KIND_RUN);
                     free_pages(index, &pages, retired.xid);
                 }
+                let _storage = build_profile::span(build_profile::Stage::Storage);
                 pack(index);
             }
         }
@@ -5004,6 +5083,7 @@ unsafe fn replace_entries(index: pg_sys::Relation, identity: u64, inputs: &[Segm
         .expect("every input is present");
     meta.segments.retain(|entry| !inputs.contains(entry));
     if let Some((run, map, docs, total_length)) = output {
+        build_profile::add_merge_output(u64::from(docs), u64::from(run.bytes));
         let entry = new_entry(&mut meta, run, map, docs, total_length);
         if inputs.len() == 1 {
             meta.segments.insert(position, entry);

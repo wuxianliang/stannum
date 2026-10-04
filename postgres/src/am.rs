@@ -61,23 +61,31 @@ unsafe extern "C-unwind" fn ambuild(
     index: pg_sys::Relation,
     index_info: *mut pg_sys::IndexInfo,
 ) -> *mut pg_sys::IndexBuildResult {
+    let _profile = crate::storage::build_profile::Session::begin();
     unsafe { crate::operator::warn_about_search_predicate(index) };
-    unsafe { crate::storage::build_empty(index) };
+    {
+        let _storage =
+            crate::storage::build_profile::span(crate::storage::build_profile::Stage::Storage);
+        unsafe { crate::storage::build_empty(index) };
+    }
     let mut state = BuildState {
         builder: unsafe { crate::storage::Builder::new(index) },
         tuples: 0,
     };
-    let heap_tuples = unsafe {
-        pg_sys::table_index_build_scan(
-            heap,
-            index,
-            index_info,
-            true,
-            true,
-            Some(build_callback),
-            (&mut state as *mut BuildState).cast(),
-            std::ptr::null_mut(),
-        )
+    let heap_tuples = {
+        let _heap = crate::storage::build_profile::span(crate::storage::build_profile::Stage::Heap);
+        unsafe {
+            pg_sys::table_index_build_scan(
+                heap,
+                index,
+                index_info,
+                true,
+                true,
+                Some(build_callback),
+                (&mut state as *mut BuildState).cast(),
+                std::ptr::null_mut(),
+            )
+        }
     };
     unsafe { state.builder.finish(index) };
     let mut result = unsafe { PgBox::<pg_sys::IndexBuildResult>::alloc0() };

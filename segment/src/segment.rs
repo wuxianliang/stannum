@@ -149,25 +149,39 @@ impl SegmentBuilder {
         if self.lengths.contains_key(&tid) {
             return Err(Error::Unordered);
         }
-        let (doc_len, by_term) = group_by_term(tokens, interruptible)?;
+        let (doc_len, by_term) =
+            crate::build_trace::timed(crate::build_trace::Phase::IngestTokenize, || {
+                group_by_term(tokens, interruptible)
+            })?;
         if doc_len == 0 {
             return Ok(());
         }
-        self.lengths.insert(tid, doc_len);
-        for (term, positions) in by_term {
-            let occurrence = Occurrence {
-                tid,
-                doc_len,
-                positions,
-            };
-            // A term the builder holds already needs no new key.
-            match self.terms.get_mut(&*term) {
-                Some(occurrences) => occurrences.push(occurrence),
-                None => {
-                    self.terms.insert(term.into_owned(), vec![occurrence]);
+        crate::build_trace::note(crate::build_trace::Trace::Tokens {
+            field: 0,
+            n: doc_len,
+        });
+        crate::build_trace::timed(crate::build_trace::Phase::IngestInsert, || {
+            self.lengths.insert(tid, doc_len);
+            for (term, positions) in by_term {
+                crate::build_trace::note(crate::build_trace::Trace::Lookup);
+                crate::build_trace::note(crate::build_trace::Trace::Record);
+                crate::build_trace::note(crate::build_trace::Trace::Alloc(
+                    term.len() as u64 + (positions.len() as u64).saturating_mul(4),
+                ));
+                let occurrence = Occurrence {
+                    tid,
+                    doc_len,
+                    positions,
+                };
+                // A term the builder holds already needs no new key.
+                match self.terms.get_mut(&*term) {
+                    Some(occurrences) => occurrences.push(occurrence),
+                    None => {
+                        self.terms.insert(term.into_owned(), vec![occurrence]);
+                    }
                 }
             }
-        }
+        });
         Ok(())
     }
 
@@ -301,6 +315,50 @@ impl SegmentBuilder {
         positions: &[u32],
         field_length: u32,
     ) -> Result<()> {
+        let tid = self.validate_occurrence(token, field, positions, field_length)?;
+        self.note_occurrence(token, positions);
+        self.push_fielded_occurrence(
+            tid,
+            Cow::Borrowed(token),
+            field,
+            field_length,
+            positions.to_vec(),
+        )
+    }
+
+    /// [`add_occurrence`](Self::add_occurrence) moving the term and positions
+    /// so a build can intern a lexeme once.
+    pub fn add_occurrence_owned(
+        &mut self,
+        token: String,
+        field: u8,
+        positions: Vec<u32>,
+        field_length: u32,
+    ) -> Result<()> {
+        self.add_occurrence_cow(Cow::Owned(token), field, positions, field_length)
+    }
+
+    /// [`add_occurrence`](Self::add_occurrence) that only allocates the term
+    /// key when this token is new to the segment.
+    pub fn add_occurrence_cow(
+        &mut self,
+        token: Cow<'_, str>,
+        field: u8,
+        positions: Vec<u32>,
+        field_length: u32,
+    ) -> Result<()> {
+        let tid = self.validate_occurrence(token.as_ref(), field, &positions, field_length)?;
+        self.note_occurrence(token.as_ref(), &positions);
+        self.push_fielded_occurrence(tid, token, field, field_length, positions)
+    }
+
+    fn validate_occurrence(
+        &self,
+        token: &str,
+        field: u8,
+        positions: &[u32],
+        field_length: u32,
+    ) -> Result<Tid> {
         self.fielded_mode()?;
         let tid = self
             .pending_fielded
@@ -328,15 +386,44 @@ impl SegmentBuilder {
         {
             return Err(Error::Corrupt("fielded length disagreement"));
         }
-        self.fielded_terms
-            .entry(token.to_owned())
-            .or_default()
-            .push(FieldedOccurrence {
+        Ok(tid)
+    }
+
+    fn note_occurrence(&self, token: &str, positions: &[u32]) {
+        crate::build_trace::note(crate::build_trace::Trace::Lookup);
+        crate::build_trace::note(crate::build_trace::Trace::Record);
+        crate::build_trace::note(crate::build_trace::Trace::Alloc(
+            token.len() as u64 + (positions.len() as u64).saturating_mul(4),
+        ));
+    }
+
+    fn push_fielded_occurrence(
+        &mut self,
+        tid: Tid,
+        token: Cow<'_, str>,
+        field: u8,
+        field_length: u32,
+        positions: Vec<u32>,
+    ) -> Result<()> {
+        match self.fielded_terms.get_mut(token.as_ref()) {
+            Some(occurrences) => occurrences.push(FieldedOccurrence {
                 tid,
                 field,
                 field_length,
-                positions: positions.to_vec(),
-            });
+                positions,
+            }),
+            None => {
+                self.fielded_terms.insert(
+                    token.into_owned(),
+                    vec![FieldedOccurrence {
+                        tid,
+                        field,
+                        field_length,
+                        positions,
+                    }],
+                );
+            }
+        }
         let lengths = self
             .fielded_lengths
             .entry(tid)
@@ -347,37 +434,44 @@ impl SegmentBuilder {
     }
 
     pub fn finish(self) -> Vec<u8> {
+        use crate::build_trace::{Phase, timed};
         if self.field_count >= crate::trailer::MIN_FIELD_COUNT {
             return self.finish_fielded();
         }
         let mut dictionary = DictionaryBuilder::default();
         let mut ordinals_area = Vec::new();
         let mut payload_area = Vec::new();
-        let documents: Vec<Tid> = self.lengths.keys().copied().collect();
+        let documents: Vec<Tid> = timed(Phase::Sort, || self.lengths.keys().copied().collect());
         let mut ordinals = Vec::new();
         let mut scores = Vec::new();
         for (term, mut occurrences) in self.terms {
-            occurrences.sort_unstable_by_key(|occurrence| occurrence.tid);
+            timed(Phase::Sort, || {
+                occurrences.sort_unstable_by_key(|occurrence| occurrence.tid);
+            });
             let mut payload = PayloadBuilder::default();
             let mut max_tf_bucket = 0;
             ordinals.clear();
             scores.clear();
-            for occurrence in &occurrences {
-                let bucket = TfBucket::from_count(occurrence.positions.len() as u32).value();
-                max_tf_bucket = max_tf_bucket.max(bucket);
-                scores.push((bucket, occurrence.doc_len));
-                ordinals.push(
-                    documents
-                        .binary_search(&occurrence.tid)
-                        .expect("every occurrence belongs to a recorded document")
-                        as u32,
-                );
-                payload
-                    .push(&occurrence.positions)
-                    .expect("positions validated on insertion");
-            }
-            let ordinals_bytes = crate::ordinals::encode_scored(&ordinals, &scores);
-            let payload_bytes = payload.finish();
+            timed(Phase::Tf, || {
+                for occurrence in &occurrences {
+                    let bucket = TfBucket::from_count(occurrence.positions.len() as u32).value();
+                    max_tf_bucket = max_tf_bucket.max(bucket);
+                    scores.push((bucket, occurrence.doc_len));
+                    ordinals.push(
+                        documents
+                            .binary_search(&occurrence.tid)
+                            .expect("every occurrence belongs to a recorded document")
+                            as u32,
+                    );
+                    payload
+                        .push(&occurrence.positions)
+                        .expect("positions validated on insertion");
+                }
+            });
+            let ordinals_bytes = timed(Phase::Ordinals, || {
+                crate::ordinals::encode_scored(&ordinals, &scores)
+            });
+            let payload_bytes = timed(Phase::Positions, || payload.finish());
             let entry = TermEntry {
                 df: occurrences.len() as u32,
                 max_tf_bucket,
@@ -392,32 +486,39 @@ impl SegmentBuilder {
             };
             ordinals_area.extend_from_slice(&ordinals_bytes);
             payload_area.extend_from_slice(&payload_bytes);
-            dictionary
-                .push(&term, entry)
-                .expect("terms come from an ordered map");
+            timed(Phase::Dictionary, || {
+                dictionary
+                    .push(&term, entry)
+                    .expect("terms come from an ordered map");
+            });
         }
-        let dictionary_bytes = dictionary.finish();
-        let mut lengths = Vec::with_capacity(self.lengths.len() * 4);
-        let mut classes = Vec::with_capacity(self.lengths.len());
-        let mut total_length = 0u64;
-        for doc_len in self.lengths.values() {
-            lengths.extend_from_slice(&doc_len.to_le_bytes());
-            classes.push(crate::length_class::class_of(*doc_len));
-            total_length += u64::from(*doc_len);
-        }
-        let offsets = docs::offsets(documents.iter().copied());
-        let pages = docs::page_table(documents.iter().copied());
-        assemble(
-            self.lengths.len() as u32,
-            total_length,
-            &dictionary_bytes,
-            &ordinals_area,
-            &payload_area,
-            &offsets,
-            &lengths,
-            &classes,
-            &pages,
-        )
+        let dictionary_bytes = timed(Phase::Dictionary, || dictionary.finish());
+        let (lengths, classes, total_length, offsets, pages) = timed(Phase::Sort, || {
+            let mut lengths = Vec::with_capacity(self.lengths.len() * 4);
+            let mut classes = Vec::with_capacity(self.lengths.len());
+            let mut total_length = 0u64;
+            for doc_len in self.lengths.values() {
+                lengths.extend_from_slice(&doc_len.to_le_bytes());
+                classes.push(crate::length_class::class_of(*doc_len));
+                total_length += u64::from(*doc_len);
+            }
+            let offsets = docs::offsets(documents.iter().copied());
+            let pages = docs::page_table(documents.iter().copied());
+            (lengths, classes, total_length, offsets, pages)
+        });
+        timed(Phase::Assemble, || {
+            assemble(
+                self.lengths.len() as u32,
+                total_length,
+                &dictionary_bytes,
+                &ordinals_area,
+                &payload_area,
+                &offsets,
+                &lengths,
+                &classes,
+                &pages,
+            )
+        })
     }
 }
 
@@ -429,14 +530,21 @@ impl SegmentBuilder {
     /// occurrences for the token is omitted from both directories. The
     /// trailer is STNF v2: norms only, recomputed from the postings.
     fn finish_fielded(self) -> Vec<u8> {
+        use crate::build_trace::{Phase, timed};
         let mut dictionary = DictionaryBuilder::default();
         let mut ordinals_area = Vec::new();
         let mut payload_area = Vec::new();
-        let documents: Vec<Tid> = self.fielded_lengths.keys().copied().collect();
-        let mut tables = crate::trailer::Tables::new(self.field_count, documents.len() as u32)
-            .expect("writer field_count is 2..=16");
+        let documents: Vec<Tid> = timed(Phase::Sort, || {
+            self.fielded_lengths.keys().copied().collect()
+        });
+        let mut tables = timed(Phase::Norms, || {
+            crate::trailer::Tables::new(self.field_count, documents.len() as u32)
+                .expect("writer field_count is 2..=16")
+        });
         for (term, mut occurrences) in self.fielded_terms {
-            occurrences.sort_unstable_by_key(|occurrence| (occurrence.field, occurrence.tid));
+            timed(Phase::Sort, || {
+                occurrences.sort_unstable_by_key(|occurrence| (occurrence.field, occurrence.tid));
+            });
             let mut fields: Vec<crate::channels::FieldStreams> = Vec::new();
             let mut union = BTreeSet::new();
             let mut max_tf_bucket = 0u8;
@@ -447,35 +555,42 @@ impl SegmentBuilder {
                 let mut payload = PayloadBuilder::default();
                 ordinals.clear();
                 scores.clear();
-                for occurrence in chunk {
-                    let bucket = TfBucket::from_count(occurrence.positions.len() as u32).value();
-                    max_tf_bucket = max_tf_bucket.max(bucket);
-                    let ordinal = documents
-                        .binary_search(&occurrence.tid)
-                        .expect("every occurrence belongs to a recorded document")
-                        as u32;
-                    scores.push((bucket, occurrence.field_length));
-                    ordinals.push(ordinal);
-                    payload
-                        .push(&occurrence.positions)
-                        .expect("positions validated on insertion");
-                    tables
-                        .add(field, &term, ordinal, occurrence.positions.len() as u32)
-                        .expect("sidecar posting fits");
-                    union.insert(occurrence.tid);
-                }
+                timed(Phase::Tf, || {
+                    for occurrence in chunk {
+                        let bucket =
+                            TfBucket::from_count(occurrence.positions.len() as u32).value();
+                        max_tf_bucket = max_tf_bucket.max(bucket);
+                        let ordinal = documents
+                            .binary_search(&occurrence.tid)
+                            .expect("every occurrence belongs to a recorded document")
+                            as u32;
+                        scores.push((bucket, occurrence.field_length));
+                        ordinals.push(ordinal);
+                        payload
+                            .push(&occurrence.positions)
+                            .expect("positions validated on insertion");
+                        tables
+                            .add(field, &term, ordinal, occurrence.positions.len() as u32)
+                            .expect("sidecar posting fits");
+                        union.insert(occurrence.tid);
+                    }
+                });
                 fields.push(crate::channels::FieldStreams {
                     field,
-                    ordinals: crate::ordinals::encode_scored(&ordinals, &scores),
-                    payload: payload.finish(),
+                    ordinals: timed(Phase::Ordinals, || {
+                        crate::ordinals::encode_scored(&ordinals, &scores)
+                    }),
+                    payload: timed(Phase::Positions, || payload.finish()),
                 });
             }
             let Some(first) = fields.first() else {
                 continue;
             };
             let _ = first;
-            let encoded = crate::channels::encode(self.field_count, &fields)
-                .expect("writer streams are well formed");
+            let encoded = timed(Phase::Fch1, || {
+                crate::channels::encode(self.field_count, &fields)
+                    .expect("writer streams are well formed")
+            });
             let entry = TermEntry {
                 df: union.len() as u32,
                 max_tf_bucket,
@@ -490,38 +605,48 @@ impl SegmentBuilder {
             };
             ordinals_area.extend_from_slice(&encoded.ordinals);
             payload_area.extend_from_slice(&encoded.payload);
-            dictionary
-                .push(&term, entry)
-                .expect("terms come from an ordered map");
+            timed(Phase::Dictionary, || {
+                dictionary
+                    .push(&term, entry)
+                    .expect("terms come from an ordered map");
+            });
         }
-        let dictionary_bytes = dictionary.finish();
-        let mut lengths = Vec::with_capacity(documents.len() * 4);
-        let mut classes = Vec::with_capacity(documents.len());
-        let mut total_length = 0u64;
-        for per_field in self.fielded_lengths.values() {
-            let doc_len = per_field
-                .iter()
-                .copied()
-                .try_fold(0u32, |sum, len| sum.checked_add(len))
-                .unwrap_or(u32::MAX);
-            lengths.extend_from_slice(&doc_len.to_le_bytes());
-            classes.push(crate::length_class::class_of(doc_len));
-            total_length += u64::from(doc_len);
-        }
-        let offsets = docs::offsets(documents.iter().copied());
-        let pages = docs::page_table(documents.iter().copied());
-        let mut out = assemble(
-            documents.len() as u32,
-            total_length,
-            &dictionary_bytes,
-            &ordinals_area,
-            &payload_area,
-            &offsets,
-            &lengths,
-            &classes,
-            &pages,
-        );
-        out.extend_from_slice(&tables.encode().expect("sidecar tables encode"));
+        let dictionary_bytes = timed(Phase::Dictionary, || dictionary.finish());
+        let (lengths, classes, total_length, offsets, pages) = timed(Phase::Sort, || {
+            let mut lengths = Vec::with_capacity(documents.len() * 4);
+            let mut classes = Vec::with_capacity(documents.len());
+            let mut total_length = 0u64;
+            for per_field in self.fielded_lengths.values() {
+                let doc_len = per_field
+                    .iter()
+                    .copied()
+                    .try_fold(0u32, |sum, len| sum.checked_add(len))
+                    .unwrap_or(u32::MAX);
+                lengths.extend_from_slice(&doc_len.to_le_bytes());
+                classes.push(crate::length_class::class_of(doc_len));
+                total_length += u64::from(doc_len);
+            }
+            let offsets = docs::offsets(documents.iter().copied());
+            let pages = docs::page_table(documents.iter().copied());
+            (lengths, classes, total_length, offsets, pages)
+        });
+        let mut out = timed(Phase::Assemble, || {
+            assemble(
+                documents.len() as u32,
+                total_length,
+                &dictionary_bytes,
+                &ordinals_area,
+                &payload_area,
+                &offsets,
+                &lengths,
+                &classes,
+                &pages,
+            )
+        });
+        let trailer = timed(Phase::Norms, || {
+            tables.encode().expect("sidecar tables encode")
+        });
+        out.extend_from_slice(&trailer);
         out
     }
 }

@@ -48,6 +48,7 @@ mod reader;
 mod varint;
 
 pub mod bound;
+pub mod build_trace;
 pub mod cache;
 pub mod channels;
 pub mod dead;
