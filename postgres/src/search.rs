@@ -17,7 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use segment::Tid;
 use segment::index::Index;
 use std::collections::BTreeSet;
-use tinql::runtime::{Query, parse_tinql_to_query, parse_tinql_to_scoring_query};
+use tinql::runtime::{Query, parse_tinql_to_query};
 use tokenizer::CompiledTokenizerPipeline;
 
 type SearchRow = (pg_sys::ItemPointerData, f32, Option<String>);
@@ -489,18 +489,10 @@ fn fielded_eval(
     let root = compile_fielded(&parsed, &fields.names, default_mask, &mut keys);
     let mut terms = Vec::new();
     if want_scores {
-        let scoring =
-            parse_tinql_to_scoring_query(query, tokenizer.as_ref()).unwrap_or_else(|error| {
-                crate::operator::raise_query_error(
-                    &error,
-                    format!("Stannum score query error: {error}"),
-                )
-            });
-        check_query_fields_on(&scoring, Some(&fields.names));
-        if !fielded_query_supported(&scoring) {
-            unsupported_fielded_query();
-        }
-        collect_fielded_terms(&scoring, &fields.names, default_mask, 1.0, &mut terms);
+        // Membership and scoring share the structural parse. A scoring parse
+        // would keep `alpha AND alpha` as two clauses and double the BM25F
+        // contribution; 0.4.0's IndexScorer saw the folded term list.
+        collect_fielded_terms(&parsed, &fields.names, default_mask, 1.0, &mut terms);
         for term in &terms {
             intern_fielded_key(&mut keys, &term.text, term.mask);
         }
@@ -1367,6 +1359,18 @@ mod tests {
         assert_ids_on("bool_docs_single", query, expected);
     }
 
+    fn assert_same_as_term_score(index: &str, repeated: &str, once: &str) {
+        let repeated_bits = search_score_bits(index, repeated);
+        let once_rows = search_score_bits(index, once);
+        assert_eq!(repeated_bits.len(), once_rows.len(), "{index} {repeated}");
+        for ((id, repeated_score), (once_id, once_score)) in
+            repeated_bits.iter().zip(once_rows.iter())
+        {
+            assert_eq!(id, once_id, "{index} {repeated} id");
+            assert_eq!(*repeated_score, *once_score, "{index} {repeated} id={id}");
+        }
+    }
+
     fn assert_twice_the_term_score(index: &str, repeated: &str, once: &str) {
         let repeated_bits = search_score_bits(index, repeated);
         let once_rows = search_score_bits(index, once);
@@ -1551,10 +1555,14 @@ mod tests {
     fn fielded_duplicate_leaf_membership() {
         bool_fixture();
         assert_ids_both("alpha AND alpha", &[1, 2, 3, 6]);
-        // Matching uses Structural simplify (one member). Scoring keeps the
-        // repeated flat AND term, so each occurrence adds its boost — TIN's
-        // `a a` weighs `a` 2.0. IndexScorer does the same split.
-        assert_twice_the_term_score("bool_docs_multi", "alpha AND alpha", "alpha");
+        // Multi-column fielded scoring uses the structural term list (0.4.0
+        // parity): a duplicate conjunct is one contribution. Single-column
+        // IndexScorer still scores the repeated clause twice. That 2× behaviour
+        // is a pre-existing divergence from 0.4.0 (which folded duplicates on
+        // both paths); this step did not introduce it, and the contract suite
+        // does not yet pin it on the IndexScorer path except by recording
+        // fields.boolean_duplicate_leaf flat_ranked.
+        assert_same_as_term_score("bool_docs_multi", "alpha AND alpha", "alpha");
         assert_twice_the_term_score("bool_docs_single", "alpha AND alpha", "alpha");
     }
 

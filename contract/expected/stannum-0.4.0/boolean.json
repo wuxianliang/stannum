@@ -1,0 +1,571 @@
+{
+ "source": {
+  "engine": "stannum",
+  "extension_version": "0.4.0",
+  "server_version": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+  "host": "postgresql 17.11 homebrew aarch64",
+  "suite_commit": "79cc34179cfa8d57a6e8acab9750de4bb7dcc1a0-dirty",
+  "extension_commit": "8ba6683996a1572b66f1350a779da9369ddb53fb-dirty",
+  "runner_version": "2"
+ },
+ "cases": [
+  {
+   "id": "fields.boolean_duplicate_leaf",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ],
+     [
+      8
+     ]
+    ],
+    "count": 5,
+    "ranked": [
+     [
+      1,
+      "3f1f9306"
+     ],
+     [
+      3,
+      "3f1f9306"
+     ],
+     [
+      8,
+      "3f1f9306"
+     ],
+     [
+      2,
+      "3f05e0a1"
+     ],
+     [
+      6,
+      "3f05e0a1"
+     ]
+    ],
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ],
+     [
+      8
+     ]
+    ],
+    "flat_count": 5,
+    "flat_ranked": [
+     [
+      1,
+      "3f1f9306"
+     ],
+     [
+      3,
+      "3f1f9306"
+     ],
+     [
+      8,
+      "3f1f9306"
+     ],
+     [
+      2,
+      "3f05e0a1"
+     ],
+     [
+      6,
+      "3f05e0a1"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fields.boolean_unscoped_and",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "count": 3,
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "flat_count": 3
+   }
+  },
+  {
+   "id": "fields.boolean_unscoped_or",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      4
+     ],
+     [
+      6
+     ],
+     [
+      8
+     ]
+    ],
+    "count": 6,
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      4
+     ],
+     [
+      6
+     ],
+     [
+      8
+     ]
+    ],
+    "flat_count": 6
+   }
+  },
+  {
+   "id": "fields.boolean_and_over_or",
+   "captures": {
+    "ids": [
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ]
+    ],
+    "count": 3,
+    "flat_ids": [
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ]
+    ],
+    "flat_count": 3
+   }
+  },
+  {
+   "id": "fields.boolean_or_over_and",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ],
+     [
+      8
+     ]
+    ],
+    "count": 5,
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ],
+     [
+      8
+     ]
+    ],
+    "flat_count": 5
+   }
+  },
+  {
+   "id": "fields.boolean_not_universe",
+   "captures": {
+    "not_bravo_ids": [
+     [
+      3
+     ],
+     [
+      5
+     ],
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "not_bravo_count": 5,
+    "not_bravo_flat_ids": [
+     [
+      3
+     ],
+     [
+      5
+     ],
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "not_bravo_flat_count": 5,
+    "not_absent_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      4
+     ],
+     [
+      5
+     ],
+     [
+      6
+     ],
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "not_absent_count": 9,
+    "not_absent_flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      4
+     ],
+     [
+      5
+     ],
+     [
+      6
+     ],
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "not_absent_flat_count": 9
+   }
+  },
+  {
+   "id": "fields.boolean_negative_or_branch",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      5
+     ],
+     [
+      6
+     ],
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "count": 8,
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      5
+     ],
+     [
+      6
+     ],
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "flat_count": 8
+   }
+  },
+  {
+   "id": "fields.boolean_field_scoped_and",
+   "captures": {
+    "ids": 2,
+    "count": 1
+   }
+  },
+  {
+   "id": "fields.boolean_field_scope_pair",
+   "captures": {
+    "ids": [
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "count": 2
+   }
+  },
+  {
+   "id": "fields.boolean_at_least",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ]
+    ],
+    "count": 4,
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      3
+     ],
+     [
+      6
+     ]
+    ],
+    "flat_count": 4
+   }
+  },
+  {
+   "id": "fields.boolean_at_least_compound",
+   "captures": {
+    "ids": [
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "count": 2,
+    "flat_ids": [
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "flat_count": 2
+   }
+  },
+  {
+   "id": "fields.boolean_boost_membership",
+   "captures": {
+    "ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "count": 3,
+    "ranked": [
+     [
+      1,
+      "403a5b14"
+     ],
+     [
+      2,
+      "401c58a0"
+     ],
+     [
+      6,
+      "401c58a0"
+     ]
+    ],
+    "flat_ids": [
+     [
+      1
+     ],
+     [
+      2
+     ],
+     [
+      6
+     ]
+    ],
+    "flat_count": 3
+   }
+  },
+  {
+   "id": "fields.boolean_bare_field_scope_is_a_token",
+   "captures": {
+    "ids": [],
+    "count": 0,
+    "flat_ids": [],
+    "flat_count": 0
+   }
+  },
+  {
+   "id": "fields.boolean_regex_on_multi",
+   "captures": {
+    "ids": [
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "count": 3,
+    "flat_ids": [
+     [
+      7
+     ],
+     [
+      8
+     ],
+     [
+      9
+     ]
+    ],
+    "flat_count": 3
+   }
+  },
+  {
+   "id": "fields.boolean_mixed_regex_and_term",
+   "captures": {
+    "ids": 8,
+    "count": 1
+   }
+  }
+ ]
+}

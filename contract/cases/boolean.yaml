@@ -1,0 +1,459 @@
+# Copyright (C) 2026 Ben Weis <ben@springbird.app>
+#
+# See LICENSE in the repository root for license terms.
+
+# Boolean membership on a multi-column index. 0.4.0 answered these via
+# IndexScorer; the fielded SRF once flattened mixed AND/OR (8ba6683).
+# The runner INSERTs every declared column, so `flat` is added in setup_sql.
+#
+# Provenance: recordings in contract/expected/stannum-0.4.0/boolean.json were
+# produced by the 0.4.0 install from worktree /tmp/stannum-main-46 @ 7ab511b.
+# The runner stamps source.extension_commit from this suite repo's postgres/
+# HEAD (currently 8ba6683…), and only engine/extension_version are checked on
+# merge, so that header field is not the producer commit. Do not hand-fix it.
+#
+# Truth table (unscoped union of title+body; filler token is `other`):
+#   id  title            body      alpha bravo charlie app*
+#    1  alpha            bravo       T     B
+#    2  alpha bravo      charlie     T     T      B
+#    3  charlie          alpha       B            T
+#    4  bravo            bravo             T+B
+#    5  other            other
+#    6  alpha charlie    bravo       T     B      T
+#    7  apple            other                          T
+#    8  alpha            apple       T                  B
+#    9  other            apple                          B
+# Membership (ids), independently observable:
+#   alpha                  1,2,3,6,8
+#   bravo                  1,2,4,6
+#   charlie                2,3,6
+#   app*                   7,8,9
+#   alpha AND bravo        1,2,6          (1 is cross-field; 4 is bravo-only)
+#   alpha OR bravo         1,2,3,4,6,8    (3/8 are alpha-only; 4 is bravo-only)
+#   (alpha OR bravo) AND charlie
+#                          2,3,6          (3 has no bravo: under-match vs AND-of-leaves)
+#   alpha OR (bravo AND charlie)
+#                          1,2,3,6,8      (8 has alpha; 4 is bravo-only: over-match vs OR-of-leaves)
+#   * AND NOT bravo        3,5,7,8,9      (universe is not a positive posting)
+#   * AND NOT absenttoken  1..9
+#   alpha OR (* AND NOT bravo)
+#                          1,2,3,5,6,7,8,9  (all except bravo-and-not-alpha = {4})
+#   title:(alpha AND bravo)  2            (1 and 6 split the terms across fields)
+#   (title:(bravo) OR body:(bravo)) AND charlie
+#                          2,6            (2: bravo in title; 6: bravo in body)
+#   AT LEAST 2 OF [alpha bravo charlie]
+#                          1,2,3,6        (8 has only alpha of the three)
+#   AT LEAST 2 OF [(alpha AND bravo) charlie]
+#                          2,6            (1 has the compound only; 3 has charlie only)
+#   (alpha AND bravo)^2    1,2,6          (membership = unboosted AND)
+#   alpha AND alpha        1,2,3,6,8      (ids = alpha; score bits are recorded)
+#   title:bravo            empty          (colon-bearing token, not field scope)
+#   alpha AND app*         8              (old fielded path dropped the prefix)
+# Limit 100 so a top-k cap cannot hide a search vs search_count mismatch.
+# Score bits are recorded only against 0.4.0; do not compare bool_multi to bool_flat.
+
+area: boolean
+corpora:
+  boolean:
+    columns: "id int PRIMARY KEY, title text NOT NULL, body text NOT NULL"
+    rows:
+      - {id: 1, title: alpha, body: bravo}
+      - {id: 2, title: "alpha bravo", body: charlie}
+      - {id: 3, title: charlie, body: alpha}
+      - {id: 4, title: bravo, body: bravo}
+      - {id: 5, title: other, body: other}
+      - {id: 6, title: "alpha charlie", body: bravo}
+      - {id: 7, title: apple, body: other}
+      - {id: 8, title: alpha, body: apple}
+      - {id: 9, title: other, body: apple}
+    setup_sql:
+      - "ALTER TABLE {table} ADD COLUMN flat text GENERATED ALWAYS AS (title || ' ' || body) STORED"
+    index_sql:
+      - "CREATE INDEX bool_multi ON {table} USING {engine}(title, body)"
+      - "CREATE INDEX bool_flat ON {table} USING {engine}(flat)"
+cases:
+  - id: fields.boolean_unscoped_and
+    description: Unscoped AND requires both terms; row 1 is the cross-field hit.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha AND bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'alpha AND bravo')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'alpha AND bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'alpha AND bravo')"
+  - id: fields.boolean_unscoped_or
+    description: Unscoped OR is the union; rows 3/8 and 4 are the single-operand hits.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha OR bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'alpha OR bravo')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'alpha OR bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'alpha OR bravo')"
+  - id: fields.boolean_and_over_or
+    description: >
+      (A OR B) AND C. Row 3 has alpha and charlie but not bravo; AND-of-leaves
+      under-matches.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, '(alpha OR bravo) AND charlie',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, '(alpha OR bravo) AND charlie')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, '(alpha OR bravo) AND charlie',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, '(alpha OR bravo) AND charlie')"
+  - id: fields.boolean_or_over_and
+    description: >
+      A OR (B AND C). Row 4 has only bravo; OR-of-leaves over-matches.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha OR (bravo AND charlie)',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'alpha OR (bravo AND charlie)')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'alpha OR (bravo AND charlie)',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'alpha OR (bravo AND charlie)')"
+  - id: fields.boolean_not_universe
+    description: >
+      Universe is MatchAll, not a positive posting. NOT bravo drops 1,2,4,6;
+      NOT absenttoken is the whole corpus.
+    corpus: boolean
+    capture:
+      - value:
+          as: not_bravo_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, '* AND NOT bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: not_bravo_count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, '* AND NOT bravo')"
+      - value:
+          as: not_bravo_flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, '* AND NOT bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: not_bravo_flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, '* AND NOT bravo')"
+      - value:
+          as: not_absent_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, '* AND NOT absenttoken',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: not_absent_count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, '* AND NOT absenttoken')"
+      - value:
+          as: not_absent_flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, '* AND NOT absenttoken',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: not_absent_flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, '* AND NOT absenttoken')"
+  - id: fields.boolean_negative_or_branch
+    description: alpha OR (* AND NOT bravo) is the corpus minus bravo-and-not-alpha.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha OR (* AND NOT bravo)',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'alpha OR (* AND NOT bravo)')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'alpha OR (* AND NOT bravo)',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'alpha OR (* AND NOT bravo)')"
+  - id: fields.boolean_field_scoped_and
+    description: title:(alpha AND bravo) does not take a body-only bravo (rows 1 and 6).
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'title:(alpha AND bravo)',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'title:(alpha AND bravo)')"
+  - id: fields.boolean_field_scope_pair
+    description: Same term under two field masks, then AND charlie.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass,
+                                '(title:(bravo) OR body:(bravo)) AND charlie',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, '(title:(bravo) OR body:(bravo)) AND charlie')"
+  - id: fields.boolean_at_least
+    description: AT LEAST 2 OF three leaves; row 8 has only one of them.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'AT LEAST 2 OF [alpha bravo charlie]',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'AT LEAST 2 OF [alpha bravo charlie]')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'AT LEAST 2 OF [alpha bravo charlie]',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'AT LEAST 2 OF [alpha bravo charlie]')"
+  - id: fields.boolean_at_least_compound
+    description: A satisfied (alpha AND bravo) child counts once, so row 1 does not pass.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'AT LEAST 2 OF [(alpha AND bravo) charlie]',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'AT LEAST 2 OF [(alpha AND bravo) charlie]')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'AT LEAST 2 OF [(alpha AND bravo) charlie]',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'AT LEAST 2 OF [(alpha AND bravo) charlie]')"
+  - id: fields.boolean_boost_membership
+    description: Boost does not change AND membership; score bits are the 0.4.0 recording.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, '(alpha AND bravo)^2',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, '(alpha AND bravo)^2')"
+      - value:
+          as: ranked
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, '(alpha AND bravo)^2',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, '(alpha AND bravo)^2',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, '(alpha AND bravo)^2')"
+  - id: fields.boolean_duplicate_leaf
+    description: alpha AND alpha has the same ids as alpha; duplicated-clause bits are recorded.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha AND alpha',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'alpha AND alpha')"
+      - value:
+          as: ranked
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha AND alpha',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'alpha AND alpha',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'alpha AND alpha')"
+      - value:
+          as: flat_ranked
+          sql: >
+            SELECT d.id, encode(float4send(s.score::real), 'hex')
+            FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'alpha AND alpha',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid
+            ORDER BY s.score DESC, d.ctid
+  - id: fields.boolean_bare_field_scope_is_a_token
+    description: Bare title:bravo is a colon-bearing token and matches nothing on either index.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'title:bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'title:bravo')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'title:bravo',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'title:bravo')"
+  - id: fields.boolean_regex_on_multi
+    description: Prefix expansion on bool_multi and the concat cross-check.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'app*',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'app*')"
+      - value:
+          as: flat_ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_flat'::regclass, 'app*',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: flat_count
+          sql: "SELECT stannum.search_count('bool_flat'::regclass, 'app*')"
+  - id: fields.boolean_mixed_regex_and_term
+    description: >
+      Mixed term AND prefix on bool_multi. The old fielded collector dropped the
+      prefix and answered as alpha; 0.4.0 evaluates both clauses.
+    corpus: boolean
+    capture:
+      - value:
+          as: ids
+          sql: >
+            SELECT d.id FROM {table} d
+            JOIN stannum.search('bool_multi'::regclass, 'alpha AND app*',
+                                "limit" => 100, snippet => 'none') s
+              ON d.ctid = s.ctid ORDER BY d.id
+      - value:
+          as: count
+          sql: "SELECT stannum.search_count('bool_multi'::regclass, 'alpha AND app*')"
