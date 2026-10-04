@@ -54,6 +54,16 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
   section refs; verify; then oracle-review the result (design doc in the
   selection); fix until the step's Done-when holds. Mark the step complete
   here (`- [ ]` → `- [x]`) with the commit SHA.
+- **PostgreSQL 18 is the only sanctioned engine.** Every gate, benchmark,
+  census and pgembed run in this plan targets **PostgreSQL 18** (decision
+  2026-10-04). PG17 numbers are historical artifacts only: the C.1 ledger row
+  (`5 FAIL / 2 GAP / 32 PASS`) was measured on PG18.4, and re-running the same
+  suite on PG17.11 Homebrew gives `7 FAIL / 1 GAP / 31 PASS` — `calls.stop_words`
+  (`builtin_stop_words('auto')` = zh+en) and `catalog.functions` differ by major
+  version, not by commit. **Never mix versions inside one measurement**, never
+  compare a PG17 ratio against a PG18 baseline, and do not "reconcile" a
+  ledger row by re-running it on a different major. The C.2 latency gate is
+  therefore **re-measured on PG18** before any decision is drawn from it.
 - **Gates are tests, not opinions.** Every phase ends in a suite that runs in
   CI. A step whose gate is red after two fix rounds escalates to the human
   with the failing evidence — it does not get re-rolled until green by luck.
@@ -419,7 +429,7 @@ D.\* after C.2. E.1 may already have started after A.4.
   - Goal: dictionary bytes (no df sidecar) and build ≤ 1.8× `stn3_single` on
     **each** corpus; ranked p50 ≤ 1.3× or a named waiver **in the results
     file**.
-  - Scope: parent §5.2 protocol (PG17, concurrency 1, 20 runs, nearest-rank
+  - Scope: parent §5.2 protocol (**PostgreSQL 18**, concurrency 1, 20 runs, nearest-rank
     quantiles). English POC corpus (same checksum as 4.6) **and** a fixed
     Chinese corpus under the pinned jieba snapshot (Phase 3 is done). Query
     lists committed beside the results. Write
@@ -474,6 +484,30 @@ D.\* after C.2. E.1 may already have started after A.4.
     `(title, body, id)` 1.237s (2→3 columns only ~1.07×, so no large per-field
     superlinear jump; English body volume dominates). Gate fields unchanged;
     Phase D.* still not started.
+  - **2026-10-04 — PG18 re-measurement (sanctioned engine) + oracle adjudication:
+    MANDATORY gate PASSES, C.2 still incomplete.** Owner decision: PostgreSQL 18 is
+    the only sanctioned engine for every gate/benchmark/census/checkpoint (see §0).
+    The original C.2 numbers were taken on PG17.11, which is now a historical
+    artifact. Re-measured on PG18.4 (`/tmp/stn3-a2-prefix`, HEAD `52e13a3`, locked
+    corpora, 20 timed runs): English dict 1.0006× / **build 1.7350×** (1.2973s /
+    0.7477s); Chinese dict 1.0005× / **build 1.2504×**. Both mandatory gates pass;
+    `decision_pg18 = stay`. Root `decision` stays `escalate` (PG17 historical), with
+    an explicit `decision_scope` object stating that `decision_pg18` covers the
+    mandatory gate only and is **not** permission to start Phase D.
+    **Advisory p50 still FAILS on both corpora** — English 3.111×, Chinese 2.385×
+    against 1.3×, `waiver: null` — so `c2_complete: false` on both and Phase D stays
+    blocked. Diagnostic caveat: the 12-pair English build profile on PG18 has median
+    1.8509× with 10/12 pairs above 1.8, so the English build margin is thin; the
+    PG18 run also happened under loadavg ~13-19.
+    **Oracle adjudication (controller session):** the mandatory pass holds under the
+    declared one-shot build protocol (the paired profile is explicitly
+    `not_a_gate_rerun`); the way to green is code-level reduction of the per-field
+    execution overhead, not paperwork. Ordered path: explicit decision scopes →
+    clean PG18 baseline → instrument the field-aware query path → focused execution
+    optimizations (advance postings once per candidate document, decode each field
+    payload once, reuse channel-directory/cursor state, lazy payload decoding) →
+    re-run both corpora under the unchanged protocol until p50 ≤ 1.3× on both.
+    Formula, representation, thresholds and corpora are all off-limits.
 
 - [x] **C.2-R Fielded boolean correctness — remediation** (`8ba6683`; the duplicate-clause scoring regression it exposed was repaired in `7e6438f`) — user-authorized repair, unlocked while C.2 stays RED: it fixes a defect, it is not Phase D feature work
   - Goal: multi-column `stannum.search()` / `stannum_count()` must never return

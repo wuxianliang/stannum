@@ -32,6 +32,13 @@ a nonzero exit if any failed; `--fail-fast` stops at the first failure and
   `cargo pgrx init` pointed at that server. `script/test-all` uses the
   `pg_config` on `PATH` (or `PG_CONFIG`) and puts its `bindir` first on
   `PATH`, so `initdb`, `pg_ctl` and `psql` match it.
+  **PostgreSQL 18 is the only sanctioned engine for this project's gates and
+  benchmarks** (decision 2026-10-04): every gate, latency measurement, census
+  row and pgembed checkpoint is produced on PG18. Do not mix major versions
+  inside one measurement, do not compare a PG17 ratio against a PG18 baseline,
+  and treat PG17 output as a historical artifact. The suite still *installs*
+  under PG17 in CI for compatibility coverage; that is not the source of any
+  number quoted in a plan ledger or gate.
 - For the conformance suite, the count fuzzer and the exit test: a Python
   with `psycopg` 3 and PyYAML, named by `STANNUM_PYTHON` (default `python3`),
   for example `python3 -m venv .venv && .venv/bin/pip install -r
