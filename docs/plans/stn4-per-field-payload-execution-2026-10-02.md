@@ -914,6 +914,45 @@ acceptance evidence.
 
 ---
 
+## Ranked-p50 measurement protocol `C2-p50-v2` (extends `C2-build-v2`'s discipline)
+
+Effective 2026-10-04. The C.2 advisory p50 gate is a ~2% quantity on a shared
+8-core host, and a single 20-run window has already produced Chinese aggregate
+readings of 2.363x, 1.226x, 0.865x and 2.428x for the same code, with the
+multi arm swinging while the single arm stayed flat. The ranked-p50 gate
+therefore uses the same paired-repeated discipline as the build gate.
+
+| Item | Requirement |
+|---|---|
+| Engine | PostgreSQL 18.4, pinned prefix and extension build |
+| Systems | `stn4_multi` and `stn3_single`, same revision and build configuration, same table, loaded once and indexed by both |
+| Query set | The full locked list for the corpus; never a subset |
+| Repeats | **20 rounds** of the whole query list per system |
+| Counterbalancing | Alternate whole-list rounds between the two systems (`M S S M` …), so a load episode hits both arms |
+| Scheduling | Batches spread across time windows; record loadavg (1/5/15 min) at the start and end of every round |
+| Warm-up | One full untimed round per system at the start of each batch |
+| Timed interval | Wall clock of each `SELECT` statement, one query at a time, concurrency 1, default GUCs |
+| Instrumentation | `STANNUM_FIELDED_PROFILE` and `STANNUM_BUILD_PROFILE` unset |
+| Exclusions | No outlier trimming, no load-based selective exclusion, no picking the best round |
+
+Statistic: per query, the median of that query's 20 multi samples divided by the
+median of its 20 single samples; the aggregate is the mean of per-query medians
+divided by the mean of single medians (the same shape the 4.6 protocol used).
+
+Uncertainty: a **95% round-cluster bootstrap interval** on the aggregate,
+10,000 resamples, fixed recorded seed, resampling whole rounds with their
+per-query pairs intact.
+
+- **PASS**: upper bound ≤ 1.3
+- **FAIL**: lower bound > 1.3
+- **INCONCLUSIVE**: interval overlaps 1.3 — authorizes neither a pass nor Phase D
+
+Report per-query medians for both arms as well, so an improvement that came
+from slowing the denominator stays visible. `C2-build-v2` remains the rule for
+the build gate; this section only governs ranked p50.
+
+---
+
 ## Census ledger
 | after step | SHA | FAIL | GAP | PASS | notes |
 |------------|-----|-----:|----:|-----:|-------|
