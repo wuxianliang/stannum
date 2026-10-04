@@ -540,7 +540,11 @@
    "owner": "ben",
    "evidence": "Original Stannum implementation; the engine-agnostic TIN interface conformance suite, written for this repository on 2026-09-26."
   },
-  "contract/cases/arithmetic.yaml": {
+  "contract/cases/boolean.yaml": {
+  "owner": "ben",
+  "evidence": "New STN4 boolean contract cases for multi-column and concatenated indexes: mixed AND/OR, negation over the document universe, field-scoped conjunctions, the same term under two field scopes, at-least thresholds, boosted and duplicated clauses, and the bare name:term spelling. Expected values are recorded, not hand-written; the recordings in contract/expected/stannum-0.4.0/boolean.json come from the 0.4.0 build and the truth table was re-derived by hand before merging."
+ },
+ "contract/cases/arithmetic.yaml": {
    "owner": "ben",
    "evidence": "Original 0.4.0 contract cases for the design section 5.2 arithmetic rows. Expected values are recorded, not hand-written."
   },
