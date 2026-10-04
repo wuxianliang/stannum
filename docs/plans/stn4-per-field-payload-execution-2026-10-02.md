@@ -475,9 +475,7 @@ D.\* after C.2. E.1 may already have started after A.4.
     superlinear jump; English body volume dominates). Gate fields unchanged;
     Phase D.* still not started.
 
-- [ ] **C.2-R Fielded boolean correctness — remediation** (user-authorized
-  repair, unlocked while C.2 stays RED: it fixes a defect, it is not Phase D
-  feature work)
+- [x] **C.2-R Fielded boolean correctness — remediation** (`8ba6683`; the duplicate-clause scoring regression it exposed was repaired in `7e6438f`) — user-authorized repair, unlocked while C.2 stays RED: it fixes a defect, it is not Phase D feature work
   - Goal: multi-column `stannum.search()` / `stannum_count()` must never return
     a silently wrong boolean answer. Either evaluate the query correctly or
     raise the existing `does not support this query on a multi-column index`
@@ -512,6 +510,14 @@ D.\* after C.2. E.1 may already have started after A.4.
     suite has **no boolean coverage at all** (all 14 distinct query literals in
     `contract/cases/**` contain no `OR`/`AND`), which is why this survived
     until a benchmark query surfaced it.
+
+- [x] **C.2-S Boolean contract coverage** (`8fdee84`, after the source-attribution entry landed) — user-authorized follow-on ("先补 contract 布尔覆盖再定 C.2")
+  - Goal: make a silent boolean answer impossible to reintroduce. The suite had no boolean query at all (all 14 distinct query literals were phrases, NEAR, THEN, terms or expansions), which is exactly why the C.2-R defect survived.
+  - Scope: new `contract/cases/boolean.yaml` (area `boolean`, truth-table corpus, `bool_multi` + `bool_flat`), recordings from the 0.4.0 build, three `contract/divergences/stannum.yaml` entries. No weakening of any existing case, recording or assertion.
+  - Done when: every case captures ids **and** `search_count` (limit 100, so a top-k cap cannot hide a mismatch); recordings come only from the 0.4.0 build; existing recordings byte-identical (`git diff -- contract/expected` empty); the pre-repair build fails the cases that pin the repaired semantics and the repaired build passes or shows a documented GAP; census deltas recorded in the ledger.
+  - Result: 12 boolean cases bit-exact vs 0.4.0; one new FAIL (`fields.boolean_duplicate_leaf` `flat_ranked`, the pre-existing single-column IndexScorer duplicate-clause 2×, documented); two new GAPs (`fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term`, D.2 owns). Controller re-run census: `7 FAIL / 4 GAP / 43 PASS of 54`.
+  - Provenance caveat (recorded, not hand-fixed): `boolean.json`'s `source.extension_commit` is the suite repo's `postgres/` HEAD, not the producer commit; the runner only checks `engine`/`extension_version` on merge.
+  - Review focus: design §9; the zero-boolean-coverage hole that let the defect live.
 
 - [ ] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
   exports and fixtures, **AND the STNF-v1 df-sidecar query reader +
