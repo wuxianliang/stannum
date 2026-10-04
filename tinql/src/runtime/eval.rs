@@ -317,6 +317,66 @@ fn resolve_slot_positions(slot: &SpanTermSlot, doc: &TokenizedDoc) -> Vec<u32> {
     }
 }
 
+/// Projects `query` onto one field for highlighting: with `field` set, a
+/// `Query::Field` wrapper naming that field contributes its inner marks, a
+/// wrapper naming another field contributes nothing, and every unscoped
+/// part marks as usual — so marks stay confined to the field whose text is
+/// being rendered (RFC §5.11). With `field` unset the query is returned
+/// unchanged: the single-column behavior.
+pub fn project_to_field(query: &Query, field: Option<&str>) -> Query {
+    crate::limits::check_stack();
+    let Some(field) = field else {
+        return query.clone();
+    };
+    match query {
+        Query::Field { name, inner } => {
+            if name == field {
+                (**inner).clone()
+            } else {
+                // `MatchAll` contributes no highlight marks.
+                Query::MatchAll
+            }
+        }
+        Query::And(left, right) => Query::And(
+            Box::new(project_to_field(left, Some(field))),
+            Box::new(project_to_field(right, Some(field))),
+        ),
+        Query::Or(left, right) => Query::Or(
+            Box::new(project_to_field(left, Some(field))),
+            Box::new(project_to_field(right, Some(field))),
+        ),
+        Query::Conjunction(children) => Query::Conjunction(
+            children
+                .iter()
+                .map(|child| project_to_field(child, Some(field)))
+                .collect(),
+        ),
+        Query::Disjunction { min, children } => Query::Disjunction {
+            min: *min,
+            children: children
+                .iter()
+                .map(|child| project_to_field(child, Some(field)))
+                .collect(),
+        },
+        Query::Not(inner) => Query::Not(Box::new(project_to_field(inner, Some(field)))),
+        Query::Boost { factor, inner } => Query::Boost {
+            factor: *factor,
+            inner: Box::new(project_to_field(inner, Some(field))),
+        },
+        Query::AtLeast { min, children } => Query::AtLeast {
+            min: *min,
+            children: children
+                .iter()
+                .map(|child| project_to_field(child, Some(field)))
+                .collect(),
+        },
+        // Leaves (terms, spans, expansions nodes, `MatchAll`) carry no field
+        // wrapper inside; span operands cannot hold one (the grammar
+        // rejects a field in span context).
+        leaf => leaf.clone(),
+    }
+}
+
 /// A single highlight match: a labeled interval produced by per-component
 /// query evaluation against a tokenized document.
 #[derive(PartialEq)]
@@ -370,7 +430,11 @@ fn collect_highlight_matches(query: &Query, doc: &TokenizedDoc, out: &mut Vec<Hi
         Query::Not(_) => {
             // NOT suppresses matches — nothing to highlight.
         }
-        Query::Boost { inner, .. } | Query::Field { inner, .. } => {
+        Query::Field { .. } => {
+            // Unprojected field wrappers contribute no marks; `project_to_field`
+            // unwraps a wrapper for this field before evaluation.
+        }
+        Query::Boost { inner, .. } => {
             collect_highlight_matches(inner, doc, out);
         }
         Query::Span {
@@ -1002,5 +1066,59 @@ mod tests {
         let doc = doc("zero one two three four");
         let result = evaluate(&parse_lower("two"), &doc).unwrap();
         assert_eq!(doc.snippet(result.intervals[0], 1), "one two three");
+    }
+
+    #[test]
+    fn project_to_field_unwraps_this_wrapper_and_drops_others() {
+        let this_field = parse_lower("title:(needle)");
+        assert_eq!(
+            project_to_field(&this_field, Some("title")),
+            Query::Term("needle".into())
+        );
+        assert_eq!(project_to_field(&this_field, Some("body")), Query::MatchAll);
+        assert_eq!(project_to_field(&this_field, None), this_field);
+
+        let unscoped = parse_lower("needle");
+        assert_eq!(
+            project_to_field(&unscoped, Some("body")),
+            Query::Term("needle".into())
+        );
+    }
+
+    #[test]
+    fn project_to_field_confines_highlight_marks() {
+        let doc = doc("needle pad extra");
+        let query = parse_lower("title:(needle) OR extra");
+        let parts = |field: Option<&str>| -> Vec<(String, u32)> {
+            evaluate_for_highlight(&project_to_field(&query, field), &doc)
+                .into_iter()
+                .map(|m| (m.part, m.start))
+                .collect()
+        };
+        assert_eq!(
+            parts(Some("title")),
+            vec![("needle".into(), 0), ("extra".into(), 2)]
+        );
+        assert_eq!(parts(Some("body")), vec![("extra".into(), 2)]);
+        assert_eq!(parts(None), vec![("extra".into(), 2)]);
+    }
+
+    #[test]
+    fn project_to_field_marks_repeated_terms_and_multibyte_offsets() {
+        let repeated = doc("alpha alpha");
+        let marks = evaluate_for_highlight(
+            &project_to_field(&parse_lower("title:(alpha)"), Some("title")),
+            &repeated,
+        );
+        assert_eq!(
+            marks.iter().map(|m| m.start).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        let zh = doc("你好 alpha");
+        let marks =
+            evaluate_for_highlight(&project_to_field(&parse_lower("alpha"), Some("body")), &zh);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(zh.positions("alpha"), &[marks[0].start]);
     }
 }

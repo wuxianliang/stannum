@@ -9,7 +9,9 @@ use crate::fields::{
     buckets_from_tfs, expand, fields_in_mask, fused_score_from_buckets, lookup, next_atleast,
     next_conjunction, next_union,
 };
-use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
+use crate::highlight::{
+    highlight_text, highlight_text_ansi, positions_from_query, positions_from_query_for_field,
+};
 use crate::score::{
     PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, check_query_fields_on,
     rank, visible_tid_pairs,
@@ -49,9 +51,6 @@ enum SnippetKeys {
 /// scores through the BM25F path and its snippet renders one field: the one
 /// a single top-level field wrapper names, else the first field with a
 /// match, else the first non-NULL column (fetch_snippet picks).
-///
-/// The Fields branch is unreachable on STN3 until Phase 5 (`amcanmulticol`
-/// is false).
 fn validate_shape(index: &PgRelation, snippets: bool) -> SnippetKeys {
     unsafe {
         let metadata = &*(*index.as_ptr()).rd_index;
@@ -1905,24 +1904,18 @@ fn fetch_snippet(
     }
 }
 
-/// The name a query's single top-level `Field` wrapper carries.
-///
-/// `Query::Field` is Phase 4/5. Single-column snippets never wrap a field.
-fn top_level_field_name(_pipeline: &CompiledTokenizerPipeline, _query: &str) -> Option<String> {
-    None
-}
-
-/// Field-scoped match positions. STN3 has no `positions_from_query_for_field`
-/// until Phase 5; the Fields snippet path is unreachable while
-/// `amcanmulticol` is false.
-fn positions_from_query_for_field(
-    pipeline: &CompiledTokenizerPipeline,
-    query: &str,
-    text: &str,
-    _field_name: Option<&str>,
-    _field: u16,
-) -> Vec<crate::match_positions::MatchPosition> {
-    positions_from_query(pipeline, query, text)
+/// The name a query's single top-level `Field` wrapper carries (a root
+/// boost keeps it top-level): `title:(x) OR body:(y)` has none.
+fn top_level_field_name(pipeline: &CompiledTokenizerPipeline, query: &str) -> Option<String> {
+    let parsed = parse_tinql_to_query(query, pipeline).ok()?;
+    fn wrapper(query: &Query) -> Option<String> {
+        match query {
+            Query::Field { name, .. } => Some(name.clone()),
+            Query::Boost { inner, .. } => wrapper(inner),
+            _ => None,
+        }
+    }
+    wrapper(&parsed)
 }
 
 /// One field's text and its field-scoped marks, the scalar snippet a
@@ -1962,6 +1955,54 @@ fn snippet_of_fields(
         .flatten()
         .next()
         .map(|text| (text.clone(), Vec::new()))
+}
+
+#[cfg(test)]
+mod snippet_selection_tests {
+    use super::{snippet_of_fields, top_level_field_name};
+    use tokenizer::presets::default_pipeline;
+
+    fn names() -> Vec<String> {
+        vec!["title".into(), "body".into()]
+    }
+
+    #[test]
+    fn fields_snippet_skips_null_then_picks_first_mark() {
+        let pipeline = default_pipeline();
+        let texts = [None, Some("needle pad".into())];
+        let (text, positions) =
+            snippet_of_fields(pipeline, "needle", &texts, &names(), None).unwrap();
+        assert_eq!(text, "needle pad");
+        assert!(!positions.is_empty());
+    }
+
+    #[test]
+    fn fields_snippet_wrapper_field_wins_over_earlier_column() {
+        let pipeline = default_pipeline();
+        let texts = [Some("needle".into()), Some("needle pad".into())];
+        let (text, _) =
+            snippet_of_fields(pipeline, "body:(needle)", &texts, &names(), Some("body")).unwrap();
+        assert_eq!(text, "needle pad");
+        assert_eq!(
+            top_level_field_name(pipeline, "body:(needle)").as_deref(),
+            Some("body")
+        );
+        assert_eq!(
+            top_level_field_name(pipeline, "title:(x) OR body:(y)"),
+            None
+        );
+    }
+
+    #[test]
+    fn fields_snippet_first_non_null_when_nothing_marks() {
+        let pipeline = default_pipeline();
+        let texts = [Some("pad".into()), Some("other".into())];
+        let (text, positions) =
+            snippet_of_fields(pipeline, "absenttoken", &texts, &names(), None).unwrap();
+        assert_eq!(text, "pad");
+        assert!(positions.is_empty());
+        assert!(snippet_of_fields(pipeline, "needle", &[None, None], &names(), None).is_none());
+    }
 }
 
 /// Standalone `search()` body. The §4.1 `#[pg_extern]` lives in `tool::search`.
@@ -2160,10 +2201,7 @@ mod tests {
     /// make the walk prunable); its snippets render one field per row
     /// (§P0-2 phase 3), so the shape validator hands the refetch every key
     /// column with the recorded field names.
-    ///
-    /// Scaffold until Phase 5. `amcanmulticol` stays false.
     #[pg_test]
-    #[ignore]
     fn search_shape_accepts_multiple_keys_with_snippets() {
         fixture();
         Spi::run(
@@ -2189,10 +2227,9 @@ mod tests {
 
     /// Snippets still refuse a non-text key column on a multi-column index:
     /// `revision` is an int, and rendering it would not be a snippet.
-    ///
-    /// Scaffold until Phase 5. `amcanmulticol` stays false.
-    #[pg_test]
-    #[ignore]
+    #[pg_test(
+        error = "stannum.search() snippets require text-compatible key columns; use snippet => 'none' for degraded mode"
+    )]
     fn search_shape_rejects_non_text_keys_with_snippets() {
         fixture();
         Spi::run("CREATE INDEX hardening_multikey_snippets ON hardening_docs(body, revision)")
@@ -3397,10 +3434,7 @@ mod tests {
     /// key column, and the first field holding a mark decides (a NULL field
     /// holds none); when nothing marks, the first non-NULL field renders
     /// plain (RFC §5.11).
-    ///
-    /// Scaffold until Phase 5. `amcanmulticol` stays false.
     #[pg_test]
-    #[ignore]
     fn search_snippets_skip_null_fields() {
         Spi::run(
             "CREATE TABLE snip_null(id int primary key, title text, body text);
@@ -3443,6 +3477,24 @@ mod tests {
             snippets("title:(pad)"),
             vec![(2, "<mark>pad</mark>".into())]
         );
+    }
+
+    /// A top-level `body:(…)` wrapper selects the body snippet even when the
+    /// title also contains the term.
+    #[pg_test]
+    fn search_snippets_wrapper_field_not_first_mark() {
+        Spi::run(
+            "CREATE TABLE wrap_snip(id int primary key, title text, body text);
+             INSERT INTO wrap_snip VALUES (1, 'needle', 'needle pad');
+             CREATE INDEX wrap_snip_idx ON wrap_snip USING stannum(title, body);",
+        )
+        .unwrap();
+        let snippet = Spi::get_one::<String>(
+            "SELECT s.snippet FROM wrap_snip d JOIN
+             stannum.search('wrap_snip_idx', 'body:(needle)', 5) s ON d.ctid = s.ctid",
+        )
+        .unwrap();
+        assert_eq!(snippet, Some("<mark>needle</mark> pad".into()));
     }
 
     #[pg_test]

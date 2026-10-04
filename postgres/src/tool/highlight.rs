@@ -122,10 +122,20 @@ mod tests {
             text("SELECT stannum.highlight('Hi there', '[', ']', 'hi')"),
             Some("[Hi] there".into())
         );
-        // Named field, unscoped query: still marks (no project_to_field).
+        // Named field, unscoped query: still marks (unscoped parts mark).
         assert_eq!(
             text("SELECT stannum.highlight('alpha pad', '<mark>', '</mark>', 'alpha', 'nope')"),
             Some("<mark>alpha</mark> pad".into())
+        );
+        assert_eq!(
+            text(
+                "SELECT stannum.highlight('needle pad', '<b>', '</b>', 'title:(needle)', 'title')"
+            ),
+            Some("<b>needle</b> pad".into())
+        );
+        assert_eq!(
+            text("SELECT stannum.highlight('needle pad', '<b>', '</b>', 'title:(needle)', 'body')"),
+            Some("needle pad".into())
         );
         assert_eq!(
             text("SELECT stannum.highlight(NULL, '<b>', '</b>', 'a', NULL)"),
@@ -198,11 +208,44 @@ mod tests {
     }
 
     #[pg_test]
+    fn bound_five_arg_confines_marks_on_a_multi_column_index() {
+        Spi::run(
+            "CREATE TABLE hl_mc (id int PRIMARY KEY, title text, body text);
+             INSERT INTO hl_mc VALUES (1, 'needle pad', 'needle pad');
+             CREATE INDEX hl_mc_idx ON hl_mc USING stannum (title, body)",
+        )
+        .unwrap();
+        let bound = "stannum.bind_query('title:(needle)', 'hl_mc_idx'::regclass::oid)";
+        assert_eq!(
+            text(&format!(
+                "SELECT stannum.highlight('needle pad', '<b>', '</b>', {bound}, 'title')"
+            )),
+            Some("<b>needle</b> pad".into())
+        );
+        assert_eq!(
+            text(&format!(
+                "SELECT stannum.highlight('needle pad', '<b>', '</b>', {bound}, 'body')"
+            )),
+            Some("needle pad".into())
+        );
+        assert_eq!(
+            outcome(&format!(
+                "SELECT stannum.highlight('needle pad', '<b>', '</b>', {bound}, 'nope')"
+            )),
+            Some((
+                "XX000".into(),
+                "stannum.highlight(): unknown field 'nope'".into()
+            ))
+        );
+    }
+
+    #[pg_test]
     fn column_field_name_returns_none_for_non_positive_attnum() {
         use crate::highlight_udfs::field_name_for_attnum;
         let names = ["title".to_string(), "body".to_string()];
         assert_eq!(field_name_for_attnum(0, Some(&names)), None);
         assert_eq!(field_name_for_attnum(-1, Some(&names)), None);
-        assert_eq!(field_name_for_attnum(1, Some(&names)), None);
+        assert_eq!(field_name_for_attnum(1, None), None);
+        assert_eq!(field_name_for_attnum(1, Some(&names)), Some("title".into()));
     }
 }

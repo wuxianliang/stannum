@@ -177,6 +177,38 @@ pub(crate) fn positions_from_query(
         .collect()
 }
 
+/// [`positions_from_query`] restricted to one field of a multi-column
+/// document: the text passed is field `field`'s, named `field_name`, and a
+/// `Field` wrapper naming another field contributes no marks, so marks stay
+/// confined to the field being rendered (RFC §5.11). `field` is the id the
+/// caller associates with this text; highlighting itself uses token offsets
+/// inside `text`, not that id. `field_name = None` is the single-column
+/// behavior.
+pub(crate) fn positions_from_query_for_field(
+    pipeline: &CompiledTokenizerPipeline,
+    tinql_text: &str,
+    text: &str,
+    field_name: Option<&str>,
+    _field: u16,
+) -> Vec<MatchPosition> {
+    let query = match tinql::runtime::parse_tinql_to_query(tinql_text, pipeline) {
+        Ok(query) => query,
+        Err(_) => return Vec::new(),
+    };
+    let projected = tinql::runtime::project_to_field(&query, field_name);
+    let doc = tinql::runtime::tokenize_doc(text, pipeline);
+    tinql::runtime::evaluate_for_highlight(&projected, &doc)
+        .into_iter()
+        .map(|m| {
+            if m.start == m.end {
+                MatchPosition::point(m.part, m.start)
+            } else {
+                MatchPosition::span(m.part, m.start, m.end)
+            }
+        })
+        .collect()
+}
+
 fn highlight_text_with_tokenizer<T: Tokenizer>(
     tokenizer: &T,
     text: &str,
@@ -458,4 +490,58 @@ fn query_label(query_part: &str) -> String {
         return format!("qpart-{label}");
     }
     label.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokenizer::presets::default_pipeline;
+
+    #[test]
+    fn project_to_field_confines_named_field_marks() {
+        let pipeline = default_pipeline();
+        let text = "needle pad";
+        let this_field =
+            positions_from_query_for_field(pipeline, "title:(needle)", text, Some("title"), 0);
+        assert_eq!(
+            highlight_text(pipeline, text, "<b>", "</b>", &this_field).unwrap(),
+            "<b>needle</b> pad"
+        );
+        let other_field =
+            positions_from_query_for_field(pipeline, "title:(needle)", text, Some("body"), 1);
+        assert_eq!(
+            highlight_text(pipeline, text, "<b>", "</b>", &other_field).unwrap(),
+            "needle pad"
+        );
+        let unscoped = positions_from_query_for_field(pipeline, "needle", text, Some("body"), 1);
+        assert_eq!(
+            highlight_text(pipeline, text, "<b>", "</b>", &unscoped).unwrap(),
+            "<b>needle</b> pad"
+        );
+        let unprojected = positions_from_query_for_field(pipeline, "title:(needle)", text, None, 0);
+        assert_eq!(
+            highlight_text(pipeline, text, "<b>", "</b>", &unprojected).unwrap(),
+            "needle pad"
+        );
+    }
+
+    #[test]
+    fn highlight_repeated_terms_and_multibyte_offsets() {
+        let pipeline = default_pipeline();
+        let repeated = "alpha alpha";
+        let positions =
+            positions_from_query_for_field(pipeline, "alpha", repeated, Some("title"), 0);
+        assert_eq!(
+            highlight_text(pipeline, repeated, "<mark>", "</mark>", &positions).unwrap(),
+            "<mark>alpha</mark> <mark>alpha</mark>"
+        );
+
+        let zh = "你好 alpha";
+        let positions = positions_from_query_for_field(pipeline, "alpha", zh, Some("body"), 1);
+        let rendered = highlight_text(pipeline, zh, "<mark>", "</mark>", &positions).unwrap();
+        assert_eq!(rendered, "你好 <mark>alpha</mark>");
+        let start = rendered.find("<mark>").unwrap();
+        assert_eq!(&zh[..zh.find("alpha").unwrap()], "你好 ");
+        assert_eq!(start, "你好 ".len());
+    }
 }
