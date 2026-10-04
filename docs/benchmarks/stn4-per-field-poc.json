@@ -1,5 +1,6 @@
 {
   "decision": "escalate",
+  "build_profile_artifact": "docs/benchmarks/stn4-c2-build-profile.json",
   "corpora": {
     "english": {
       "language": "english",

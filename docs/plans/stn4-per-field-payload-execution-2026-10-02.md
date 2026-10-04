@@ -462,6 +462,18 @@ D.\* after C.2. E.1 may already have started after A.4.
     `(索引 OR 查询) AND 搜索` returns 0 rows on `stn4_multi` where
     `stn3_single` and `v040` return 2 (the English equivalent agrees at 10
     rows), so that query's Chinese latency ratio is not evidence.
+  - **2026-10-04 — §9 bounded build profile (diagnostic attachment; user-authorized,
+    not a gate rerun): `docs/benchmarks/stn4-c2-build-profile.json`.** N=12 paired
+    CREATE INDEX samples on the same locked English corpus: medians 1.1360s
+    (`stn4_multi`) / 0.6123s (`stn3_single`), median pairwise ratio **1.8451×**,
+    9/12 pairs above 1.8, band 1.34–1.94. Conclusion `inconclusive` under
+    pre-declared numeric criteria: the miss is **not** one slow multi-column
+    build (C.2's single shot sits mid-profile), but the ceiling also lies inside
+    the observed band, so a single-shot protocol can pass or miss from the same
+    cost. Field-count shape: `(title)` 0.068s, `(title, body)` 1.155s,
+    `(title, body, id)` 1.237s (2→3 columns only ~1.07×, so no large per-field
+    superlinear jump; English body volume dominates). Gate fields unchanged;
+    Phase D.* still not started.
 
 - [ ] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
   exports and fixtures, **AND the STNF-v1 df-sidecar query reader +

@@ -1,0 +1,662 @@
+{
+  "kind": "c2_english_build_profile",
+  "not_a_gate_rerun": true,
+  "gate_flip_forbidden": true,
+  "purpose": "Characterize whether the English C.2 build_ratio 1.8689× (single CREATE INDEX wall clock) is a stable property of the representation or a single-run artifact. Design §9 diagnostic attachment to an escalation; does not replace or flip the gate.",
+  "conclusion": "inconclusive",
+  "c2_reference": {
+    "artifact": "docs/benchmarks/stn4-per-field-poc.json",
+    "english_build_ratio": 1.868887602979354,
+    "english_stn4_multi_build_s": 1.1450605829886626,
+    "english_stn3_single_build_s": 0.6126963339920621,
+    "threshold": 1.8,
+    "build_protocol_runs": 1,
+    "note": "C.2 measured one CREATE INDEX per system. This profile does not overwrite those fields."
+  },
+  "corpus": {
+    "language": "english",
+    "rows": 20000,
+    "seed": 20260930,
+    "sha256": "52775c8a17077f09f028f5758eb53df65f94dc37c5a1f3e800990f5a39f0bbeb",
+    "csv": "/tmp/stn4-c2-profile/en.csv",
+    "columns": [
+      "id",
+      "title",
+      "body"
+    ],
+    "generator": "benchmarks/stn4_per_field_poc.py generate --lang english"
+  },
+  "environment": {
+    "pg": "17.11 (Homebrew)",
+    "pg_config": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+    "server_version": "17.11 (Homebrew)",
+    "extversion": "0.5.0",
+    "install": "script/pgrx-lock.py -- cargo pgrx install --package stannum --no-default-features --features pg17 --pg-config /opt/homebrew/opt/postgresql@17/bin/pg_config --release",
+    "datadir": "/tmp/stn4-c2-profile/pgdata",
+    "port": 51737,
+    "database": "stn4profile",
+    "not_used": [
+      "~/.pgrx/data-17",
+      "shared pgembed prefix",
+      "C.2 leftover /tmp/stn4-c2-data-stn4"
+    ],
+    "leftover_pg18_untouched": [
+      57384,
+      61390
+    ],
+    "gucs": "defaults plus listen_addresses=127.0.0.1, unix_socket_directories under /tmp/stn4-c2-profile/sockets, shared_buffers=128MB (initdb default)",
+    "git_head": "8eb409b9b8b24c5c9de872a62469485a8f50792b",
+    "machine_before": {
+      "loadavg": [
+        5.57470703125,
+        5.09912109375,
+        5.24365234375
+      ],
+      "notable_processes": [
+        {
+          "pid": 876,
+          "pcpu": 56.0,
+          "pmem": 0.6,
+          "command": "/Applications/FlClash.app/Contents/MacOS/FlClash"
+        },
+        {
+          "pid": 1344,
+          "pcpu": 53.4,
+          "pmem": 4.5,
+          "command": "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt"
+        },
+        {
+          "pid": 403,
+          "pcpu": 50.4,
+          "pmem": 0.6,
+          "command": "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon"
+        },
+        {
+          "pid": 627,
+          "pcpu": 7.1,
+          "pmem": 0.2,
+          "command": "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"
+        }
+      ],
+      "uname": {
+        "system": "Darwin",
+        "node": "xianliangdeMac-mini.local",
+        "release": "25.6.0",
+        "version": "Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:43 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8112",
+        "machine": "arm64",
+        "processor": "arm"
+      },
+      "cpu": "Apple M2",
+      "ncpu": 8,
+      "memsize_bytes": 17179869184,
+      "uptime": "23:57  up 1 day, 15:55, 2 users, load averages: 5.57 5.10 5.24"
+    },
+    "machine_after": {
+      "loadavg": [
+        5.7529296875,
+        5.24658203125,
+        5.2890625
+      ],
+      "notable_processes": [
+        {
+          "pid": 876,
+          "pcpu": 54.2,
+          "pmem": 0.6,
+          "command": "/Applications/FlClash.app/Contents/MacOS/FlClash"
+        },
+        {
+          "pid": 403,
+          "pcpu": 50.2,
+          "pmem": 0.6,
+          "command": "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon"
+        },
+        {
+          "pid": 1344,
+          "pcpu": 13.8,
+          "pmem": 4.2,
+          "command": "/Applications/RepoPrompt CE.app/Contents/MacOS/RepoPrompt"
+        },
+        {
+          "pid": 627,
+          "pcpu": 6.3,
+          "pmem": 0.2,
+          "command": "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"
+        }
+      ],
+      "uptime": "23:58  up 1 day, 15:56, 2 users, load averages: 5.75 5.25 5.29"
+    }
+  },
+  "protocol": {
+    "n_pairs": 12,
+    "n_pairs_run": 12,
+    "interleave": "A/B repetition with A=stn4_multi then B=stn3_single in every pair (see order_balance: not counterbalanced)",
+    "create_index_sql": {
+      "stn4_multi": "CREATE INDEX idx ON documents USING stannum (title, body)",
+      "stn3_single": "CREATE INDEX idx ON documents USING stannum (concat)"
+    },
+    "concat_note": "Matches C.2 fragment create_index_sql exactly: column (concat), not a functional expression index. concat is GENERATED ALWAYS AS (title || ' ' || body) STORED, same as benchmarks/stn3_fielded_poc.py load_table.",
+    "timed_interval": "wall clock of one CREATE INDEX statement; DROP INDEX after each sample; load time recorded separately and not mixed into build_s",
+    "n_shape": 5,
+    "n_insert_load": 5,
+    "profile_wall_s": 54.553377375006676,
+    "started_utc": "2026-10-03T15:58:48.968586+00:00",
+    "order_balance": "Sequential A-then-B repetition, not a counterbalanced design: every pair runs stn4_multi first and stn3_single second. Order, cache, thermal and time-varying load effects can therefore bias the ratio in one direction. Earlier wording implying controlled interleaving was too strong."
+  },
+  "systems": {
+    "stn4_multi": {
+      "system": "stn4_multi",
+      "create_index_sql": "CREATE INDEX idx ON documents USING stannum (title, body)",
+      "n": 12,
+      "median_s": 1.1359953959909035,
+      "min_s": 1.0893882919917814,
+      "max_s": 1.2771437500196043,
+      "spread_s": 0.1877554580278229,
+      "spread_over_median": 0.16527836177016192,
+      "mean_s": 1.1418508022543392,
+      "stdev_s": 0.04729046832092762,
+      "q1_s": 1.1276418120032758,
+      "q3_s": 1.1469152610152378,
+      "samples_s": [
+        1.148004792019492,
+        1.1465520840138197,
+        1.1250663750106469,
+        1.0893882919917814,
+        1.1302177920006216,
+        1.1285002910008188,
+        1.1294982499966864,
+        1.1417729999811854,
+        1.144456917012576,
+        1.0904461249883752,
+        1.1511619590164628,
+        1.2771437500196043
+      ]
+    },
+    "stn3_single": {
+      "system": "stn3_single",
+      "create_index_sql": "CREATE INDEX idx ON documents USING stannum (concat)",
+      "n": 12,
+      "median_s": 0.6122651664918521,
+      "min_s": 0.5887897500069812,
+      "max_s": 0.9529929160198662,
+      "spread_s": 0.36420316601288505,
+      "spread_over_median": 0.5948454786341855,
+      "mean_s": 0.6493787117481892,
+      "stdev_s": 0.10497459515613103,
+      "q1_s": 0.599164124490926,
+      "q3_s": 0.6318173227409716,
+      "samples_s": [
+        0.637701041996479,
+        0.6094082079944201,
+        0.6002299159881659,
+        0.6298560829891358,
+        0.5928244999959134,
+        0.6009487920091487,
+        0.617957624985138,
+        0.5887897500069812,
+        0.6151221249892842,
+        0.5959667499992065,
+        0.7507468340045307,
+        0.9529929160198662
+      ]
+    }
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.148004792019492,
+      "stn3_single_s": 0.637701041996479,
+      "ratio": 1.8002241119528084,
+      "copy_load_multi_s": 0.35420270802569576,
+      "copy_load_single_s": 0.246452124993084,
+      "loadavg_after": [
+        5.4482421875,
+        5.08056640625,
+        5.236328125
+      ]
+    },
+    {
+      "pair": 2,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1465520840138197,
+      "stn3_single_s": 0.6094082079944201,
+      "ratio": 1.8814188403978929,
+      "copy_load_multi_s": 0.24835854201228358,
+      "copy_load_single_s": 0.24789212498581037,
+      "loadavg_after": [
+        5.4482421875,
+        5.08056640625,
+        5.236328125
+      ]
+    },
+    {
+      "pair": 3,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1250663750106469,
+      "stn3_single_s": 0.6002299159881659,
+      "ratio": 1.8743923703943284,
+      "copy_load_multi_s": 0.23602470799232833,
+      "copy_load_single_s": 0.23021887501818128,
+      "loadavg_after": [
+        5.4482421875,
+        5.08056640625,
+        5.236328125
+      ]
+    },
+    {
+      "pair": 4,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.0893882919917814,
+      "stn3_single_s": 0.6298560829891358,
+      "ratio": 1.7295828704579996,
+      "copy_load_multi_s": 0.25520037501701154,
+      "copy_load_single_s": 0.24242283299099654,
+      "loadavg_after": [
+        5.171875,
+        5.029296875,
+        5.21728515625
+      ]
+    },
+    {
+      "pair": 5,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1302177920006216,
+      "stn3_single_s": 0.5928244999959134,
+      "ratio": 1.9064964285524852,
+      "copy_load_multi_s": 0.22809816600056365,
+      "copy_load_single_s": 0.24547070800326765,
+      "loadavg_after": [
+        5.171875,
+        5.029296875,
+        5.21728515625
+      ]
+    },
+    {
+      "pair": 6,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1285002910008188,
+      "stn3_single_s": 0.6009487920091487,
+      "ratio": 1.8778643139091937,
+      "copy_load_multi_s": 0.2720308330026455,
+      "copy_load_single_s": 0.20518991598510183,
+      "loadavg_after": [
+        4.91748046875,
+        4.97900390625,
+        5.1982421875
+      ]
+    },
+    {
+      "pair": 7,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1294982499966864,
+      "stn3_single_s": 0.617957624985138,
+      "ratio": 1.8277923992342535,
+      "copy_load_multi_s": 0.2308440420019906,
+      "copy_load_single_s": 0.22105062499758787,
+      "loadavg_after": [
+        4.91748046875,
+        4.97900390625,
+        5.1982421875
+      ]
+    },
+    {
+      "pair": 8,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1417729999811854,
+      "stn3_single_s": 0.5887897500069812,
+      "ratio": 1.9391862714451935,
+      "copy_load_multi_s": 0.24715150002157316,
+      "copy_load_single_s": 0.2144660420017317,
+      "loadavg_after": [
+        5.244140625,
+        5.04541015625,
+        5.22021484375
+      ]
+    },
+    {
+      "pair": 9,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.144456917012576,
+      "stn3_single_s": 0.6151221249892842,
+      "ratio": 1.8605360960354225,
+      "copy_load_multi_s": 0.2970938329817727,
+      "copy_load_single_s": 0.24788045897730626,
+      "loadavg_after": [
+        5.244140625,
+        5.04541015625,
+        5.22021484375
+      ]
+    },
+    {
+      "pair": 10,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.0904461249883752,
+      "stn3_single_s": 0.5959667499992065,
+      "ratio": 1.8297096691884691,
+      "copy_load_multi_s": 0.21876291700755246,
+      "copy_load_single_s": 0.2795578329823911,
+      "loadavg_after": [
+        5.06396484375,
+        5.01123046875,
+        5.20703125
+      ]
+    },
+    {
+      "pair": 11,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.1511619590164628,
+      "stn3_single_s": 0.7507468340045307,
+      "ratio": 1.5333557290892494,
+      "copy_load_multi_s": 0.2736406249750871,
+      "copy_load_single_s": 0.3838895419903565,
+      "loadavg_after": [
+        5.06396484375,
+        5.01123046875,
+        5.20703125
+      ]
+    },
+    {
+      "pair": 12,
+      "order": [
+        "stn4_multi",
+        "stn3_single"
+      ],
+      "stn4_multi_s": 1.2771437500196043,
+      "stn3_single_s": 0.9529929160198662,
+      "ratio": 1.340139814840954,
+      "copy_load_multi_s": 0.2650902920286171,
+      "copy_load_single_s": 0.27894433299661614,
+      "loadavg_after": [
+        7.060546875,
+        5.42578125,
+        5.35205078125
+      ]
+    }
+  ],
+  "ratios": {
+    "pairwise_ratios": [
+      1.8002241119528084,
+      1.8814188403978929,
+      1.8743923703943284,
+      1.7295828704579996,
+      1.9064964285524852,
+      1.8778643139091937,
+      1.8277923992342535,
+      1.9391862714451935,
+      1.8605360960354225,
+      1.8297096691884691,
+      1.5333557290892494,
+      1.340139814840954
+    ],
+    "n": 12,
+    "median_s": 1.8451228826119457,
+    "min_s": 1.340139814840954,
+    "max_s": 1.9391862714451935,
+    "spread_s": 0.5990464566042395,
+    "spread_over_median": 0.3246648026803682,
+    "mean_s": 1.783391576291521,
+    "stdev_s": 0.1754161842347542,
+    "q1_s": 1.7825638015791063,
+    "q3_s": 1.8787529455313685,
+    "median_of_pairwise_ratios": 1.8451228826119457,
+    "pairs_above_1_8": 9,
+    "pairs_at_or_below_1_8": 3,
+    "c2_single_shot_ratio": 1.868887602979354,
+    "c2_ratio_percentile_in_this_profile": 0.5833333333333334
+  },
+  "copy_load_s": {
+    "n": 24,
+    "median_s": 0.2475159794994397,
+    "min_s": 0.20518991598510183,
+    "max_s": 0.3838895419903565,
+    "spread_s": 0.17869962600525469,
+    "spread_over_median": 0.7219720777892613,
+    "mean_s": 0.25708058154123137,
+    "stdev_s": 0.04140866253561704,
+    "q1_s": 0.23068775025603827,
+    "q3_s": 0.2724332809957559,
+    "samples_s": [
+      0.35420270802569576,
+      0.246452124993084,
+      0.24835854201228358,
+      0.24789212498581037,
+      0.23602470799232833,
+      0.23021887501818128,
+      0.25520037501701154,
+      0.24242283299099654,
+      0.22809816600056365,
+      0.24547070800326765,
+      0.2720308330026455,
+      0.20518991598510183,
+      0.2308440420019906,
+      0.22105062499758787,
+      0.24715150002157316,
+      0.2144660420017317,
+      0.2970938329817727,
+      0.24788045897730626,
+      0.21876291700755246,
+      0.2795578329823911,
+      0.2736406249750871,
+      0.3838895419903565,
+      0.2650902920286171,
+      0.27894433299661614
+    ]
+  },
+  "field_count_shape": {
+    "note": "Same corpus, COPY load, CREATE INDEX wall clock only. title is fewer tokens than title+body; title+body+id adds the PK column. Compares field cardinality of the AM, not an iso-token experiment.",
+    "rows": [
+      {
+        "label": "title",
+        "create_index_sql": "CREATE INDEX idx ON documents USING stannum (title)",
+        "n": 5,
+        "samples_s": [
+          0.07260712498100474,
+          0.06946516697644256,
+          0.06284933400456794,
+          0.06400499999290332,
+          0.06812141698901542
+        ],
+        "median_s": 0.06812141698901542,
+        "min_s": 0.06284933400456794,
+        "max_s": 0.07260712498100474,
+        "spread_s": 0.009757790976436809,
+        "spread_over_median": 0.1432411627316891,
+        "mean_s": 0.06740960858878679,
+        "stdev_s": 0.004004173825700765,
+        "q1_s": 0.06400499999290332,
+        "q3_s": 0.06946516697644256
+      },
+      {
+        "label": "title_body",
+        "create_index_sql": "CREATE INDEX idx ON documents USING stannum (title, body)",
+        "n": 5,
+        "samples_s": [
+          1.2242635840084404,
+          1.3686768749903422,
+          1.1325403329974506,
+          1.1548156249918975,
+          1.1212843749963213
+        ],
+        "median_s": 1.1548156249918975,
+        "min_s": 1.1212843749963213,
+        "max_s": 1.3686768749903422,
+        "spread_s": 0.2473924999940209,
+        "spread_over_median": 0.2142268381550143,
+        "mean_s": 1.2003161583968904,
+        "stdev_s": 0.1022603221213756,
+        "q1_s": 1.1325403329974506,
+        "q3_s": 1.2242635840084404
+      },
+      {
+        "label": "title_body_id",
+        "create_index_sql": "CREATE INDEX idx ON documents USING stannum (title, body, id)",
+        "n": 5,
+        "samples_s": [
+          1.5004828330129385,
+          1.2628403329872526,
+          1.2291782920074183,
+          1.2318225839990191,
+          1.2365345419966616
+        ],
+        "median_s": 1.2365345419966616,
+        "min_s": 1.2291782920074183,
+        "max_s": 1.5004828330129385,
+        "spread_s": 0.27130454100552015,
+        "spread_over_median": 0.219407167200876,
+        "mean_s": 1.2921717168006581,
+        "stdev_s": 0.11721725111014736,
+        "q1_s": 1.2318225839990191,
+        "q3_s": 1.2628403329872526
+      }
+    ],
+    "median_s": {
+      "title": 0.06812141698901542,
+      "title_body": 1.1548156249918975,
+      "title_body_id": 1.2365345419966616
+    },
+    "median_ratios": {
+      "title_body_over_title": 16.952313619343997,
+      "title_body_id_over_title_body": 1.0707636052338116,
+      "title_body_id_over_title": 18.151920448103024,
+      "interpretation": "(title) is ~17× cheaper than (title, body) because title carries far fewer tokens, not because each extra field costs a constant. Adding id as a third column is a modest ~1.07× over (title, body) at the median (1.237s / 1.155s). The English multi-vs-single ~1.85× is therefore not explained by a large per-field superlinear jump at 3 columns; 2 vs 1 column on this corpus is dominated by indexing body."
+    }
+  },
+  "insert_vs_copy": {
+    "note": "Isolates whether heap populated by INSERT vs COPY changes subsequent stn4_multi CREATE INDEX cost. Load time is recorded separately; only CREATE INDEX is compared. INSERT path: COPY into TEMP staging, then INSERT INTO documents SELECT (so the heap is INSERT-built, not COPY-built). This is a cheap stand-in for 'isolate FCH1 directory write from load cost'; it does not instrument FCH1 bytes directly.",
+    "create_index_sql": "CREATE INDEX idx ON documents USING stannum (title, body)",
+    "n": 5,
+    "insert_load_s": {
+      "n": 5,
+      "median_s": 0.5247924580180552,
+      "min_s": 0.4918383329932112,
+      "max_s": 0.597114291973412,
+      "spread_s": 0.10527595898020081,
+      "spread_over_median": 0.20060493890820902,
+      "mean_s": 0.52794087480288,
+      "stdev_s": 0.0414331123617589,
+      "q1_s": 0.5003134160069749,
+      "q3_s": 0.5256458750227466,
+      "samples_s": [
+        0.597114291973412,
+        0.4918383329932112,
+        0.5003134160069749,
+        0.5256458750227466,
+        0.5247924580180552
+      ]
+    },
+    "create_index_after_insert": {
+      "n": 5,
+      "median_s": 1.1320268340059556,
+      "min_s": 1.1022894589987118,
+      "max_s": 1.139657374995295,
+      "spread_s": 0.03736791599658318,
+      "spread_over_median": 0.033009744004342735,
+      "mean_s": 1.1255517337995116,
+      "stdev_s": 0.015370256768551,
+      "q1_s": 1.1179662919894326,
+      "q3_s": 1.1358187090081628,
+      "samples_s": [
+        1.139657374995295,
+        1.1320268340059556,
+        1.1022894589987118,
+        1.1358187090081628,
+        1.1179662919894326
+      ]
+    },
+    "create_index_after_copy_from_pairs": {
+      "n": 12,
+      "median_s": 1.1359953959909035,
+      "min_s": 1.0893882919917814,
+      "max_s": 1.2771437500196043,
+      "spread_s": 0.1877554580278229,
+      "spread_over_median": 0.16527836177016192,
+      "mean_s": 1.1418508022543392,
+      "stdev_s": 0.04729046832092762,
+      "q1_s": 1.1276418120032758,
+      "q3_s": 1.1469152610152378,
+      "samples_s": [
+        1.148004792019492,
+        1.1465520840138197,
+        1.1250663750106469,
+        1.0893882919917814,
+        1.1302177920006216,
+        1.1285002910008188,
+        1.1294982499966864,
+        1.1417729999811854,
+        1.144456917012576,
+        1.0904461249883752,
+        1.1511619590164628,
+        1.2771437500196043
+      ]
+    },
+    "error": null,
+    "median_index_after_insert_over_after_copy": 0.9965065333900529,
+    "interpretation": "INSERT-built heap vs COPY-built heap did not appear to explain the observed build delta under these samples (index-after-insert median ~0.997x of index-after-copy). This is not a matched counterbalanced experiment and the FCH1 write path is still uninstrumented, so the heap load path is not exonerated either."
+  },
+  "blocked_diagnostics": [
+    {
+      "id": "fch1_directory_write_instrumentation",
+      "why": "Did not instrument FCH1 directory write at the byte or code-path level. Used COPY vs INSERT heap population instead; CREATE INDEX cost was unchanged. No numbers invented for FCH1 write time."
+    }
+  ],
+  "conclusion_basis": "Pre-declared decision rule (explicit criteria, no post-hoc tuning): (a) 'stable miss' requires median pairwise ratio > 1.8 AND at least 11 of the pairs above 1.8 AND the pair band (min..max) entirely above 1.8; (b) 'measurement noise' requires median pairwise ratio <= 1.8, which would place the C.2 single-shot 1.8689x in the tail of this profile; (c) otherwise 'inconclusive'. Measured: median 1.8451x, 9 of 12 pairs above 1.8, band 1.3401-1.9392x. Criterion (a) fails on two of its three clauses (only 9/12, band crosses 1.8), criterion (b) fails on the median, so the result is clause (c) inconclusive. The earlier wording 'almost every pair' was undefined and would have allowed either label; it is replaced by the numeric criteria above. This file must not be used to flip C.2.",
+  "conclusion_detail": "N=12 interleaved pairs on a loaded M2 (loadavg ~5-7; FlClash/RepoPrompt/WindowServer each ~50% CPU). System medians match C.2's single shots to ~1% (multi 1.1360s vs 1.1451s; single 0.6123s vs 0.6127s). Median pairwise ratio is 1.8451x, so the C.2 single-shot 1.8689x sits near the middle of this profile rather than in its tail. 9 of 12 pairs are above the 1.8x ceiling. Below-ceiling pairs: pair 4 (1.7296x, a fast multi) and pairs 11-12 (1.5334x / 1.3401x) where the single-field baseline slowed to 0.7507s / 0.9530s. Correction to an earlier revision: only pair 12 shows the load spike (1-min loadavg 7.0605); pair 11's recorded loadavg_after is 5.0640, identical to pair 10's, so pair 11's slow single-field baseline is NOT explained by a recorded load event and is reported as unexplained. Interpretation guardrails: the differential is not attributable to one isolated slow multi-column CREATE INDEX, but it is also not a gap that every paired run clears, and this experiment does not separate representation cost from corpus shape, separate-column processing, or the uninstrumented FCH1 write path. Ordinary machine-load variation, concentrated in the single-column denominator, is still present in these numbers. This profile must not flip C.2.",
+  "sensitivity_excluding_load_spike_pairs_11_12": {
+    "note": "Labeled sensitivity only, not a rerun and not a second gate. Excluding pairs 11 and 12 (pair 12 shows the 1-min loadavg 7.0605 spike; pair 11 is an unexplained slow single-field baseline with loadavg_after 5.0640, i.e. not load-attributable) the median pairwise ratio is 1.8675x and 9 of 10 pairs still exceed 1.8x. Dropping samples does not move the ratio across the ceiling and must not be read as a pass.",
+    "n_pairs": 10,
+    "pairwise_ratios": [
+      1.8002241119528084,
+      1.8814188403978929,
+      1.8743923703943284,
+      1.7295828704579996,
+      1.9064964285524852,
+      1.8778643139091937,
+      1.8277923992342535,
+      1.9391862714451935,
+      1.8605360960354225,
+      1.8297096691884691
+    ],
+    "median_of_pairwise_ratios": 1.8674642332148754,
+    "min": 1.7295828704579996,
+    "max": 1.9391862714451935,
+    "spread": 0.20960340098719388,
+    "pairs_above_1_8": 9,
+    "pairs_at_or_below_1_8": 1
+  },
+  "human_label": "Typical miss; single-shot threshold crossing remains underdetermined. Machine-readable `conclusion` stays `inconclusive` because the ratio band straddles the ceiling.",
+  "escalation_claim": "Approved escalation wording (narrower than an earlier draft that said 'stable property of the representation'): the profile shows a repeatable end-to-end build differential for this corpus and machine. It is consistent with the cost of STN4's per-field posting representation, including its FCH1-related work, but does not establish corpus-independent behaviour, does not isolate the FCH1 contribution, and does not make the one-shot 1.8x crossing deterministic.",
+  "prior_authorization": "Bounded diagnostic authorized by the user in-session on 2026-10-04 (controller ask_user after the RED C.2), selecting the design §9 'profile before inventing a second representation' option. Protocol constraints fixed before any measurement: diagnostic attachment only, never a gate rerun, never a threshold change, Phase D does not start."
+}
