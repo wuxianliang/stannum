@@ -425,7 +425,7 @@ D.\* after C.2. E.1 may already have started after A.4.
     - `script/test-all quick` green; CI on the pushed SHA green.
   - Review focus: design §2 acceptance; parent §5.2; design §8 C.1.
 
-- [ ] **C.2 Latency — GATE**
+- [x] **C.2 Latency — GATE** (`1d7ae21`; advisory ranked p50 settled under `C2-p50-v2`, mandatory build under `C2-build-v2`)
   - Goal: dictionary bytes (no df sidecar) and build ≤ 1.8× `stn3_single` on
     **each** corpus; ranked p50 ≤ 1.3× or a named waiver **in the results
     file**.
@@ -522,6 +522,35 @@ D.\* after C.2. E.1 may already have started after A.4.
     with the raw paired ratios. **Remaining blocker: advisory ranked p50 on both
     corpora** (EN 3.256x / ZH 2.363x vs 1.3x, `waiver: null`), now the only thing
     between the project and a green C.2.
+  - **2026-10-04 (fourth entry) — C.2 is GREEN.** Three instrumentation-led
+    query-path changes closed the advisory gate: (a) scoring reads the stored TF
+    bucket from the ordinals stream instead of decoding the payload entry to
+    count positions — bit-equivalence pinned over raw tf 1..=400; (b) the ranked
+    path keeps the same bounded heap the single-column path uses and resolves
+    visibility only for the `limit` survivors, falling back when a row is
+    invisible or HOT-rewritten; (c) AND is a real posting intersection — the
+    rarest child leads and siblings seek to its ordinal, `AtLeast` /
+    `Disjunction{min>1}` pick the n-th smallest current ordinal — so
+    `历史 AND 望远镜` fell from 13362 advances / 6679 hash-set inserts to 231 / 29
+    while scoring the same 58 rows. Ranked p50 under the new `C2-p50-v2`
+    protocol (20 whole-list rounds per system, alternating systems, per-round
+    loadavg, 95% round-cluster bootstrap): **English 0.8701x, CI
+    [0.8419, 0.9151]; Chinese 0.7814x, CI [0.7675, 0.8042]** — both PASS with
+    the upper bound far below 1.3x, `waiver: null`, worst single query 1.022x
+    (EN) / 0.975x (ZH). Build re-measured on the final tree: English 1.6066x
+    [1.5613, 1.6379], Chinese 1.2640x [1.2489, 1.2781].
+    **Oracle final adjudication: C.2 complete** — the sub-1.0 p50 ratios are a
+    legitimate consequence of the three changes (the baseline still pays the
+    union walk, the position decode and the eager visibility), not a measurement
+    bias; the oracle asks for an independent replication and a factorial
+    ablation as release-confidence work, not as gate criteria. Oracle P1:
+    the intersection walk needs an explicit exhaustive-vs-fused-WAND
+    equivalence test before release (carried into C.3/D). Oracle P2 repaired
+    in-commit: `saturating_add(1)` followed by `== 0` was unreachable at
+    `u32::MAX`, so the intended exhaustion was a latent loop; now `checked_add`.
+    Note: CI job `crash-before-publication` flaked once on a docs-only commit
+    (`81d9e5f`, whose code is identical to the passing `bf430c8`); the head
+    commit is green on all six jobs.
   - **2026-10-04 — PG18 re-measurement (first adjudication; superseded by the entry
     above) — MANDATORY gate appeared to PASS on PG18, C.2 still incomplete.** Owner decision: PostgreSQL 18 is
     the only sanctioned engine for every gate/benchmark/census/checkpoint (see §0).

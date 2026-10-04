@@ -83,10 +83,11 @@ pub(crate) fn next_conjunction<F: Front>(
             return Some(cand);
         }
         if cand <= target {
-            target = target.saturating_add(1);
-            if target == 0 {
-                return None;
-            }
+            // `cand <= target` means the alignment attempt made no progress. The
+            // only way that repeats forever is an ordinal space exhausted at
+            // `u32::MAX`, which `saturating_add` pins in place — so exhaust
+            // instead of looping on it.
+            target = target.checked_add(1)?;
         } else {
             target = cand;
         }
@@ -127,10 +128,8 @@ pub(crate) fn next_atleast<F: Front>(
             return Some(pivot);
         }
         if pivot <= target {
-            target = target.saturating_add(1);
-            if target == 0 {
-                return None;
-            }
+            // See the conjunction walk: pinned at `u32::MAX` means exhausted.
+            target = target.checked_add(1)?;
         } else {
             target = pivot;
         }
@@ -218,11 +217,13 @@ mod tests {
                 if !self.dead.contains(&at) {
                     break;
                 }
-                let next = at.saturating_add(1);
-                if next == 0 {
+                // `checked_add` is the only way to see the end of the ordinal
+                // space: `saturating_add` pins `u32::MAX` in place, so a `== 0`
+                // test after it never fires.
+                let Some(next) = at.checked_add(1) else {
                     self.inner.pos = self.inner.items.len();
                     break;
-                }
+                };
                 self.inner.advance(next, ix);
             }
         }
