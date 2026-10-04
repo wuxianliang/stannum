@@ -46,7 +46,72 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
   entry + `contract_version` bump, not another layout and not fielded keys
   (design §9).
 
----
+  - Review focus: design §4 planner widening; parent Appendix A;
+    adjudication §"planner fallbacks".
+  - Result (**code @ 6ad9523**, box checked separately): **DONE-WHEN MET.**
+    `script/test-all full` on PG18 → **13 passed, 0 failed** (controller re-ran
+    it; see the `STANNUM_PYTHON` caveat below). Census **1 FAIL / 2 GAP /
+    51 PASS of 54** — unchanged from D.3, as expected. TIN conformance **exit 0**,
+    169/189.
+    **Both Phase-5 scaffolds run and pass with their membership assertions
+    unmodified.** `title_body_operator_scope_custom_scan` and
+    `title_body_operator_scope_bitmap` (`postgres/src/lib.rs`, the last two
+    `#[ignore]`s in the crate) gained `SET LOCAL` + **EXPLAIN** assertions so
+    the executor is observed rather than assumed: custom scan on emits
+    `Custom Scan (Stannum Text Search Scan)` for both `title ==>` and the
+    non-leading `body ==>`; custom scan off emits `Bitmap Heap Scan` +
+    `Bitmap Index Scan` with the `Index Cond` on the right column. With
+    `enable_seqscan = on` a `body ==>` can still pick a Seq Scan, which is why
+    the GUC alone proves nothing. Results stay `{1}` / `{2}`.
+    **`amoptionalkey = true`** was required: without it the planner emitted no
+    bitmap path for a restriction on a non-leading key and fell back to Seq
+    Scan. The scan-key **field** now travels into `estimate_query` /
+    `clause_estimate` / `amcostestimate` / custom-scan `find_ordering`, and the
+    memo key widened to `(index_oid, field, query)`. `score_bound*` keeps its
+    frozen SQL signature: the mode occupies the low 8 bits (0..=3) and the
+    scan-key ordinal bits 8..15, with an `encode/decode_score_binding`
+    round-trip test and a `find_ordering` check that the packed field matches
+    `Match.field`.
+    **A real regression the change introduced, found and fixed here:**
+    `amoptionalkey` also admits a **key-less** bitmap path, and `amrescan`
+    returned no TIDs for `nkeys <= 0`, so `SELECT count(*)` returned 0 and
+    `postings_lifecycle`'s `survived: 1` became `survived: 0`. Key-less bitmap
+    now takes the **lossy heap recheck** already used for unknown scan-key
+    flags, so a qual-less scan still finds rows; the keyed path stays an exact
+    bitmap. The agent's first `test-all full` failed on exactly this, and the
+    controller's run confirms `postings-lifecycle: ok` after the fix.
+    **Deferred, each with a tested fallback that leaves answers unchanged**
+    (the adjudication permits exactly this): tinql unwraps `Query::Field` and
+    uses **union DF** — a bounded overestimate that affects cost, not answers
+    (per-field DF is the refinement); multi-column fused-WAND, where `top_k`
+    returns `None` for `field_count` 2..=16 and callsers fall back to exhaustive
+    `fused_score`; fielded page-at-a-time acceleration, disabled whenever
+    `field_names` is non-empty so fielded terms never read the parent
+    `Term::ordinals`; and `clause_estimate`'s singleton-rel-var requirement,
+    which falls back to the documented 0.1 constant.
+    **Mutation proofs.** Dropping `scope_scan_query` from the bitmap path fails
+    `pg_title_body_operator_scope_bitmap` with `Stannum query plan: corrupt
+    segment data: ordinal directory` (`score.rs:5815`) — the wrap is
+    load-bearing, because an unwrapped `Query::Field` reads the parent ordinal
+    instead of the body channel. Pinning `clause_estimate` to `1e-12` leaves
+    both scope tests' rows and the EXPLAIN node types unchanged, which is the
+    intended property: an estimate must not change an answer. Dropping a ranked
+    top-k row fails `fielded_topk_indexed_matches_full_sort_by_rank` (10 → 9)
+    and `pg_pruned_top_k_matches_full_scoring_bit_for_bit` (2075 documents),
+    and breaking only `pruned_top_k` is insufficient because custom scan goes
+    through `IndexScorer::top_k`.
+    Gates: lib **137/0** (`fields` 64/0), workspace 14 suites, fmt + clippy
+    clean, quick 7/7, headers 2/2, `nm -u` test binary **0** `InterruptPending`,
+    pgrx **374 passed / 0 failed / 0 ignored** with doctests run, release build
+    verified (42 `pg_proc`, no `pg_test`-only UDFs).
+    **Tooling caveat (cost a controller round):** `script/test-all`'s
+    `conformance` step defaults to `STANNUM_PYTHON=python3`, and this machine's
+    `python3` is Homebrew 3.14 **without psycopg**, so `test-all full` reported
+    `conformance: FAILED (exit 1)` with `ModuleNotFoundError: No module named
+    'psycopg'` on code that was fine. CI does not hit this (its Python has the
+    deps). Run `test-all full` with
+    `STANNUM_PYTHON=/Users/wxl/Projects/stannum/.venv/bin/python`; the
+    re-run gave 13 passed / 0 failed.
 
 ## 0. Protocol for the orchestrator running this plan
 
@@ -1204,7 +1269,7 @@ channels (design §4).
     token offsets inside the text. Harmless, but a future signature cleanup
     could drop it.
 
-- [ ] **D.4 Full planner coverage**
+- [x] **D.4 Full planner coverage**
   - Goal: bitmap scope + recheck bits end-to-end; heap fallback + recheck;
     cost model; `enable_custom_scan = off` multi-column plans.
   - Scope: `postgres/src/customscan.rs`, `am.rs`, `selectivity.rs`,
@@ -1496,6 +1561,7 @@ the build gate; this section only governs ranked p50.
 | D.2 | fac90a7 | 1 | 2 | 51 | **Measured on PG18.4 against the release build.** The big drop: the five phrase/span/pattern FAILs and both regex GAPs are gone. Remaining FAIL = the adjudicated `fields.boolean_duplicate_leaf`; remaining GAPs = `catalog.functions` and `catalog.gucs`, both E.2's. TIN conformance unchanged, exit 0, 169/189 PASS. |
 | D.3 | 1431229 | 1 | 2 | 51 | Unchanged from D.2, which is the expected result for a step whose gate is "do not regress": `fields.snippets` and `fields.highlight_spans` still PASS and `--area fields` is 7 PASS / 0 FAIL. Three Phase-2.4 `#[ignore]`d shape tests un-ignored and green; `am.rs`-level title/body operator-scope tests stay ignored for D.4. |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
+| D.4 | 6ad9523 | 1 | 2 | 51 | Unchanged from D.3, the expected outcome: planner coverage changes which executor answers, not what it answers. `script/test-all full` on PG18 **13 passed, 0 failed** (controller re-run), including conformance, pgrx (374/0), postings-lifecycle after the key-less-bitmap fix, and extension-upgrade. |
 | E.4 | | 0 | ≤2 | | release gate |
 
 ---
