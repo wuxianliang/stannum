@@ -711,6 +711,13 @@ adjudication section, not a stale denominator); mandatory 1.8× holds on both
 corpora; p50 holds or carries a named waiver in the JSON. D.\* and the D.5
 wheel do not waive this gate.
 
+**Phase C status after C.3.** C.1, C.2, C.2-R, C.2-S and C.3 are green; the
+only open step is **C.4** (pgembed checkpoint), whose wheel build fetches the
+stannum commit from GitHub by SHA. Nothing else in Phase C remains. C.3's
+residual oracle P1 is owned by D.4 (see the adjudication section), and the
+census's remaining FAILs are D.1/D.2's, so **Phase C is functionally closed
+pending C.4** and Phase D is unblocked.
+
 ---
 
 ## Oracle adjudications — Phase D and Phase E (2026-10-04)
