@@ -484,8 +484,29 @@ D.\* after C.2. E.1 may already have started after A.4.
     `(title, body, id)` 1.237s (2→3 columns only ~1.07×, so no large per-field
     superlinear jump; English body volume dominates). Gate fields unchanged;
     Phase D.* still not started.
-  - **2026-10-04 — PG18 re-measurement (sanctioned engine) + oracle adjudication:
-    MANDATORY gate PASSES, C.2 still incomplete.** Owner decision: PostgreSQL 18 is
+  - **2026-10-04 (second oracle adjudication) — the mandatory build gate is FAIL in
+    substance.** PG18 re-measurement history: single-shot English build measured
+    1.7350x (pass), then 1.9144x on a fresh datadir (fail), while both 12-pair
+    profiles land at median 1.8451x (PG17) / 1.8509x (PG18) with 9-10 of 12 pairs
+    above the ceiling. The 1.7350x draw was favourable; the observed distribution is
+    centred near 1.85x, above 1.8x. Chinese build passes on every run
+    (1.2504x-1.3503x) and dictionary passes everywhere (1.0006x / 1.0005x).
+    `docs/benchmarks/stn4-per-field-poc.json` carries `current_adjudication`
+    overriding the earlier "mandatory gate PASSES on PG18" note, and the build
+    measurement now follows protocol `C2-build-v2` (64 counterbalanced paired
+    builds, median of paired ratios, 95% batch-cluster bootstrap, PASS only when
+    the upper bound ≤ 1.8x). **Advisory p50 fails on both corpora on every run**
+    (EN 3.111-3.256x, ZH 2.363-2.385x vs 1.3x, `waiver: null`). Path to green, in
+    oracle-ranked order: instrument the build differential (multi-minus-single per
+    stage, not which stage is biggest inside multi) → remove repeated work →
+    instrument the query path on the dominant queries (`the` ≈65% of the English
+    multi-minus-single p50 excess, `我们` ≈61%, `历史 AND 望远镜` and `战争 AND 历史`
+    ≈29% of the Chinese) → optimize toward ≤1.70x build and substantial
+    candidate/scoring work reduction for query → uninstrumented acceptance under
+    `C2-build-v2`. Off-limits: BM25F formula, thresholds, corpora, protocols'
+    workloads, fielded term keys, `contract/expected/**`.
+  - **2026-10-04 — PG18 re-measurement (first adjudication; superseded by the entry
+    above) — MANDATORY gate appeared to PASS on PG18, C.2 still incomplete.** Owner decision: PostgreSQL 18 is
     the only sanctioned engine for every gate/benchmark/census/checkpoint (see §0).
     The original C.2 numbers were taken on PG17.11, which is now a historical
     artifact. Re-measured on PG18.4 (`/tmp/stn3-a2-prefix`, HEAD `52e13a3`, locked
@@ -827,8 +848,56 @@ work.
 
 ---
 
-## Census ledger
+## Build-measurement protocol `C2-build-v2` (supersedes the C.2 single shot)
 
+Effective 2026-10-04, by oracle adjudication. The C.2 entry's "one `CREATE INDEX`
+wall clock per system" is retained as the **legacy single-shot protocol**; its
+numbers stay in the record as observations, but a single ~1.3 s wall clock on an
+8-core shared Mac mini cannot resolve a ~2.8% relative difference, and the English
+build ratio has now been measured at 1.7350x (pass), 1.8689x and 1.9144x (fail),
+with paired medians of 1.8451x and 1.8509x — centred above the 1.8x ceiling.
+Acceptance for the build gate therefore uses this protocol.
+
+| Item | Requirement |
+|---|---|
+| Engine | PostgreSQL 18.4, pinned prefix and extension build; record the build identity |
+| Workloads | The existing locked English and Chinese corpora; hashes, indexing semantics and the 1.8x threshold unchanged |
+| Systems | `stn4_multi` and `stn3_single` from the same candidate revision and build configuration |
+| Samples | 64 paired ratios per corpus (64 measured builds of each system) |
+| Counterbalancing | 32 four-build blocks, each either `M S S M` or `S M M S`, so every adjacent pair holds one M and one S |
+| Scheduling | 8 batches of 4 blocks per corpus, each batch holding two blocks of each orientation, shuffled with a recorded seed; batches spread across time windows |
+| Preparation | Fresh table load per build, fixed row order, identical checkpoint/cache policy for both arms; all preparation outside the timer |
+| Cache claim | Freshly-loaded-table builds; **not** OS-cold builds |
+| Warm-up | One untimed build of each system at the start of each batch, order counterbalanced |
+| Timed interval | Wall clock immediately around the complete `CREATE INDEX` statement to success |
+| Settings | Record effective PostgreSQL settings, not just `"defaults"`; identical relevant settings for both arms |
+| Instrumentation | Build tracing and `STANNUM_FIELDED_PROFILE` disabled during acceptance measurements |
+| Exclusions | No outlier trimming, no load-based selective exclusion, no picking the best batch |
+| Failure | Correctness failures cannot produce a PASS; infrastructure-aborted campaigns are recorded, never silently replaced |
+
+Statistic: `R = median(r_1..r_64)` over adjacent paired ratios `r_i = T_M,i / T_S,i`.
+Report both systems' raw times as well, so an improvement that came from slowing
+the denominator stays visible.
+
+Uncertainty: a **95% batch-cluster bootstrap interval** for `R` — 10,000 resamples,
+fixed recorded seed, resampling whole batches with paired observations intact —
+because shared background-load episodes make individual timings non-independent.
+
+- **PASS**: upper bound ≤ 1.8
+- **FAIL**: lower bound > 1.8
+- **INCONCLUSIVE**: interval overlaps 1.8 — authorizes neither a PASS nor Phase D
+
+Target margin on this machine: **≤ 1.70x**, preferably 1.65x — not a measured
+1.799x victory. Aim for a confidence half-width ≤ 0.02 ratio units.
+
+Historical rows are relabeled by protocol, never invalidated: the original
+single-shots remain valid legacy observations, the 12-pair profiles remain
+diagnostic repeated-build evidence, and `C2-build-v2` runs are the prospective
+acceptance evidence.
+
+---
+
+## Census ledger
 | after step | SHA | FAIL | GAP | PASS | notes |
 |------------|-----|-----:|----:|-----:|-------|
 | 4.5 baseline | d5fa6f9 | 5 | 2 | 32 | phrase/span/patterns FAIL; catalog.gucs + catalog.functions GAP |

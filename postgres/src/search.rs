@@ -678,8 +678,9 @@ fn fielded_ranked_rows(
     k1: Option<f32>,
     b: Option<f32>,
 ) -> Vec<(f32, VisibleTid)> {
-    let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
     let scores = fielded_scores(index, query, fields, k1, b);
+    let ranked_span = crate::fields::profile::Span::begin();
+    let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
     let roots: BTreeSet<Tid> = scores.keys().copied().collect();
     let visible = unsafe { visible_tid_pairs(heap_oid, roots) };
     let mut rows: Vec<_> = visible

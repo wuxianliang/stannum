@@ -338,6 +338,136 @@ class GateAndMergeTests(unittest.TestCase):
             self.assertEqual(result["corpora"]["chinese"]["decision"], "stay")
             self.assertFalse(result["corpora"]["english"]["mandatory_gate"]["pass"])
 
+    def test_merge_pg18_remeasurement_preserves_pg17_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            en_multi = self._write_fragment(root, "stn4_multi", "english", 110, 1.0, 0.01, 0.02)
+            en_single = self._write_fragment(root, "stn3_single", "english", 100, 1.0, 0.01, 0.02)
+            zh_multi = self._write_fragment(root, "stn4_multi", "chinese", 120, 1.1, 0.02, 0.03)
+            zh_single = self._write_fragment(root, "stn3_single", "chinese", 100, 1.0, 0.02, 0.03)
+            existing = root / "stn4-per-field-poc.json"
+            existing.write_text(
+                json.dumps(
+                    {
+                        "decision": "escalate",
+                        "corpora": {"english": {"marker": "pg17"}},
+                        "protocol": {"pg": "17.11 (Homebrew)"},
+                    }
+                )
+                + "\n"
+            )
+            profile = root / "profile.json"
+            profile.write_text(json.dumps({"n_pairs": 12, "median_s": 1.5}) + "\n")
+            out = root / "out.json"
+            poc.main(
+                [
+                    "merge",
+                    "--english-multi",
+                    str(en_multi),
+                    "--english-single",
+                    str(en_single),
+                    "--chinese-multi",
+                    str(zh_multi),
+                    "--chinese-single",
+                    str(zh_single),
+                    "--pg18-remeasurement",
+                    "--existing",
+                    str(existing),
+                    "--profile",
+                    str(profile),
+                    "--out",
+                    str(out),
+                    "--pg-version",
+                    "18.4",
+                    "--stn4-sha",
+                    "deadbeef",
+                    "--topology",
+                    "unit-test-pg18",
+                ]
+            )
+            result = json.loads(out.read_text())
+            self.assertEqual(result["decision"], "escalate")
+            self.assertEqual(result["corpora"], {"english": {"marker": "pg17"}})
+            self.assertEqual(result["protocol"]["pg"], "17.11 (Homebrew)")
+            self.assertEqual(result["superseded_by"], "pg18_remeasurement.decision_pg18")
+            pg18 = result["pg18_remeasurement"]
+            self.assertEqual(pg18["engine"], "18.4")
+            self.assertEqual(pg18["decision_pg18"], "stay")
+            self.assertTrue(pg18["corpora"]["english"]["mandatory_gate"]["pass"])
+            self.assertTrue(pg18["corpora"]["chinese"]["mandatory_gate"]["pass"])
+            self.assertEqual(pg18["paired_build_profile"]["n_pairs"], 12)
+            self.assertEqual(pg18["protocol"]["server_topology"], "unit-test-pg18")
+            self.assertEqual(pg18["git"]["stn4"], "deadbeef")
+
+    def test_merge_pg18_clean_baseline_preserves_remeasurement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            en_multi = self._write_fragment(root, "stn4_multi", "english", 110, 2.0, 0.01, 0.02)
+            en_single = self._write_fragment(root, "stn3_single", "english", 100, 1.0, 0.01, 0.02)
+            zh_multi = self._write_fragment(root, "stn4_multi", "chinese", 120, 1.1, 0.02, 0.03)
+            zh_single = self._write_fragment(root, "stn3_single", "chinese", 100, 1.0, 0.02, 0.03)
+            existing = root / "stn4-per-field-poc.json"
+            existing.write_text(
+                json.dumps(
+                    {
+                        "decision": "escalate",
+                        "corpora": {"english": {"marker": "pg17"}},
+                        "protocol": {"pg": "17.11 (Homebrew)"},
+                        "pg18_remeasurement": {
+                            "engine": "18.4",
+                            "decision_pg18": "stay",
+                            "marker": "do-not-overwrite",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            environment = root / "environment.json"
+            environment.write_text(
+                json.dumps({"loadavg_start": [1.0, 1.0, 1.0], "stopped_processes": []}) + "\n"
+            )
+            out = root / "out.json"
+            poc.main(
+                [
+                    "merge",
+                    "--english-multi",
+                    str(en_multi),
+                    "--english-single",
+                    str(en_single),
+                    "--chinese-multi",
+                    str(zh_multi),
+                    "--chinese-single",
+                    str(zh_single),
+                    "--pg18-clean-baseline",
+                    "--existing",
+                    str(existing),
+                    "--environment",
+                    str(environment),
+                    "--out",
+                    str(out),
+                    "--pg-version",
+                    "18.4",
+                    "--stn4-sha",
+                    "cafebabe",
+                    "--topology",
+                    "unit-test-clean",
+                ]
+            )
+            result = json.loads(out.read_text())
+            self.assertEqual(result["decision"], "escalate")
+            self.assertEqual(result["corpora"], {"english": {"marker": "pg17"}})
+            self.assertEqual(result["pg18_remeasurement"]["marker"], "do-not-overwrite")
+            self.assertEqual(result["pg18_remeasurement"]["decision_pg18"], "stay")
+            clean = result["pg18_clean_baseline"]
+            self.assertEqual(clean["engine"], "18.4")
+            self.assertEqual(clean["decision_clean"], "escalate")
+            self.assertTrue(clean["english_oneshot_build_exceeds_1_8"])
+            self.assertFalse(clean["corpora"]["english"]["mandatory_gate"]["pass"])
+            self.assertTrue(clean["corpora"]["chinese"]["mandatory_gate"]["pass"])
+            self.assertEqual(clean["protocol"]["server_topology"], "unit-test-clean")
+            self.assertEqual(clean["git"]["stn4"], "cafebabe")
+            self.assertEqual(clean["environment"]["loadavg_start"], [1.0, 1.0, 1.0])
+
     def test_generate_cli_prints_locked_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

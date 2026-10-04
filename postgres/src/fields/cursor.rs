@@ -36,6 +36,7 @@ pub(crate) struct LogicalPostingCursor<'a> {
 
 impl<'a> LogicalPostingCursor<'a> {
     pub(crate) fn open(streams: &[FieldTerm<'a>]) -> segment::Result<Self> {
+        let span = super::profile::Span::begin();
         let mut fields = Vec::with_capacity(streams.len());
         for stream in streams {
             fields.push(FieldStream {
@@ -50,6 +51,7 @@ impl<'a> LogicalPostingCursor<'a> {
             current: None,
         };
         cursor.advance(0)?;
+        super::profile::add_cursor_open(std::time::Duration::from_nanos(span.ns()));
         Ok(cursor)
     }
 
@@ -66,11 +68,19 @@ impl<'a> LogicalPostingCursor<'a> {
     /// peek) succeeds, so a mid-loop error cannot leave a stale ordinal
     /// together with already-moved streams.
     pub(crate) fn advance(&mut self, target: u32) -> segment::Result<()> {
+        let span = super::profile::Span::begin();
+        let result = self.advance_inner(target);
+        super::profile::add_advance(std::time::Duration::from_nanos(span.ns()));
+        result
+    }
+
+    fn advance_inner(&mut self, target: u32) -> segment::Result<()> {
         self.current = None;
         for stream in &mut self.fields {
             stream.successor = None;
         }
 
+        let rewind_span = super::profile::Span::begin();
         let mut min = None;
         for stream in &mut self.fields {
             stream.ordinals.rewind()?;
@@ -79,17 +89,23 @@ impl<'a> LogicalPostingCursor<'a> {
                 min = Some(min.map_or(at, |seen: u32| seen.min(at)));
             }
         }
+        super::profile::add_rewind_seek(std::time::Duration::from_nanos(rewind_span.ns()));
         let Some(here) = min else {
             return Ok(());
         };
 
         let mut successors = Vec::with_capacity(self.fields.len());
         for stream in &mut self.fields {
-            successors.push(match stream.ordinals.current() {
+            let peek_span = super::profile::Span::begin();
+            let next = match stream.ordinals.current() {
                 Some(at) if at == here => peek_successor(&mut stream.ordinals)?,
                 Some(at) => Some(at),
                 None => None,
-            });
+            };
+            if matches!(stream.ordinals.current(), Some(at) if at == here) {
+                super::profile::add_peek_successor(std::time::Duration::from_nanos(peek_span.ns()));
+            }
+            successors.push(next);
         }
         for (stream, successor) in self.fields.iter_mut().zip(successors) {
             stream.successor = successor;
@@ -100,6 +116,18 @@ impl<'a> LogicalPostingCursor<'a> {
 
     /// Each field that posts at `current_ordinal`, with its payload positions.
     pub(crate) fn field_hits(&self) -> segment::Result<Vec<FieldHit>> {
+        let span = super::profile::Span::begin();
+        let hits = self.field_hits_inner()?;
+        let positions = hits.iter().map(|hit| hit.positions.len() as u64).sum();
+        super::profile::add_field_hits(
+            std::time::Duration::from_nanos(span.ns()),
+            hits.len() as u64,
+            positions,
+        );
+        Ok(hits)
+    }
+
+    fn field_hits_inner(&self) -> segment::Result<Vec<FieldHit>> {
         let Some(current) = self.current else {
             return Ok(Vec::new());
         };
@@ -113,7 +141,9 @@ impl<'a> LogicalPostingCursor<'a> {
                 .ordinals
                 .bucket()
                 .ok_or(segment::Error::Corrupt("fielded posting missing tf bucket"))?;
+            let payload_span = super::profile::Span::begin();
             let entry = stream.payload.get(rank)?;
+            super::profile::add_payload_get(std::time::Duration::from_nanos(payload_span.ns()));
             hits.push(FieldHit {
                 field: stream.field,
                 bucket,

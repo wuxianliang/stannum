@@ -26,6 +26,7 @@ mod cursor;
 mod df;
 mod error;
 mod expand;
+mod profile;
 mod score;
 mod types;
 

@@ -778,6 +778,78 @@ def cmd_merge(args):
             "benchmark_tree": benchmark_tree(),
         },
     }
+    if args.pg18_remeasurement and args.pg18_clean_baseline:
+        raise SystemExit(
+            "merge: use only one of --pg18-remeasurement / --pg18-clean-baseline"
+        )
+    if args.pg18_remeasurement:
+        if not args.existing:
+            raise SystemExit("merge --pg18-remeasurement requires --existing")
+        existing = json.loads(args.existing.read_text(encoding="utf-8"))
+        if "decision" not in existing:
+            raise SystemExit(f"{args.existing} has no top-level decision to preserve")
+        profile = None
+        if args.profile:
+            profile = json.loads(args.profile.read_text(encoding="utf-8"))
+        existing["superseded_by"] = "pg18_remeasurement.decision_pg18"
+        existing["pg18_remeasurement"] = {
+            "engine": pg or "",
+            "decision_pg18": decision,
+            "corpora": result["corpora"],
+            "paired_build_profile": profile,
+            "protocol": result["protocol"],
+            "git": result["git"],
+        }
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n")
+        print(f"wrote {args.out}")
+        print(
+            f"decision_pg18={decision} "
+            f"(PG17 decision={existing['decision']} preserved)"
+        )
+        print(
+            "english mandatory="
+            f"{english_obj['mandatory_gate']['pass']} "
+            "chinese mandatory="
+            f"{chinese_obj['mandatory_gate']['pass']}"
+        )
+        return 0
+    if args.pg18_clean_baseline:
+        if not args.existing:
+            raise SystemExit("merge --pg18-clean-baseline requires --existing")
+        existing = json.loads(args.existing.read_text(encoding="utf-8"))
+        if "decision" not in existing:
+            raise SystemExit(f"{args.existing} has no top-level decision to preserve")
+        environment = None
+        if args.environment:
+            environment = json.loads(args.environment.read_text(encoding="utf-8"))
+        english_build = (english_obj.get("mandatory_gate") or {}).get("build_ratio")
+        existing["pg18_clean_baseline"] = {
+            "engine": pg or "",
+            "decision_clean": decision,
+            "english_oneshot_build_exceeds_1_8": bool(
+                english_build is not None and english_build > 1.8
+            ),
+            "corpora": result["corpora"],
+            "protocol": result["protocol"],
+            "git": result["git"],
+            "environment": environment,
+        }
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n")
+        print(f"wrote {args.out}")
+        print(
+            f"decision_clean={decision} "
+            f"(PG17 decision={existing['decision']} and pg18_remeasurement preserved)"
+        )
+        print(
+            "english mandatory="
+            f"{english_obj['mandatory_gate']['pass']} "
+            "chinese mandatory="
+            f"{chinese_obj['mandatory_gate']['pass']}"
+        )
+        return 0
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {args.out}")
@@ -827,6 +899,37 @@ def build_parser():
         "--topology",
         default="unspecified; Item 2 records Homebrew sequential vs isolated prefixes",
         help="server topology notes for the JSON protocol block",
+    )
+    merge.add_argument(
+        "--pg18-remeasurement",
+        action="store_true",
+        help=(
+            "preserve the existing PG17 JSON (top-level decision/corpora/protocol) "
+            "and write a pg18_remeasurement object plus superseded_by"
+        ),
+    )
+    merge.add_argument(
+        "--existing",
+        type=Path,
+        help="JSON to preserve when using --pg18-remeasurement or --pg18-clean-baseline",
+    )
+    merge.add_argument(
+        "--profile",
+        type=Path,
+        help="optional paired build-profile JSON nested under pg18_remeasurement",
+    )
+    merge.add_argument(
+        "--pg18-clean-baseline",
+        action="store_true",
+        help=(
+            "preserve the existing JSON (including pg18_remeasurement and PG17 objects) "
+            "and write a sibling pg18_clean_baseline object with decision_clean"
+        ),
+    )
+    merge.add_argument(
+        "--environment",
+        type=Path,
+        help="optional environment JSON nested under pg18_clean_baseline",
     )
     merge.set_defaults(func=cmd_merge)
     return parser

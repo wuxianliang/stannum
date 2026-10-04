@@ -47,7 +47,10 @@ impl<'a> LogicalTerm<'a> {
                 Vec::new()
             }
         } else {
-            term.channels(field_count)?
+            let span = super::profile::Span::begin();
+            let opened = term.channels(field_count)?;
+            super::profile::add_channel_open(std::time::Duration::from_nanos(span.ns()));
+            opened
                 .into_iter()
                 .filter(|(field, _)| mask & (1u16 << field) != 0)
                 .map(|(field, child)| FieldTerm { field, term: child })
