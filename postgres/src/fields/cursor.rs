@@ -106,12 +106,18 @@ impl<'a> LogicalPostingCursor<'a> {
             Some(here) => {
                 self.exhausted = false;
                 self.current = Some(here);
+                super::profile::add_advance_span(here.saturating_sub(previous.unwrap_or(0)));
             }
             None => {
                 self.exhausted = previous.is_some() || self.exhausted;
             }
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted && self.current.is_none()
     }
 
     /// Each field that posts at `current_ordinal`, with its payload positions.

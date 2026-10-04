@@ -43,6 +43,10 @@ pub(crate) struct Counters {
     pub ranked_ns: u64,
     pub candidates: u64,
     pub hashset_inserts: u64,
+    pub and_advance_count: u64,
+    pub and_ordinal_span: u64,
+    pub and_hits: u64,
+    pub advance_ordinal_span: u64,
     pub field_hit_allocs: u64,
     pub bucket_ns: u64,
     pub bucket_count: u64,
@@ -279,6 +283,46 @@ pub(crate) fn add_hashset_insert() {
     COUNTERS.with(|cell| {
         let mut c = cell.borrow_mut();
         c.hashset_inserts = c.hashset_inserts.saturating_add(1);
+    });
+}
+
+pub(crate) fn add_and_advance() {
+    if !enabled() {
+        return;
+    }
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        c.and_advance_count = c.and_advance_count.saturating_add(1);
+    });
+}
+
+pub(crate) fn add_and_span(distance: u32) {
+    if distance == 0 || !enabled() {
+        return;
+    }
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        c.and_ordinal_span = c.and_ordinal_span.saturating_add(u64::from(distance));
+    });
+}
+
+pub(crate) fn add_and_hit() {
+    if !enabled() {
+        return;
+    }
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        c.and_hits = c.and_hits.saturating_add(1);
+    });
+}
+
+pub(crate) fn add_advance_span(distance: u32) {
+    if distance == 0 || !enabled() {
+        return;
+    }
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        c.advance_ordinal_span = c.advance_ordinal_span.saturating_add(u64::from(distance));
     });
 }
 

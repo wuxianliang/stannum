@@ -4,7 +4,10 @@
 // See LICENSE in the repository root for license terms.
 
 use crate::bm25::Bm25Overrides;
-use crate::fields::{Lookup, all_fields_mask, buckets_from_tfs, fused_score_from_buckets, lookup};
+use crate::fields::{
+    Front, Intersect, LogicalPostingCursor, LogicalTerm, Lookup, all_fields_mask, buckets_from_tfs,
+    fused_score_from_buckets, lookup, next_atleast, next_conjunction, next_union,
+};
 use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
 use crate::score::{
     PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, check_query_fields_on,
@@ -163,6 +166,237 @@ enum FieldedNode {
     All,
 }
 
+struct WalkNode<'a> {
+    current: Option<u32>,
+    init: bool,
+    kind: WalkKind<'a>,
+}
+
+enum WalkKind<'a> {
+    Leaf {
+        cursor: Option<LogicalPostingCursor<'a>>,
+        dead: &'a segment::dead::DeadDocs,
+        df: u64,
+    },
+    And(Vec<WalkNode<'a>>),
+    Or {
+        min: u32,
+        children: Vec<WalkNode<'a>>,
+    },
+    Not {
+        inner: Box<WalkNode<'a>>,
+        doc_count: u32,
+        dead: &'a segment::dead::DeadDocs,
+    },
+    All {
+        doc_count: u32,
+        dead: &'a segment::dead::DeadDocs,
+    },
+}
+
+fn open_walk<'a>(
+    node: &FieldedNode,
+    logicals: &'a [Option<LogicalTerm<'a>>],
+    dead: &'a segment::dead::DeadDocs,
+    doc_count: u32,
+) -> WalkNode<'a> {
+    unsafe { pg_sys::check_stack_depth() };
+    match node {
+        FieldedNode::Leaf(key) => {
+            let (cursor, df) = match logicals.get(*key).and_then(|term| term.as_ref()) {
+                Some(term) => {
+                    let cursor = term
+                        .cursor()
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                    (Some(cursor), term.df_agg)
+                }
+                None => (None, 0),
+            };
+            WalkNode {
+                current: None,
+                init: false,
+                kind: WalkKind::Leaf { cursor, dead, df },
+            }
+        }
+        FieldedNode::And(children) if children.is_empty() => WalkNode {
+            current: None,
+            init: false,
+            kind: WalkKind::All { doc_count, dead },
+        },
+        FieldedNode::And(children) => WalkNode {
+            current: None,
+            init: false,
+            kind: WalkKind::And(
+                children
+                    .iter()
+                    .map(|child| open_walk(child, logicals, dead, doc_count))
+                    .collect(),
+            ),
+        },
+        FieldedNode::Or { min, .. } if *min == 0 => WalkNode {
+            current: None,
+            init: false,
+            kind: WalkKind::All { doc_count, dead },
+        },
+        FieldedNode::Or { min, children } => WalkNode {
+            current: None,
+            init: false,
+            kind: WalkKind::Or {
+                min: *min,
+                children: children
+                    .iter()
+                    .map(|child| open_walk(child, logicals, dead, doc_count))
+                    .collect(),
+            },
+        },
+        FieldedNode::Not(inner) => WalkNode {
+            current: None,
+            init: false,
+            kind: WalkKind::Not {
+                inner: Box::new(open_walk(inner, logicals, dead, doc_count)),
+                doc_count,
+                dead,
+            },
+        },
+        FieldedNode::All => WalkNode {
+            current: None,
+            init: false,
+            kind: WalkKind::All { doc_count, dead },
+        },
+    }
+}
+
+impl Front for WalkNode<'_> {
+    fn current(&self) -> Option<u32> {
+        self.current
+    }
+
+    fn hint(&self) -> u64 {
+        match &self.kind {
+            WalkKind::Leaf { df, .. } => *df,
+            WalkKind::And(children) => children.iter().map(Front::hint).min().unwrap_or(0),
+            WalkKind::All { doc_count, .. } => u64::from(*doc_count),
+            WalkKind::Or { min, children } if (*min as usize) > children.len() => 0,
+            WalkKind::Or { children, .. } => children.iter().map(Front::hint).sum(),
+            WalkKind::Not {
+                inner, doc_count, ..
+            } => u64::from(*doc_count).saturating_sub(inner.hint()),
+        }
+    }
+
+    fn advance(&mut self, target: u32, ix: &mut Intersect<'_>) {
+        unsafe { pg_sys::check_stack_depth() };
+        if self.init && self.current.is_none() {
+            return;
+        }
+        if self.current.is_some_and(|at| at >= target) {
+            return;
+        }
+        match &mut self.kind {
+            WalkKind::Leaf { cursor, dead, .. } => {
+                ix.tick();
+                let Some(cursor) = cursor else {
+                    self.current = None;
+                    self.init = true;
+                    return;
+                };
+                if cursor.is_exhausted() {
+                    self.current = None;
+                    self.init = true;
+                    return;
+                }
+                if cursor.current_ordinal().is_none_or(|at| at < target) {
+                    cursor
+                        .advance(target)
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                }
+                while let Some(ordinal) = cursor.current_ordinal() {
+                    if !dead.contains(ordinal) {
+                        break;
+                    }
+                    let next = ordinal.saturating_add(1);
+                    if next == 0 {
+                        self.current = None;
+                        self.init = true;
+                        return;
+                    }
+                    cursor
+                        .advance(next)
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                }
+                self.current = cursor.current_ordinal();
+                self.init = true;
+            }
+            WalkKind::And(children) => {
+                self.current = next_conjunction(children, target, ix);
+                self.init = true;
+            }
+            WalkKind::Or { min, children } if (*min as usize) > children.len() => {
+                self.current = None;
+                self.init = true;
+            }
+            WalkKind::Or { min: 1, children } => {
+                self.current = next_union(children, target, ix);
+                self.init = true;
+            }
+            WalkKind::Or { min, children } => {
+                self.current = next_atleast(children, *min, target, ix);
+                self.init = true;
+            }
+            WalkKind::Not {
+                inner,
+                doc_count,
+                dead,
+            } => {
+                ix.tick();
+                let mut ordinal = target;
+                loop {
+                    if ordinal >= *doc_count {
+                        self.current = None;
+                        self.init = true;
+                        return;
+                    }
+                    if dead.contains(ordinal) {
+                        ordinal = ordinal.saturating_add(1);
+                        if ordinal == 0 {
+                            self.current = None;
+                            self.init = true;
+                            return;
+                        }
+                        continue;
+                    }
+                    inner.advance(ordinal, ix);
+                    if inner.current() != Some(ordinal) {
+                        self.current = Some(ordinal);
+                        self.init = true;
+                        return;
+                    }
+                    ordinal = ordinal.saturating_add(1);
+                    if ordinal == 0 {
+                        self.current = None;
+                        self.init = true;
+                        return;
+                    }
+                }
+            }
+            WalkKind::All { doc_count, dead } => {
+                ix.tick();
+                let mut ordinal = target;
+                while ordinal < *doc_count {
+                    if !dead.contains(ordinal) {
+                        self.current = Some(ordinal);
+                        self.init = true;
+                        return;
+                    }
+                    ordinal += 1;
+                }
+                self.current = None;
+                self.init = true;
+            }
+        }
+    }
+}
+
 /// Cadence for fielded set materialization. Matches the BM25F ordinal walk
 /// in `score.rs`: a cancel or `statement_timeout` is noticed after at most
 /// this many tids, ordinals, or postings inside one large clone / union /
@@ -175,6 +409,7 @@ fn interrupt_at(i: usize) {
     }
 }
 
+#[cfg(feature = "pg_test")]
 fn clone_tids_interruptible(src: &FxHashSet<Tid>) -> FxHashSet<Tid> {
     let mut out = FxHashSet::with_capacity_and_hasher(src.len(), Default::default());
     for (i, tid) in src.iter().copied().enumerate() {
@@ -184,6 +419,7 @@ fn clone_tids_interruptible(src: &FxHashSet<Tid>) -> FxHashSet<Tid> {
     out
 }
 
+#[cfg(feature = "pg_test")]
 fn insert_tids_interruptible(dst: &mut FxHashSet<Tid>, src: FxHashSet<Tid>) {
     for (i, tid) in src.into_iter().enumerate() {
         interrupt_at(i);
@@ -191,6 +427,7 @@ fn insert_tids_interruptible(dst: &mut FxHashSet<Tid>, src: FxHashSet<Tid>) {
     }
 }
 
+#[cfg(feature = "pg_test")]
 fn retain_tids_interruptible(dst: &mut FxHashSet<Tid>, src: &FxHashSet<Tid>) {
     let mut n = 0usize;
     dst.retain(|tid| {
@@ -200,6 +437,7 @@ fn retain_tids_interruptible(dst: &mut FxHashSet<Tid>, src: &FxHashSet<Tid>) {
     });
 }
 
+#[cfg(feature = "pg_test")]
 fn complement_tids_interruptible(
     universe: &FxHashSet<Tid>,
     inner: &FxHashSet<Tid>,
@@ -354,48 +592,7 @@ fn collect_fielded_terms(
     }
 }
 
-fn fielded_restricts_below_union(node: &FieldedNode) -> bool {
-    match node {
-        FieldedNode::And(children) => !children.is_empty(),
-        FieldedNode::Not(_) => true,
-        FieldedNode::Or { min, children } => *min >= 2 && !children.is_empty(),
-        _ => false,
-    }
-}
-
-fn fielded_needs_universe(node: &FieldedNode) -> bool {
-    match node {
-        FieldedNode::All | FieldedNode::Not(_) => true,
-        FieldedNode::Leaf(_) => false,
-        FieldedNode::And(children) => {
-            children.is_empty() || children.iter().any(fielded_needs_universe)
-        }
-        FieldedNode::Or { min, children } => {
-            *min == 0 || children.iter().any(fielded_needs_universe)
-        }
-    }
-}
-
-fn indexed_live_tids(view: &crate::storage::View) -> FxHashSet<Tid> {
-    let mut tids = FxHashSet::default();
-    for ((source, _), dead) in view.sources.iter().zip(view.dead_sets.iter()) {
-        let table = source
-            .doc_table()
-            .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-        for ordinal in 0..source.document_count() {
-            interrupt_at(ordinal as usize);
-            if dead.contains(ordinal) {
-                continue;
-            }
-            let tid = table
-                .tid_at(ordinal)
-                .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-            tids.insert(tid);
-        }
-    }
-    tids
-}
-
+#[cfg(feature = "pg_test")]
 fn eval_fielded(
     node: &FieldedNode,
     postings: &[FxHashSet<Tid>],
@@ -511,7 +708,6 @@ fn fielded_eval_inner(
     let default_mask = all_fields_mask(field_count);
     let mut keys = Vec::new();
     let root = compile_fielded(&parsed, &fields.names, default_mask, &mut keys);
-    let restrict = fielded_restricts_below_union(&root);
     let mut terms = Vec::new();
     if want_scores {
         // Membership and scoring share the structural parse. A scoring parse
@@ -526,20 +722,21 @@ fn fielded_eval_inner(
     if view.field_norms.iter().any(Option::is_none) {
         pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
     }
-    let mut postings: Vec<FxHashSet<Tid>> = vec![FxHashSet::default(); keys.len()];
-    let mut scanned = vec![false; keys.len()];
-    let mut scores: FxHashMap<Tid, f32> = FxHashMap::default();
-    let mut delayed_score = None;
 
+    let mut params = None;
+    let mut total_docs = 0u64;
+    let mut field_totals = Vec::new();
+    let mut df = Vec::new();
     if want_scores {
         let defaults = unsafe { crate::options::bm25(index.as_ptr()) };
-        let params = Bm25Overrides { k1, b }
-            .resolve(defaults)
-            .checked()
-            .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}"));
-        let mut total_docs = 0u64;
-        let mut field_totals = vec![0u64; fields.names.len()];
-        let mut df = vec![0u64; terms.len()];
+        params = Some(
+            Bm25Overrides { k1, b }
+                .resolve(defaults)
+                .checked()
+                .unwrap_or_else(|error| pgrx::error!("stannum score parameters: {error}")),
+        );
+        field_totals = vec![0u64; fields.names.len()];
+        df = vec![0u64; terms.len()];
         for ((source, _), norms) in view.sources.iter().zip(view.field_norms.iter()) {
             total_docs += u64::from(source.document_count());
             if let Some(norms) = norms {
@@ -555,60 +752,125 @@ fn fielded_eval_inner(
                 }
             }
         }
-        if restrict {
-            delayed_score = Some((params, total_docs, field_totals, df));
+    }
+
+    let mut members = FxHashSet::default();
+    let mut scores: FxHashMap<Tid, f32> = FxHashMap::default();
+    for ((source, _), (dead, norms)) in view
+        .sources
+        .iter()
+        .zip(view.dead_sets.iter().zip(view.field_norms.iter()))
+    {
+        let table = source
+            .doc_table()
+            .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
+        let doc_count = source.document_count();
+        let logicals: Vec<Option<LogicalTerm<'_>>> = keys
+            .iter()
+            .map(
+                |(text, mask)| match lookup(&**source, text, *mask, field_count) {
+                    Ok(Lookup::Term(logical)) if !logical.streams.is_empty() => Some(logical),
+                    Ok(_) => None,
+                    Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
+                },
+            )
+            .collect();
+        let mut walk = open_walk(&root, &logicals, dead.as_ref(), doc_count);
+        let mut score_cursors: Vec<Option<LogicalPostingCursor<'_>>> = if want_scores {
+            terms
+                .iter()
+                .map(|term| {
+                    let key = fielded_key_index(&keys, &term.text, term.mask);
+                    logicals
+                        .get(key)
+                        .and_then(|slot| slot.as_ref())
+                        .map(|logical| {
+                            logical.cursor().unwrap_or_else(|error| {
+                                pgrx::error!("Stannum fielded cursor: {error}")
+                            })
+                        })
+                })
+                .collect()
         } else {
-            score_fielded_terms(
-                &view,
-                fields,
-                field_count,
-                &keys,
-                &terms,
-                params,
-                total_docs,
-                &field_totals,
-                &df,
-                &mut postings,
-                &mut scanned,
-                &mut scores,
-                None,
-                true,
-            );
+            Vec::new()
+        };
+        let mut step = interrupt_at;
+        let mut ix = Intersect::new(&mut step);
+        let mut target = 0u32;
+        let mut n = 0usize;
+        loop {
+            walk.advance(target, &mut ix);
+            let Some(ordinal) = walk.current() else {
+                break;
+            };
+            interrupt_at(n);
+            n += 1;
+            let tid = table
+                .tid_at(ordinal)
+                .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
+            members.insert(tid);
+            crate::fields::profile::add_hashset_insert();
+            if want_scores {
+                let Some(norms) = norms else {
+                    pgrx::error!(
+                        "stannum: multi-column index is missing the STNF field-norms trailer"
+                    );
+                };
+                let lengths = {
+                    let span = crate::fields::profile::Span::begin();
+                    let lengths = norms.lengths(ordinal).unwrap_or_else(|| {
+                        pgrx::error!("stannum: STNF row missing for ordinal {ordinal}")
+                    });
+                    crate::fields::profile::add_norms(std::time::Duration::from_nanos(span.ns()));
+                    lengths
+                };
+                let params = params.expect("scored fielded eval has BM25 params");
+                for (term_index, term) in terms.iter().enumerate() {
+                    let Some(cursor) = score_cursors.get_mut(term_index).and_then(Option::as_mut)
+                    else {
+                        continue;
+                    };
+                    if cursor.is_exhausted() {
+                        continue;
+                    }
+                    match cursor.current_ordinal() {
+                        Some(at) if at == ordinal => {}
+                        Some(at) if at > ordinal => continue,
+                        _ => {
+                            cursor.advance(ordinal).unwrap_or_else(|error| {
+                                pgrx::error!("Stannum fielded cursor: {error}")
+                            });
+                            if cursor.current_ordinal() != Some(ordinal) {
+                                continue;
+                            }
+                        }
+                    }
+                    crate::fields::profile::add_candidate();
+                    let tfs = cursor
+                        .field_tfs()
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                    let buckets = buckets_from_tfs(&tfs, field_count);
+                    let score = fused_score_from_buckets(
+                        term.mask,
+                        &fields.weights,
+                        &buckets,
+                        &lengths,
+                        &field_totals,
+                        total_docs,
+                        df[term_index],
+                        term.boost,
+                        params,
+                    );
+                    *scores.entry(tid).or_insert(0.0) += score;
+                }
+            }
+            if ordinal == u32::MAX {
+                break;
+            }
+            target = ordinal + 1;
         }
     }
 
-    for (key, (text, mask)) in keys.iter().enumerate() {
-        if scanned[key] {
-            continue;
-        }
-        collect_fielded_postings(&view, text, *mask, field_count, &mut postings[key]);
-        scanned[key] = true;
-    }
-
-    let universe = if fielded_needs_universe(&root) {
-        indexed_live_tids(&view)
-    } else {
-        FxHashSet::default()
-    };
-    let members = eval_fielded(&root, &postings, &universe);
-    if let Some((params, total_docs, field_totals, df)) = delayed_score {
-        score_fielded_terms(
-            &view,
-            fields,
-            field_count,
-            &keys,
-            &terms,
-            params,
-            total_docs,
-            &field_totals,
-            &df,
-            &mut postings,
-            &mut scanned,
-            &mut scores,
-            Some(&members),
-            false,
-        );
-    }
     let mut member_set = BTreeSet::new();
     for (i, tid) in members.iter().copied().enumerate() {
         interrupt_at(i);
@@ -623,153 +885,6 @@ fn fielded_eval_inner(
         out.insert(*tid, scores.get(tid).copied().unwrap_or(0.0));
     }
     (member_set, out)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn score_fielded_terms(
-    view: &crate::storage::View,
-    fields: &FieldMeta,
-    field_count: u8,
-    keys: &[(String, u16)],
-    terms: &[FieldedTerm],
-    params: crate::bm25::Bm25Params,
-    total_docs: u64,
-    field_totals: &[u64],
-    df: &[u64],
-    postings: &mut [FxHashSet<Tid>],
-    scanned: &mut [bool],
-    scores: &mut FxHashMap<Tid, f32>,
-    only: Option<&FxHashSet<Tid>>,
-    fill_postings: bool,
-) {
-    for ((source, _), (dead, norms)) in view
-        .sources
-        .iter()
-        .zip(view.dead_sets.iter().zip(view.field_norms.iter()))
-    {
-        let Some(norms) = norms else {
-            pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
-        };
-        let table = source
-            .doc_table()
-            .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-        for (term_index, term) in terms.iter().enumerate() {
-            let key = fielded_key_index(keys, &term.text, term.mask);
-            let logical = match lookup(&**source, &term.text, term.mask, field_count) {
-                Ok(Lookup::Term(logical)) => logical,
-                Ok(Lookup::Terms(_) | Lookup::Overflow) => continue,
-                Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
-            };
-            if logical.streams.is_empty() {
-                if fill_postings {
-                    scanned[key] = true;
-                }
-                continue;
-            }
-            let mut cursor = logical
-                .cursor()
-                .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-            let mut n = 0usize;
-            while let Some(ordinal) = cursor.current_ordinal() {
-                interrupt_at(n);
-                n += 1;
-                if dead.contains(ordinal) {
-                    cursor
-                        .advance(ordinal.saturating_add(1))
-                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                    continue;
-                }
-                let tid = table
-                    .tid_at(ordinal)
-                    .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-                if fill_postings {
-                    postings[key].insert(tid);
-                    crate::fields::profile::add_hashset_insert();
-                }
-                if only.is_some_and(|members| !members.contains(&tid)) {
-                    cursor
-                        .advance(ordinal.saturating_add(1))
-                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                    continue;
-                }
-                crate::fields::profile::add_candidate();
-                let tfs = cursor
-                    .field_tfs()
-                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                let buckets = buckets_from_tfs(&tfs, field_count);
-                let lengths = {
-                    let span = crate::fields::profile::Span::begin();
-                    let lengths = norms.lengths(ordinal).unwrap_or_else(|| {
-                        pgrx::error!("stannum: STNF row missing for ordinal {ordinal}")
-                    });
-                    crate::fields::profile::add_norms(std::time::Duration::from_nanos(span.ns()));
-                    lengths
-                };
-                let score = fused_score_from_buckets(
-                    term.mask,
-                    &fields.weights,
-                    &buckets,
-                    &lengths,
-                    field_totals,
-                    total_docs,
-                    df[term_index],
-                    term.boost,
-                    params,
-                );
-                *scores.entry(tid).or_insert(0.0) += score;
-                cursor
-                    .advance(ordinal.saturating_add(1))
-                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-            }
-            if fill_postings {
-                scanned[key] = true;
-            }
-        }
-    }
-}
-
-fn collect_fielded_postings(
-    view: &crate::storage::View,
-    text: &str,
-    mask: u16,
-    field_count: u8,
-    postings: &mut FxHashSet<Tid>,
-) {
-    for ((source, _), dead) in view.sources.iter().zip(view.dead_sets.iter()) {
-        let logical = match lookup(&**source, text, mask, field_count) {
-            Ok(Lookup::Term(logical)) => logical,
-            Ok(Lookup::Terms(_) | Lookup::Overflow) => continue,
-            Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
-        };
-        if logical.streams.is_empty() {
-            continue;
-        }
-        let table = source
-            .doc_table()
-            .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-        let mut cursor = logical
-            .cursor()
-            .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-        let mut n = 0usize;
-        while let Some(ordinal) = cursor.current_ordinal() {
-            interrupt_at(n);
-            n += 1;
-            if dead.contains(ordinal) {
-                cursor
-                    .advance(ordinal.saturating_add(1))
-                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                continue;
-            }
-            let tid = table
-                .tid_at(ordinal)
-                .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-            postings.insert(tid);
-            crate::fields::profile::add_hashset_insert();
-            cursor
-                .advance(ordinal.saturating_add(1))
-                .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-        }
-    }
 }
 
 fn fielded_ranked_rows(

@@ -26,6 +26,7 @@ mod cursor;
 mod df;
 mod error;
 mod expand;
+mod intersect;
 pub(crate) mod profile;
 mod score;
 mod types;
@@ -38,6 +39,7 @@ pub(crate) use cursor::{FieldHit, FieldTf, LogicalPostingCursor};
 pub(crate) use df::{query_total_df, union_df_agg, union_df_agg_from_streams};
 pub(crate) use error::{AdapterError, FieldKeyError, KeyDefect, ReportMode};
 pub(crate) use expand::{SurfaceWindow, expand, expand_in, lookup};
+pub(crate) use intersect::{Front, Intersect, next_atleast, next_conjunction, next_union};
 pub(crate) use score::{
     all_fields_mask, buckets_from_tfs, fused_avgdl, fused_idf, fused_len, fused_score,
     fused_score_from_buckets, fused_score_from_term, fused_tf, fused_tf_from_buckets,
