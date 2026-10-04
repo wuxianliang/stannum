@@ -916,7 +916,7 @@ Starts only if C.2 is green. Done-when texts of STN3 5.1–5.5 apply, with
 “fielded key” read as “channel” (design §8). Positions come from payload
 channels (design §4).
 
-- [ ] **D.1 Field scope in tinql + operator**
+- [x] **D.1 Field scope in tinql + operator**
   - Goal: `title:(…)` and `==>` field scope apply a mask / `scope_scan_query`,
     not a dictionary-key fence.
   - Scope: `tinql/src/` (`Expr::Field` grammar/AST — parse already exists
@@ -960,15 +960,47 @@ channels (design §4).
     `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0 --area fields`
     no longer FAILs on scope plumbing (phrase/span may still FAIL until
     D.2). `script/pgrx-lock.py -- cargo pgrx test pg18 -p stannum` green.
-    **Also D.1's** (per the 2026-10-04 adjudication): restore the
-    duplicate-clause fold in `postgres/src/score.rs` so `alpha AND alpha` on a
-    single-column index keeps 0.4.0 membership and score — 0.5.0 currently
-    scores it 2× because scoring terms come from a duplicate-preserving parse
-    where 0.4.0 saw the folded structural list. Fold duplicates only; do **not**
+    **Also D.1's** (per the 2026-10-04 adjudication): the duplicate-clause
+    **fold** on the paths that must match 0.4.0 — 0.5.0 currently scores it 2×
+    because scoring terms come from a duplicate-preserving parse where 0.4.0
+    saw the folded structural list. Fold duplicates only; do **not**
     deduplicate tokens outright (repeated phrase terms and differently boosted
-    clauses depend on them). `fields.boolean_duplicate_leaf` must go PASS and
-    the `contract/divergences/stannum.yaml` entry removed.
+    clauses depend on them). **SUPERSEDED by the third adjudication — see the
+    duplicate-leaf ruling below. The ruling is the opposite: every scoring
+    surface keeps additive duplicate-term weights, `fields.boolean_duplicate_leaf`
+    is a raw FAIL, and the `contract/divergences/stannum.yaml` entry stays
+    deleted.** The controller's root-cause proof and the plan-invariance
+    requirement both still apply.
   - Review focus: design §4 field-scoped queries; parent Appendix A;
+    adjudication §"duplicate-leaf ruling".
+  - Result (**code @ 6783b2f**, box checked separately): `title:(…)` / `==>` scope
+    by **channel mask**. `tinql` gained a `FieldScope` trait (`NamedFields` /
+    `NoFields`) plus `plan_scoped` / `page_plan_scoped` and a
+    `query_scoped(query, scope)` that resolves `Query::Field { name, inner }`
+    against the index's field list and filters that term's `Term::channels` by
+    the mask; `scope_scan_query` wraps the query in `Query::Field` and rejects a
+    foreign scope; `check_query_fields_on` / `walk_expr_fields` report unknown
+    fields deterministically, preserving the 0.4.0 single-column error text;
+    `postgres/src/fold.rs` refuses `Query::Field` so a scoped query cannot
+    silently lose its scope; `View::field_names` carries the envelope names.
+    **The scoring contract did not change**: every surface keeps additive
+    duplicate-term weights, and the plan-invariance regression compares
+    `search()` under `stannum.enable_custom_scan` on/off while naming the plan
+    it actually ran (`Function Scan` vs `Stannum Text Search Scan` vs
+    `Bitmap Heap Scan`). Controller gates: lib **131/0** (61 `fields`, 14
+    `bound`), workspace **14 suites**, fmt + clippy (`pg18 pg_test`,
+    `-D warnings`) clean, `script/test-all quick` 7/7, headers 2/2,
+    `nm -u` test binary **0** `InterruptPending`, `cargo pgrx test pg18`
+    **353 passed / 0 failed / 5 ignored**, release build verified (42
+    `pg_proc` functions, no `pg_test`-only UDFs). **TIN conformance exit 0**
+    with `catalog.S-12` PASS; **contract census 6 FAIL / 4 GAP / 44 PASS of
+    54** — the ruled `fields.boolean_duplicate_leaf` raw FAIL plus D.2's five.
+    Two mutation proofs (folding the `search()` path only; and the
+    surface-agreement and plan-invariance tests) both caught. The oracle's
+    three adjudications for this step are recorded in the adjudication
+    section; `contract/divergences/stannum.yaml` loses the broken
+    error-shaped `fields.boolean_duplicate_leaf` entry, whose account is now
+    the ledger.
 
 - [ ] **D.2 Same-field phrases + spans**
   - Goal: unscoped phrase = OR of per-field bindings (never cross-field
