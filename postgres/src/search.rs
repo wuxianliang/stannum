@@ -8,7 +8,7 @@ use crate::fields::{Lookup, all_fields_mask, buckets_from_tfs, fused_score_from_
 use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
 use crate::score::{
     PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, check_query_fields_on,
-    visible_tid_pairs,
+    rank, visible_tid_pairs,
 };
 use crate::storage::FieldMeta;
 use pgrx::iter::TableIterator;
@@ -16,7 +16,8 @@ use pgrx::{FromDatum, PgRelation, name, pg_sys};
 use rustc_hash::{FxHashMap, FxHashSet};
 use segment::Tid;
 use segment::index::Index;
-use std::collections::BTreeSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, BinaryHeap};
 use tinql::runtime::{Query, parse_tinql_to_query};
 use tokenizer::CompiledTokenizerPipeline;
 
@@ -777,13 +778,67 @@ fn fielded_ranked_rows(
     fields: &FieldMeta,
     k1: Option<f32>,
     b: Option<f32>,
+    limit: usize,
 ) -> Vec<(f32, VisibleTid)> {
     let _profile = crate::fields::profile::Session::begin(query, true, "multi");
     let scores = fielded_scores(index, query, fields, k1, b);
     let ranked_span = crate::fields::profile::Span::begin();
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
-    let roots: BTreeSet<Tid> = scores.keys().copied().collect();
-    let visible = unsafe { visible_tid_pairs(heap_oid, roots) };
+    let mut rows = fielded_visible_ranked(&scores, heap_oid, limit);
+    crate::fields::profile::add_ranked(std::time::Duration::from_nanos(ranked_span.ns()));
+    rows.truncate(limit);
+    rows
+}
+
+/// Heap entry ordered so the worst-ranked row is the greatest, matching
+/// [`crate::score::Ranked`] / [`rank`].
+struct FieldedRanked(f32, Tid);
+
+impl PartialEq for FieldedRanked {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for FieldedRanked {}
+
+impl PartialOrd for FieldedRanked {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FieldedRanked {
+    fn cmp(&self, other: &Self) -> Ordering {
+        rank(&(self.0, self.1), &(other.0, other.1))
+    }
+}
+
+/// The `k` best scored indexed tids, same total order as a full sort by [`rank`].
+fn fielded_topk_indexed(scores: &FxHashMap<Tid, f32>, k: usize) -> Vec<(f32, Tid)> {
+    if k == 0 || scores.is_empty() {
+        return Vec::new();
+    }
+    let mut heap = BinaryHeap::with_capacity(k.min(scores.len()) + 1);
+    for (i, (&tid, &score)) in scores.iter().enumerate() {
+        interrupt_at(i);
+        let entry = FieldedRanked(score, tid);
+        if heap.len() < k {
+            heap.push(entry);
+        } else if heap.peek().is_some_and(|worst| entry < *worst) {
+            heap.pop();
+            heap.push(entry);
+        }
+    }
+    let mut rows: Vec<(f32, Tid)> = heap.into_iter().map(|FieldedRanked(s, t)| (s, t)).collect();
+    rows.sort_by(rank);
+    rows
+}
+
+fn fielded_rows_from_visible(
+    scores: &FxHashMap<Tid, f32>,
+    visible: Vec<VisibleTid>,
+) -> Vec<(f32, VisibleTid)> {
     let mut rows: Vec<_> = visible
         .into_iter()
         .filter_map(|row| {
@@ -794,8 +849,56 @@ fn fielded_ranked_rows(
         })
         .collect();
     rank_rows(&mut rows);
-    crate::fields::profile::add_ranked(std::time::Duration::from_nanos(ranked_span.ns()));
     rows
+}
+
+fn fielded_exhaustive_visible(
+    scores: &FxHashMap<Tid, f32>,
+    heap_oid: pg_sys::Oid,
+) -> Vec<(f32, VisibleTid)> {
+    let roots: BTreeSet<Tid> = scores.keys().copied().collect();
+    let visible = unsafe { visible_tid_pairs(heap_oid, roots) };
+    fielded_rows_from_visible(scores, visible)
+}
+
+/// Visibility for the `limit` best indexed tids. Falls back when a selected
+/// row is invisible or HOT-collapsed, so the returned top-k matches a full
+/// visibilize-then-[`rank_rows`] pass on a snapshot with no HOT rewrite.
+fn try_fielded_topk_visible(
+    scores: &FxHashMap<Tid, f32>,
+    heap_oid: pg_sys::Oid,
+    limit: usize,
+) -> Option<Vec<(f32, VisibleTid)>> {
+    let selected = fielded_topk_indexed(scores, limit);
+    if selected.len() < limit {
+        return None;
+    }
+    let roots: BTreeSet<Tid> = selected.iter().map(|(_, tid)| *tid).collect();
+    let visible = unsafe { visible_tid_pairs(heap_oid, roots) };
+    if visible.len() != selected.len() {
+        return None;
+    }
+    if visible.iter().any(|row| row.indexed_tid != row.visible_tid) {
+        return None;
+    }
+    Some(fielded_rows_from_visible(scores, visible))
+}
+
+fn fielded_visible_ranked(
+    scores: &FxHashMap<Tid, f32>,
+    heap_oid: pg_sys::Oid,
+    limit: usize,
+) -> Vec<(f32, VisibleTid)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if limit <= PRUNE_MAX_K
+        && scores.len() > limit
+        && let Some(rows) = try_fielded_topk_visible(scores, heap_oid, limit)
+    {
+        return rows;
+    }
+    fielded_exhaustive_visible(scores, heap_oid)
 }
 
 fn pointer_of(tid: Tid) -> pg_sys::ItemPointerData {
@@ -1079,13 +1182,15 @@ pub(crate) fn search(
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
     let index_oid = index.oid();
     if let Some(fields) = unsafe { crate::storage::fields_meta(index.as_ptr()) } {
-        let rows = fielded_ranked_rows(&index, query, &fields, k1, b);
-        let limit = if limit == 0 {
-            return TableIterator::new(Vec::new());
+        let take = if limit == 0 {
+            0
         } else {
             usize::try_from(limit).expect("non-negative limit fits usize")
         };
-        let rows: Vec<_> = rows.into_iter().take(limit).collect();
+        let rows = fielded_ranked_rows(&index, query, &fields, k1, b, take);
+        if take == 0 {
+            return TableIterator::new(Vec::new());
+        }
         let pipeline = unsafe { crate::storage::tokenizer_by_oid(index_oid) };
         let rows = fetch_snippet(
             heap_oid,
@@ -1391,6 +1496,77 @@ mod tests {
                  stannum.search('mc_docs_idx', 'title:(needle)', 5000, 'none') s ON d.ctid = s.ctid
                  ORDER BY s.score DESC, d.id"
             )
+        );
+    }
+
+    /// Fielded top-k visibilizes only `limit` indexed tids, but the returned
+    /// ids and score bits match the exhaustive visibilize-then-rank prefix
+    /// (`limit` > `PRUNE_MAX_K`). `search_count` still sees every match;
+    /// snippets see the same `limit` rows as `snippet => none`.
+    #[pg_test]
+    fn fielded_topk_matches_exhaustive_ids_and_score_bits() {
+        Spi::run(
+            "CREATE TABLE tk_docs(id int primary key, title text, body text);
+             INSERT INTO tk_docs
+               SELECT n,
+                      repeat('alpha ', 1 + n % 7) || 'title',
+                      repeat('alpha ', 1 + n % 5) || repeat('pad ', n % 3)
+               FROM generate_series(1, 80) n;
+             INSERT INTO tk_docs
+               SELECT 100 + n, 'alpha alpha', 'alpha alpha'
+               FROM generate_series(1, 20) n;
+             CREATE INDEX tk_idx ON tk_docs USING stannum(title, body);",
+        )
+        .unwrap();
+        let count = Spi::get_one::<i64>("SELECT stannum.search_count('tk_idx', 'alpha')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 100);
+        let bits = |limit: i32| -> Vec<(i32, u32)> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT d.id, s.score FROM tk_docs d
+                             JOIN stannum.search('tk_idx'::regclass, 'alpha', {limit}, 'none') s
+                               ON d.ctid = s.ctid
+                             ORDER BY s.score DESC, s.ctid"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .map(|row| {
+                        (
+                            row.get::<i32>(1).unwrap().unwrap(),
+                            row.get::<f32>(2).unwrap().unwrap().to_bits(),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        let exhaustive = bits((PRUNE_MAX_K + 1) as i32);
+        assert_eq!(exhaustive.len(), 100, "{}", exhaustive.len());
+        let top10 = bits(10);
+        assert_eq!(top10, exhaustive[..10].to_vec(), "{top10:?}");
+        let snippets: Vec<i32> = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT d.id FROM tk_docs d
+                     JOIN stannum.search('tk_idx'::regclass, 'alpha', 10) s
+                       ON d.ctid = s.ctid
+                     ORDER BY s.score DESC, s.ctid",
+                    None,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{error}"))
+                .map(|row| row.get::<i32>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(
+            snippets,
+            top10.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "{snippets:?}"
         );
     }
 
@@ -2134,5 +2310,32 @@ mod tests {
         assert_eq!(tid_of(output[0].0), null_tid);
         assert_eq!(output[0].1, 1.0);
         assert_eq!(output[0].2, None);
+    }
+}
+
+#[cfg(test)]
+mod fielded_topk_select_tests {
+    use super::{fielded_topk_indexed, rank};
+    use rustc_hash::FxHashMap;
+    use segment::Tid;
+
+    fn tid(n: u16) -> Tid {
+        Tid::new(0, n).unwrap()
+    }
+
+    #[test]
+    fn fielded_topk_indexed_matches_full_sort_by_rank() {
+        let mut scores = FxHashMap::default();
+        for n in 1u16..=40 {
+            scores.insert(tid(n), (n % 7) as f32);
+        }
+        scores.insert(tid(41), 6.0);
+        scores.insert(tid(42), 6.0);
+        let mut expected: Vec<(f32, Tid)> = scores.iter().map(|(&t, &s)| (s, t)).collect();
+        expected.sort_by(rank);
+        expected.truncate(10);
+        assert_eq!(fielded_topk_indexed(&scores, 10), expected);
+        assert!(fielded_topk_indexed(&scores, 0).is_empty());
+        assert_eq!(fielded_topk_indexed(&scores, 100).len(), scores.len());
     }
 }
