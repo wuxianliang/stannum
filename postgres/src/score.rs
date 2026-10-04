@@ -53,6 +53,44 @@ pub(crate) struct CacheKey {
     field: u8,
 }
 
+/// Frozen `score_bound*` SQL has no field argument. The scoring mode occupies
+/// the low 8 bits (0..=3); the scan-key ordinal occupies bits 8..15.
+const SCORE_MODE_MASK: i32 = 0xff;
+const SCORE_FIELD_SHIFT: i32 = 8;
+
+/// Packs `mode` (0..=3) with the scan-key ordinal for `score_bound*`.
+pub(crate) fn encode_score_binding(mode: i32, field: u8) -> i32 {
+    debug_assert!((0..=3).contains(&mode));
+    debug_assert!(field < 16);
+    mode | (i32::from(field) << SCORE_FIELD_SHIFT)
+}
+
+/// Splits a `score_bound*` mode constant into `(mode, field)`.
+pub(crate) fn decode_score_binding(encoded: i32) -> (i32, u8) {
+    (
+        encoded & SCORE_MODE_MASK,
+        ((encoded >> SCORE_FIELD_SHIFT) & 0xff) as u8,
+    )
+}
+
+#[cfg(test)]
+mod score_binding_tests {
+    use super::{decode_score_binding, encode_score_binding};
+
+    #[test]
+    fn score_binding_round_trips_mode_and_field() {
+        for mode in 0..=3 {
+            for field in 0..16u8 {
+                assert_eq!(
+                    decode_score_binding(encode_score_binding(mode, field)),
+                    (mode, field)
+                );
+            }
+        }
+        assert_eq!(decode_score_binding(1), (1, 0));
+    }
+}
+
 struct ScoreCorpus {
     key: CacheKey,
     by_document: FxHashMap<String, f32>,
@@ -358,6 +396,7 @@ fn score_bound(
     term_add: Option<Vec<String>>,
     term_replace: Option<Vec<String>>,
 ) -> f32 {
+    let (mode, field) = decode_score_binding(mode);
     let key = CacheKey {
         statement: current_statement(),
         heap_oid: heap_oid as u32,
@@ -369,7 +408,7 @@ fn score_bound(
         b: bits(b),
         add: term_add.clone(),
         replace: term_replace.clone(),
-        field: 0,
+        field,
     };
     SCORE_CACHE.with_borrow_mut(|cache| {
         let statement = key.statement;
@@ -407,6 +446,7 @@ fn score_bound_indexed(
     term_add: Option<Vec<String>>,
     term_replace: Option<Vec<String>>,
 ) -> f32 {
+    let (mode, field) = decode_score_binding(mode);
     let statement = current_statement();
     let dense = dense_ratio.unwrap_or(DenseRatio::DEFAULT).to_bits();
     // Per-row calls compare against the cached key without allocating; the
@@ -421,7 +461,7 @@ fn score_bound_indexed(
             && key.query == query
             && key.add.as_deref() == term_add.as_deref()
             && key.replace.as_deref() == term_replace.as_deref()
-            && key.field == 0
+            && key.field == field
     };
     let matches = |key: &CacheKey| key.statement == statement && same_query(key);
     if mode < 2 {
@@ -484,7 +524,7 @@ fn score_bound_indexed(
                 b: bits(b),
                 add: term_add.clone(),
                 replace: term_replace.clone(),
-                field: 0,
+                field,
             };
             build_index_scorer(key, k1, b, term_add.clone(), term_replace.clone())
         };
@@ -5879,7 +5919,7 @@ unsafe extern "C-unwind" fn find_score_calls(
                 if (*mode).xpr.type_ == pg_sys::NodeTag::T_Const
                     && pg_sys::equal(pg_sys::list_nth(function.args, 0), binding.document.cast())
                 {
-                    match (*mode).constvalue.value() {
+                    match decode_score_binding((*mode).constvalue.value() as i32).0 {
                         0 => binding.dense = true,
                         1 => binding.full = true,
                         _ => {}
@@ -5958,20 +5998,22 @@ fn score_support(request: Internal) -> Internal {
         // same analyzer. As in TIN, a row's score sums one score per
         // expression (a row matching one column scores that column's), and
         // clauses on one expression score as one query (see below).
-        let mut documents: Vec<(*mut pg_sys::Node, *mut pg_sys::Node, pg_sys::Oid)> = Vec::new();
+        let mut documents: Vec<(*mut pg_sys::Node, *mut pg_sys::Node, pg_sys::Oid, u8)> =
+            Vec::new();
         for &(document, query, bound) in &binding.matches {
             if documents
                 .iter()
-                .any(|&(seen, _, _)| pg_sys::equal(seen.cast(), document.cast()))
+                .any(|&(seen, _, _, _)| pg_sys::equal(seen.cast(), document.cast()))
             {
                 continue;
             }
             let candidates = matching_stannum_indexes((*rte).relid, ctid.varno, document);
-            if let Some((index_oid, _field)) = pick_index(&candidates, bound) {
-                documents.push((document, query, index_oid));
+            if let Some((index_oid, field)) = pick_index(&candidates, bound) {
+                debug_assert!(field < 16);
+                documents.push((document, query, index_oid, field));
             }
         }
-        let Some(&(document, _, index_oid)) = documents.first() else {
+        let Some(&(document, _, index_oid, _)) = documents.first() else {
             return unhandled();
         };
         let original_nargs = pg_sys::list_length((*request.fcall).args);
@@ -6009,13 +6051,13 @@ fn score_support(request: Internal) -> Internal {
             documents.truncate(1);
         }
         let mut replacement: *mut pg_sys::Node = std::ptr::null_mut();
-        for &(document, first_query, index_oid) in &documents {
+        for &(document, first_query, index_oid, field) in &documents {
             let call = bound_score_call(
                 request,
                 ctid_node,
                 &binding,
                 (*rte).relid,
-                (document, first_query, index_oid),
+                (document, first_query, index_oid, field),
                 mode,
                 original_nargs,
             );
@@ -6048,7 +6090,12 @@ unsafe fn bound_score_call(
     ctid_node: *mut pg_sys::Node,
     binding: &QualBinding,
     heap_oid: pg_sys::Oid,
-    (document, first_query, index_oid): (*mut pg_sys::Node, *mut pg_sys::Node, pg_sys::Oid),
+    (document, first_query, index_oid, field): (
+        *mut pg_sys::Node,
+        *mut pg_sys::Node,
+        pg_sys::Oid,
+        u8,
+    ),
     mode: i32,
     original_nargs: i32,
 ) -> *mut pg_sys::Node {
@@ -6076,7 +6123,7 @@ unsafe fn bound_score_call(
         args.push(pg_sys::eval_const_expressions(request.root, combined_query));
         args.push(make_int4_const(heap_oid.to_u32() as i32).cast());
         args.push(make_int4_const(index_oid.to_u32() as i32).cast());
-        args.push(make_int4_const(mode).cast());
+        args.push(make_int4_const(encode_score_binding(mode, field)).cast());
         let null_float = || make_null_const(pg_sys::FLOAT4OID);
         let null_array = || make_null_const(pg_sys::TEXTARRAYOID);
         if mode == 0 {

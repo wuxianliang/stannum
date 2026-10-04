@@ -8,9 +8,13 @@
 //! matches: the operator's restriction selectivity (which sets the relation's
 //! row estimate), `amcostestimate` for the bitmap index path, and the custom
 //! scan paths. All three call [`estimate_query`], which parses the constant
-//! query with the index's tokenizer and combines per-term document
+//! query with the index's tokenizer, applies the scan-key field via
+//! [`crate::score::scope_scan_query`], and combines per-term document
 //! frequencies from every segment and the write buffer (see
-//! [`tinql::runtime::estimate`]).
+//! [`tinql::runtime::estimate`]). tinql's estimator currently unwraps
+//! `Query::Field` and uses union document frequencies; per-field DF is a
+//! selectivity refinement that must not change answers. The union-DF figure
+//! is a conservative overestimate of a scoped clause's cardinality.
 //!
 //! Reading the index at plan time is cheap: segment readers are cached per
 //! backend, so a dictionary lookup is a memoized read, and the result is
@@ -36,8 +40,10 @@ pub const FALLBACK: Estimate = Estimate {
     exact: true,
 };
 
+type EstimateMemoKey = (u32, u8, String);
+
 thread_local! {
-    static MEMO: RefCell<HashMap<(u32, String), (Stamp, Estimate)>> = RefCell::new(HashMap::new());
+    static MEMO: RefCell<HashMap<EstimateMemoKey, (Stamp, Estimate)>> = RefCell::new(HashMap::new());
 }
 
 /// Forgets the memo at the start of an executor run, so it never outlives
@@ -46,18 +52,20 @@ pub fn note_executor_start() {
     MEMO.with_borrow_mut(HashMap::clear);
 }
 
-/// The estimate for `query` over the index `index_oid`, or `None` when the
-/// index is not readable at plan time.
+/// The estimate for `query` over the index `index_oid`, restricted to the
+/// scan-key ordinal `field`, or `None` when the index is not readable at
+/// plan time.
 ///
 /// # Safety
 /// `index_oid` names an index relation the caller may open.
-pub unsafe fn estimate_query(index_oid: pg_sys::Oid, query: &str) -> Option<Estimate> {
+pub unsafe fn estimate_query(index_oid: pg_sys::Oid, query: &str, field: u8) -> Option<Estimate> {
     unsafe {
+        debug_assert!(field < 16);
         if !crate::storage::is_segmented(index_oid) {
             return None;
         }
         let stamp = crate::storage::stamp(index_oid)?;
-        let key = (index_oid.to_u32(), query.to_owned());
+        let key = (index_oid.to_u32(), field, query.to_owned());
         let memoized = MEMO.with_borrow(|memo| memo.get(&key).copied());
         if let Some((at, estimate)) = memoized
             && at == stamp
@@ -66,8 +74,10 @@ pub unsafe fn estimate_query(index_oid: pg_sys::Oid, query: &str) -> Option<Esti
         }
         let index = pg_sys::index_open(index_oid, pg_sys::AccessShareLock as _);
         let tokenizer = crate::storage::index_tokenizer(index);
+        let fields = crate::storage::fields_meta(index);
         pg_sys::index_close(index, pg_sys::AccessShareLock as _);
         let query = tinql::runtime::parse_tinql_to_query(query, tokenizer.as_ref()).ok()?;
+        let query = crate::score::scope_scan_query(query, fields.as_ref(), field);
         let view = crate::storage::view(index_oid);
         let statistics = IndexStatistics {
             sources: view
@@ -136,7 +146,7 @@ pub unsafe fn clause_estimate(
         let (index_oid, field) =
             crate::score::pick_index(&candidates, crate::operator::bound_index(right))?;
         debug_assert!(field < 16);
-        estimate_query(index_oid, &query)
+        estimate_query(index_oid, &query, field)
     }
 }
 

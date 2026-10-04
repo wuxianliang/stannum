@@ -1690,14 +1690,15 @@ mod tests {
         .unwrap();
     }
 
-    /// Scaffold until Phase 5. `amcanmulticol` stays false, so these cannot run.
+    /// Field scope on `==>` through the custom scan.
     #[pg_test]
-    #[ignore]
     fn title_body_operator_scope_custom_scan() {
         Spi::run(
             "CREATE TABLE scoped (id int, title text, body text);
              INSERT INTO scoped VALUES (1, 'alpha', 'beta'), (2, 'beta', 'alpha');
-             CREATE INDEX scoped_idx ON scoped USING stannum (title, body)",
+             CREATE INDEX scoped_idx ON scoped USING stannum (title, body);
+             SET LOCAL enable_seqscan = off;
+             SET LOCAL stannum.enable_custom_scan = on",
         )
         .unwrap();
         let title = Spi::get_one::<Vec<i32>>(
@@ -1710,11 +1711,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body, Some(vec![2]));
+        let title_plan =
+            Spi::get_one::<String>("EXPLAIN SELECT id FROM scoped WHERE title ==> 'alpha'")
+                .unwrap()
+                .unwrap();
+        assert!(
+            title_plan.contains("Stannum Text Search Scan"),
+            "{title_plan}"
+        );
+        let body_plan =
+            Spi::get_one::<String>("EXPLAIN SELECT id FROM scoped WHERE body ==> 'alpha'")
+                .unwrap()
+                .unwrap();
+        assert!(
+            body_plan.contains("Stannum Text Search Scan"),
+            "{body_plan}"
+        );
     }
 
-    /// Scaffold until Phase 5, bitmap path (`enable_custom_scan = off`).
+    /// Field scope on `==>` through the bitmap path (`enable_custom_scan = off`).
     #[pg_test]
-    #[ignore]
     fn title_body_operator_scope_bitmap() {
         Spi::run(
             "CREATE TABLE scoped_bm (id int, title text, body text);
@@ -1734,6 +1750,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body, Some(vec![2]));
+        let title_plan =
+            Spi::get_one::<String>("EXPLAIN SELECT id FROM scoped_bm WHERE title ==> 'alpha'")
+                .unwrap()
+                .unwrap();
+        assert!(title_plan.contains("Bitmap Heap Scan"), "{title_plan}");
         let plan =
             Spi::get_one::<String>("EXPLAIN SELECT id FROM scoped_bm WHERE body ==> 'alpha'")
                 .unwrap()

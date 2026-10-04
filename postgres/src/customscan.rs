@@ -425,9 +425,13 @@ unsafe fn find_ordering(
             if !same_query || index_oid as u32 != found.index_oid.to_u32() {
                 continue;
             }
-            let Ok(Some(mode)) = const_datum::<i32>(arg(4)) else {
+            let Ok(Some(encoded_mode)) = const_datum::<i32>(arg(4)) else {
                 continue;
             };
+            let (mode, field) = crate::score::decode_score_binding(encoded_mode);
+            if field != found.field {
+                continue;
+            }
             let Ok(dense_ratio) = const_datum::<f32>(arg(5)) else {
                 continue;
             };
@@ -773,7 +777,9 @@ unsafe extern "C-unwind" fn rel_pathlist_hook(
         let estimate = found
             .query
             .as_deref()
-            .and_then(|query| crate::selectivity::estimate_query(found.index_oid, query))
+            .and_then(|query| {
+                crate::selectivity::estimate_query(found.index_oid, query, found.field)
+            })
             .unwrap_or(crate::selectivity::FALLBACK);
         let index = crate::selectivity::index_cost(
             root,
@@ -1034,7 +1040,9 @@ unsafe extern "C-unwind" fn upper_paths_hook(
         let estimate = found
             .query
             .as_deref()
-            .and_then(|query| crate::selectivity::estimate_query(found.index_oid, query))
+            .and_then(|query| {
+                crate::selectivity::estimate_query(found.index_oid, query, found.field)
+            })
             .unwrap_or(crate::selectivity::FALLBACK);
         let index = crate::selectivity::index_cost(
             root,
@@ -2163,15 +2171,17 @@ unsafe extern "C-unwind" fn exec_count(
             } else {
                 // Time the existing policy too, so paired runs expose incremental cost.
                 let selection_start = std::time::Instant::now();
-                let mut use_pages = FORCE_COUNT_PAGES.get();
-                for (source, _) in &view.sources {
-                    if use_pages {
-                        break;
-                    }
-                    use_pages |= tinql::runtime::plan::prefers_pages(&query, source)
-                        .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
-                    if use_pages {
-                        break;
+                let mut use_pages = FORCE_COUNT_PAGES.get() && view.field_names.is_empty();
+                if view.field_names.is_empty() {
+                    for (source, _) in &view.sources {
+                        if use_pages {
+                            break;
+                        }
+                        use_pages |= tinql::runtime::plan::prefers_pages(&query, source)
+                            .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"));
+                        if use_pages {
+                            break;
+                        }
                     }
                 }
                 exec.count_estimate = None;

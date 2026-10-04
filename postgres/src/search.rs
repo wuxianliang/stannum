@@ -3000,6 +3000,68 @@ mod tests {
     }
 
     #[pg_test]
+    fn operator_scores_are_plan_invariant_across_custom_scan_field_scope() {
+        Spi::run(
+            "CREATE TABLE plan_inv_fields (id int primary key, title text, body text);
+             INSERT INTO plan_inv_fields VALUES
+               (1, 'alpha', 'beta'),
+               (2, 'beta', 'alpha'),
+               (3, 'alpha', 'alpha');
+             INSERT INTO plan_inv_fields SELECT 10 + n, 'pad' || n, 'pad' || n
+               FROM generate_series(1, 30) n;
+             CREATE INDEX plan_inv_fields_idx ON plan_inv_fields USING stannum (title, body);",
+        )
+        .unwrap();
+        for column in ["title", "body"] {
+            let operator_sql = format!(
+                "SELECT id, stannum.full_score(ctid) FROM plan_inv_fields
+                 WHERE {column} ==> 'alpha'
+                 ORDER BY stannum.full_score(ctid) DESC, ctid
+                 LIMIT 50"
+            );
+            let mut by_guc = Vec::new();
+            for custom in ["on", "off"] {
+                Spi::run(&format!(
+                    "SET LOCAL enable_seqscan = off;
+                     SET LOCAL enable_indexscan = off;
+                     SET LOCAL enable_bitmapscan = on;
+                     SET LOCAL stannum.enable_custom_scan = {custom}"
+                ))
+                .unwrap();
+                let plan = explain_analyze(&operator_sql);
+                if custom == "on" {
+                    assert!(
+                        plan.contains("Stannum Text Search Scan"),
+                        "{column} custom scan on must execute Stannum Text Search Scan: {plan}"
+                    );
+                } else {
+                    assert!(
+                        !plan.contains("Stannum Text Search Scan"),
+                        "{column} custom scan off must not use Stannum Text Search Scan: {plan}"
+                    );
+                    assert!(
+                        plan.contains("Bitmap Heap Scan"),
+                        "{column} custom scan off must execute Bitmap Heap Scan: {plan}"
+                    );
+                }
+                by_guc.push(ranked_id_scores(&operator_sql));
+            }
+            assert_eq!(
+                by_guc[0], by_guc[1],
+                "{column} ==> scores or ranked order differ across enable_custom_scan"
+            );
+            let mut ids = by_guc[0].iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            ids.sort_unstable();
+            let expected = if column == "title" {
+                vec![1, 3]
+            } else {
+                vec![2, 3]
+            };
+            assert_eq!(ids, expected, "{column} ==> membership");
+        }
+    }
+
+    #[pg_test]
     fn unknown_field_fails_deterministically() {
         bool_fixture();
         assert_query_error(

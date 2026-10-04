@@ -28,6 +28,10 @@ pub(crate) fn amhandler(_fcinfo: pg_sys::FunctionCallInfo) -> PgBox<pg_sys::Inde
     routine.amstrategies = BOUND_STRATEGY;
     routine.amsupport = 0;
     routine.amcanmulticol = true;
+    // A restriction on a non-leading key (`body ==>` on `(title, body)`)
+    // is not a btree-style prefix; without this the planner emits no bitmap
+    // path and falls back to a sequential scan.
+    routine.amoptionalkey = true;
     routine.amsearcharray = false;
     routine.amkeytype = pg_sys::InvalidOid;
     routine.amvalidate = Some(amvalidate);
@@ -221,6 +225,10 @@ unsafe extern "C-unwind" fn amrescan(
     }
     let nkeys = unsafe { (*scan).numberOfKeys };
     if nkeys <= 0 {
+        // `amoptionalkey` lets the planner emit a qual-less bitmap path
+        // (no first-column restriction). Returning no TIDs would drop rows;
+        // lossy heap recheck is the same tested fallback as unknown flags.
+        state.plan = ScanPlan::Fallback;
         return;
     }
     let keys = unsafe { (*scan).keyData };
@@ -410,7 +418,9 @@ unsafe extern "C-unwind" fn amcostestimate(
                 clause
                     .query
                     .as_deref()
-                    .and_then(|query| crate::selectivity::estimate_query((*info).indexoid, query))
+                    .and_then(|query| {
+                        crate::selectivity::estimate_query((*info).indexoid, query, clause.field)
+                    })
                     .unwrap_or(crate::selectivity::FALLBACK)
             })
             .collect();

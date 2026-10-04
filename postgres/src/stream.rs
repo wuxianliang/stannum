@@ -60,10 +60,14 @@ impl CandidateStream {
         // This is the same owning-reader pattern used by IndexScorer.
         let view = unsafe { std::mem::transmute::<&View, &'static View>(&self.view) };
         let limits = Limits::default();
-        self.page_masks = view.sources.iter().any(|(source, _)| {
-            prefers_pages(&self.query, source)
-                .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"))
-        });
+        // Fielded terms must not read parent `Term::ordinals` (design: 2..=16
+        // use channels). Page-at-a-time is a deferred acceleration; scalar
+        // channel cursors preserve membership and scores.
+        self.page_masks = view.field_names.is_empty()
+            && view.sources.iter().any(|(source, _)| {
+                prefers_pages(&self.query, source)
+                    .unwrap_or_else(|error| pgrx::error!("Stannum query plan: {error}"))
+            });
         if self.page_masks {
             let mut inputs: Vec<Box<dyn pages::Cursor>> = Vec::new();
             for ((source, dead), label) in view.sources.iter().zip(&view.labels) {
