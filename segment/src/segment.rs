@@ -673,7 +673,7 @@ pub(crate) fn assemble(
             + classes.len()
             + pages.len(),
     );
-    out.extend_from_slice(&header(
+    out.extend_from_slice(&blob_header(
         doc_count,
         total_length,
         dictionary.len(),
@@ -690,7 +690,7 @@ pub(crate) fn assemble(
 }
 
 /// The header of a blob whose sections have the given lengths.
-pub(crate) fn header(
+pub(crate) fn blob_header(
     doc_count: u32,
     total_length: u64,
     dictionary_len: usize,
@@ -1087,7 +1087,7 @@ impl<S: Source> Reader<S> {
         if total > pages_end {
             reader.open_trailer(total, validate_trailer)?;
         } else {
-            reader.reject_fielded_keys_without_trailer()?;
+            reader.reject_legacy_encoded_terms_without_trailer()?;
         }
         Ok(reader)
     }
@@ -1121,7 +1121,7 @@ impl<S: Source> Reader<S> {
         Ok(())
     }
 
-    fn reject_fielded_keys_without_trailer(&self) -> Result<()> {
+    fn reject_legacy_encoded_terms_without_trailer(&self) -> Result<()> {
         let keys: Vec<String> = {
             let dictionary = self.dictionary()?;
             dictionary

@@ -401,7 +401,7 @@ fn merge_inner(
     let dictionary = dictionary.finish();
     let offsets = crate::docs::offsets(page_documents.iter().copied());
     let pages = crate::docs::page_table(page_documents.iter().copied());
-    let header = crate::segment::header(
+    let header = crate::segment::blob_header(
         live_lengths.len() as u32,
         total_length,
         dictionary.len(),
@@ -954,10 +954,7 @@ pub(crate) mod tests {
             for (field, text) in columns.iter().enumerate() {
                 for word in text.split_whitespace() {
                     position += 1;
-                    tokens.push((
-                        crate::trailer::test_fielded_key(field as u8, word),
-                        position,
-                    ));
+                    tokens.push((format!("~{field:x}~{word}"), position));
                 }
             }
             builder
@@ -1090,7 +1087,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn merge_still_rejects_legacy_v1_fielded_key_segments() {
+    fn merge_still_rejects_legacy_v1_encoded_term_segments() {
         let tid1 = Tid::new(0, 1).unwrap();
         let tid2 = Tid::new(0, 2).unwrap();
         let a = legacy_v1_segment(&[(tid1, &["foo", "foo"]), (tid2, &["foo"])]);

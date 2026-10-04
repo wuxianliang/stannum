@@ -845,7 +845,7 @@ mod tests {
             dictionary.push(&term, entry).unwrap();
         }
         let dictionary = dictionary.finish();
-        let mut out = crate::segment::header(
+        let mut out = crate::segment::blob_header(
             segment.document_count(),
             segment.total_length(),
             dictionary.len(),
@@ -981,7 +981,7 @@ mod tests {
             dictionary.push(&name, entry).unwrap();
         }
         let dictionary = dictionary.finish();
-        let mut out = crate::segment::header(
+        let mut out = crate::segment::blob_header(
             segment.document_count(),
             segment.total_length(),
             dictionary.len(),

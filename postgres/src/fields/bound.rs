@@ -410,6 +410,7 @@ mod tests {
     use segment::tf_bucket::TfBucket;
 
     use super::*;
+    use crate::fields::intersect::{Front, Intersect, next_atleast, next_conjunction};
     use crate::fields::score::{fused_avgdl, fused_idf, fused_len, fused_score, fused_tf};
     use crate::fields::types::LogicalTerm;
     use segment::index::Index;
@@ -546,11 +547,18 @@ mod tests {
     }
 
     fn walk_intervals(streams: &[&Ordinals<'_>], candidates: &[u32]) -> Vec<(u32, u32)> {
+        walk_intervals_with(candidates, |pivot| next_interval_end(streams, pivot))
+    }
+
+    fn walk_intervals_with(
+        candidates: &[u32],
+        interval_end: impl Fn(u32) -> Option<u32>,
+    ) -> Vec<(u32, u32)> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < candidates.len() {
             let start = candidates[i];
-            let end = next_interval_end(streams, start)
+            let end = interval_end(start)
                 .filter(|end| *end > start)
                 .unwrap_or_else(|| start.saturating_add(1));
             out.push((start, end));
@@ -561,6 +569,7 @@ mod tests {
         out
     }
 
+    #[derive(Clone)]
     struct TermFixture {
         field_count: u8,
         mask: u16,
@@ -816,6 +825,463 @@ mod tests {
         (heap, skipped)
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum BooleanOp {
+        And,
+        AtLeast(u32),
+    }
+
+    struct OrdFront<'a> {
+        items: &'a [u32],
+        pos: usize,
+        dead: &'a [u32],
+    }
+
+    impl<'a> OrdFront<'a> {
+        fn new(items: &'a [u32], dead: &'a [u32]) -> Self {
+            Self {
+                items,
+                pos: 0,
+                dead,
+            }
+        }
+
+        fn skip_dead(&mut self, ix: &mut Intersect<'_>) {
+            while let Some(at) = self.current() {
+                if !self.dead.contains(&at) {
+                    break;
+                }
+                let Some(next) = at.checked_add(1) else {
+                    self.pos = self.items.len();
+                    break;
+                };
+                ix.tick();
+                self.pos += self.items[self.pos..].partition_point(|&o| o < next);
+            }
+        }
+    }
+
+    impl Front for OrdFront<'_> {
+        fn current(&self) -> Option<u32> {
+            self.items.get(self.pos).copied()
+        }
+
+        fn advance(&mut self, target: u32, ix: &mut Intersect<'_>) {
+            ix.tick();
+            if self.current().is_some_and(|at| at >= target) {
+                self.skip_dead(ix);
+                return;
+            }
+            self.pos += self.items[self.pos..].partition_point(|&o| o < target);
+            self.skip_dead(ix);
+        }
+
+        fn hint(&self) -> u64 {
+            (self.items.len() - self.pos) as u64
+        }
+    }
+
+    fn next_boolean(
+        children: &mut [OrdFront<'_>],
+        op: BooleanOp,
+        target: u32,
+        ix: &mut Intersect<'_>,
+    ) -> Option<u32> {
+        match op {
+            BooleanOp::And => next_conjunction(children, target, ix),
+            BooleanOp::AtLeast(min) => next_atleast(children, min, target, ix),
+        }
+    }
+
+    fn drain_boolean(children: &mut [OrdFront<'_>], op: BooleanOp) -> Vec<u32> {
+        let mut step = |_n: usize| {};
+        let mut ix = Intersect::new(&mut step);
+        let mut out = Vec::new();
+        let mut target = 0u32;
+        while let Some(hit) = next_boolean(children, op, target, &mut ix) {
+            out.push(hit);
+            if hit == u32::MAX {
+                break;
+            }
+            target = hit + 1;
+        }
+        out
+    }
+
+    /// Independent boolean candidate set: per-child dedup, then AND / AtLeast,
+    /// excluding `dead`. Must not be derived from `drain_boolean`.
+    fn independent_boolean_set(lists: &[Vec<u32>], op: BooleanOp, dead: &[u32]) -> Vec<u32> {
+        let held: Vec<BTreeSet<u32>> = lists
+            .iter()
+            .map(|list| list.iter().copied().collect())
+            .collect();
+        let mut universe = BTreeSet::new();
+        for child in &held {
+            universe.extend(child.iter().copied());
+        }
+        universe
+            .into_iter()
+            .filter(|ordinal| {
+                if dead.contains(ordinal) {
+                    return false;
+                }
+                let count = held.iter().filter(|child| child.contains(ordinal)).count();
+                match op {
+                    BooleanOp::And => count == held.len(),
+                    BooleanOp::AtLeast(min) => count as u32 >= min,
+                }
+            })
+            .collect()
+    }
+
+    /// Exact AND / `AtLeast` score at `ordinal`.
+    ///
+    /// The score is the sum over children that hold the ordinal of that child's
+    /// exact score; a child that does not hold the ordinal contributes `0.0`.
+    /// Ordinal membership is tested against the child's posting list.
+    fn boolean_exact(children: &[TermFixture], lists: &[Vec<u32>], ordinal: u32) -> f32 {
+        children
+            .iter()
+            .zip(lists)
+            .map(|(child, list)| {
+                if list.binary_search(&ordinal).is_ok() {
+                    child.exact_at(ordinal)
+                } else {
+                    0.0
+                }
+            })
+            .sum()
+    }
+
+    fn child_bound_at(
+        streams: &[(u8, Ordinals<'_>)],
+        term: &TermFixture,
+        start: u32,
+        end: u32,
+    ) -> f32 {
+        let pairs: Vec<(u8, &Ordinals<'_>)> = streams
+            .iter()
+            .map(|(field, stream)| (*field, stream))
+            .collect();
+        fused_interval_bound(
+            &pairs,
+            term.mask,
+            &term.weights,
+            start,
+            end,
+            term.field_count,
+            term.avgdl(),
+            term.idf(),
+            term.boost,
+            term.params,
+        )
+    }
+
+    fn union_list(streams: &[(u8, Ordinals<'_>)], duplicate: bool) -> Vec<u32> {
+        let mut set = BTreeSet::new();
+        for (_, stream) in streams {
+            set.extend(members(stream));
+        }
+        let mut items: Vec<u32> = set.into_iter().collect();
+        if duplicate && items.len() >= 2 {
+            let mid = items[items.len() / 2];
+            items.insert(items.len() / 2, mid);
+        }
+        items
+    }
+
+    struct IntersectWandReport {
+        expected: Vec<u32>,
+        pruned: usize,
+        skips: Vec<(u32, u32, usize)>,
+        top: Vec<(u32, f32)>,
+    }
+
+    /// Compare intersect-WAND pruning against an independent exhaustive top-k.
+    ///
+    /// `walk_intervals_with` must partition `expected`: intervals are sorted,
+    /// each satisfies `start < end`, consecutive intervals do not overlap
+    /// (`next.start >= prev.end`), and their union covers `expected` exactly
+    /// (first start equals `expected.first()`, last end is strictly greater
+    /// than `expected.last()`, every expected ordinal falls in exactly one
+    /// interval).
+    ///
+    /// `bound_parts(start, end)` is the envelope for the whole `[start, end)`
+    /// interval: its value is used for every pivot in the interval, not a
+    /// per-pivot bound. Every expected pivot inside the interval must satisfy
+    /// `exact(pivot) <= bound(start, end)`. The per-candidate check enforces
+    /// that for every inside pivot; a counter requires it was actually checked
+    /// for at least one pivot per interval.
+    ///
+    /// Summing the per-child interval bounds is a valid upper bound because
+    /// (a) each child's `fused_interval_bound(start, end)` is an upper bound
+    /// on that child's contribution over `[start, end)`, (b) a child that does
+    /// not hold the pivot contributes `0.0`, so summing **all** children is at
+    /// least the true score, and (c) looseness of the sum (worst for `AtLeast`)
+    /// costs pruning efficiency only, never correctness. An unsafe aggregation
+    /// such as `max()` when several children contribute positively would be
+    /// caught by the existing per-candidate `exact <= bound` assertion.
+    ///
+    /// Nonnegativity is a precondition of that `sum()`: boost factors are
+    /// parse-constrained to `0.0..=BoostFactor::MAX` in
+    /// `tinql/src/parser/descent.rs` (`boost_suffix`, the
+    /// `if !(0.0..=BoostFactor::MAX).contains(&factor)` check), and index
+    /// `field_weights` must be positive finite
+    /// (`postgres/src/storage/mod.rs::apply_field_weights` rejects
+    /// `!weight.is_finite() || weight <= 0.0`). Because both are nonnegative,
+    /// a plain `sum()` cannot underestimate a nonnegative per-child score.
+    /// Negative boosts are not legal input; a future change that admits them
+    /// must revisit this aggregation.
+    fn check_intersect_wand_lists(
+        lists: &[Vec<u32>],
+        children: &[TermFixture],
+        op: BooleanOp,
+        dead: &[u32],
+        k: usize,
+        interval_end: impl Fn(u32) -> Option<u32>,
+        bound_parts: impl Fn(u32, u32) -> Vec<f32>,
+    ) -> IntersectWandReport {
+        assert!(k > 0, "top-k must be positive");
+        let expected = independent_boolean_set(lists, op, dead);
+        let mut fronts: Vec<OrdFront<'_>> = lists
+            .iter()
+            .map(|items| OrdFront::new(items, dead))
+            .collect();
+        let candidates = drain_boolean(&mut fronts, op);
+        assert_eq!(
+            candidates, expected,
+            "drain_boolean must match the independent boolean set element-for-element before scoring op={op:?} dead={dead:?}"
+        );
+
+        let scored: Vec<(u32, f32)> = expected
+            .iter()
+            .map(|&ordinal| (ordinal, boolean_exact(children, lists, ordinal)))
+            .collect();
+        let exhaustive = top_k(&scored, k);
+
+        let intervals = walk_intervals_with(&expected, interval_end);
+        let mut covered = Vec::with_capacity(expected.len());
+        for (i, &(start, end)) in intervals.iter().enumerate() {
+            assert!(
+                start < end,
+                "interval {i} [{start}, {end}) must satisfy start < end",
+            );
+            if i > 0 {
+                let (prev_start, prev_end) = intervals[i - 1];
+                assert!(
+                    start >= prev_start,
+                    "interval {i} [{start}, {end}) is not sorted after [{prev_start}, {prev_end})",
+                );
+                assert!(
+                    start >= prev_end,
+                    "interval {i} [{start}, {end}) overlaps previous [{prev_start}, {prev_end})",
+                );
+            }
+            let inside: Vec<u32> = expected
+                .iter()
+                .copied()
+                .filter(|ordinal| (start..end).contains(ordinal))
+                .collect();
+            let from = covered.len();
+            covered.extend_from_slice(&inside);
+            let expected_slice = expected.get(from..covered.len());
+            assert_eq!(
+                Some(inside.as_slice()),
+                expected_slice,
+                "interval {i} [{start}, {end}) is not the next disjoint slice of expected inside={inside:?} expected_slice={expected_slice:?} op={op:?}",
+            );
+        }
+        if let Some(&first) = expected.first() {
+            let &(start, first_end) = intervals
+                .first()
+                .expect("nonempty expected must yield intervals");
+            assert_eq!(
+                start, first,
+                "interval 0 [{start}, {first_end}) start must equal expected.first()={first}",
+            );
+        }
+        if let Some(&last) = expected.last() {
+            let (start, end) = *intervals
+                .last()
+                .expect("nonempty expected must yield intervals");
+            assert!(
+                end > last,
+                "last interval [{start}, {end}) must cover expected.last()={last}",
+            );
+        }
+        assert_eq!(
+            covered,
+            expected,
+            "interval walk must partition expected (disjoint + total + ordered); last interval {:?} covered={covered:?} expected={expected:?} op={op:?}",
+            intervals.last(),
+        );
+        let mut fronts: Vec<OrdFront<'_>> = lists
+            .iter()
+            .map(|items| OrdFront::new(items, dead))
+            .collect();
+        let mut step = |_n: usize| {};
+        let mut ix = Intersect::new(&mut step);
+        let mut heap = Vec::new();
+        let mut skipped = 0usize;
+        let mut skips = Vec::new();
+        let mut target = 0u32;
+
+        for &(start, end) in &intervals {
+            let parts = bound_parts(start, end);
+            // Valid envelope: per-child `fused_interval_bound` summed. See fn docs.
+            let bound: f32 = parts.iter().copied().sum();
+            let inside: Vec<u32> = expected
+                .iter()
+                .copied()
+                .filter(|ordinal| (start..end).contains(ordinal))
+                .collect();
+            // Envelope: exact(pivot) <= bound(start, end) for every inside pivot.
+            let mut envelope_checked = 0usize;
+            for &ordinal in &inside {
+                let exact = boolean_exact(children, lists, ordinal);
+                if !(exact.to_bits() == bound.to_bits() || exact <= bound) {
+                    let child_exact: Vec<f32> = children
+                        .iter()
+                        .enumerate()
+                        .map(|(i, child)| {
+                            if lists
+                                .get(i)
+                                .is_some_and(|list| list.binary_search(&ordinal).is_ok())
+                            {
+                                child.exact_at(ordinal)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    panic!(
+                        "exact {exact} > bound {bound} at {ordinal} in [{start}, {end}) op={op:?} child_exact={child_exact:?} child_bound={parts:?}"
+                    );
+                }
+                envelope_checked += 1;
+            }
+            assert!(
+                envelope_checked >= 1,
+                "interval [{start}, {end}) must check exact <= bound(start, end) for at least one expected pivot (checked {envelope_checked}) op={op:?}",
+            );
+            let threshold = if heap.len() == k {
+                heap.last().map(|(_, s)| *s).unwrap_or(f32::NEG_INFINITY)
+            } else {
+                f32::NEG_INFINITY
+            };
+            if heap.len() == k && bound <= threshold {
+                skipped += inside.len();
+                skips.push((start, end, inside.len()));
+                for front in &mut fronts {
+                    front.advance(end, &mut ix);
+                }
+                target = end;
+                continue;
+            }
+            let mut drained = Vec::new();
+            while let Some(hit) = next_boolean(&mut fronts, op, target, &mut ix) {
+                if hit >= end {
+                    target = hit;
+                    break;
+                }
+                drained.push(hit);
+                insert_top_k(&mut heap, hit, boolean_exact(children, lists, hit), k);
+                if hit == u32::MAX {
+                    target = u32::MAX;
+                    break;
+                }
+                target = hit + 1;
+            }
+            assert_eq!(
+                drained, inside,
+                "interval [{start}, {end}) drain must match independent set members op={op:?}"
+            );
+        }
+        assert_eq!(
+            heap, exhaustive,
+            "intersect WAND pruned vs exhaustive top-{k} ids+scores+order op={op:?} dead={dead:?} skipped={skipped}"
+        );
+        IntersectWandReport {
+            expected,
+            pruned: skipped,
+            skips,
+            top: heap,
+        }
+    }
+
+    fn opened_interval_end(opened: &[(u8, Ordinals<'_>)], pivot: u32) -> Option<u32> {
+        let only: Vec<&Ordinals<'_>> = opened.iter().map(|(_, stream)| stream).collect();
+        next_interval_end(&only, pivot)
+    }
+
+    fn run_intersect_wand(
+        children: &[TermFixture],
+        op: BooleanOp,
+        dead: &[u32],
+        k: usize,
+        duplicate: bool,
+    ) -> IntersectWandReport {
+        match children {
+            [a, b] => a.with_streams(|oa| {
+                b.with_streams(|ob| {
+                    let lists = [union_list(oa, duplicate), union_list(ob, duplicate)];
+                    check_intersect_wand_lists(
+                        &lists,
+                        children,
+                        op,
+                        dead,
+                        k,
+                        |pivot| {
+                            opened_interval_end(oa, pivot)
+                                .into_iter()
+                                .chain(opened_interval_end(ob, pivot))
+                                .min()
+                        },
+                        |start, end| {
+                            vec![
+                                child_bound_at(oa, a, start, end),
+                                child_bound_at(ob, b, start, end),
+                            ]
+                        },
+                    )
+                })
+            }),
+            [a, b, c] => a.with_streams(|oa| {
+                b.with_streams(|ob| {
+                    c.with_streams(|oc| {
+                        let lists = [
+                            union_list(oa, duplicate),
+                            union_list(ob, duplicate),
+                            union_list(oc, duplicate),
+                        ];
+                        check_intersect_wand_lists(
+                            &lists,
+                            children,
+                            op,
+                            dead,
+                            k,
+                            |pivot| {
+                                opened_interval_end(oa, pivot)
+                                    .into_iter()
+                                    .chain(opened_interval_end(ob, pivot))
+                                    .chain(opened_interval_end(oc, pivot))
+                                    .min()
+                            },
+                            |start, end| {
+                                vec![
+                                    child_bound_at(oa, a, start, end),
+                                    child_bound_at(ob, b, start, end),
+                                    child_bound_at(oc, c, start, end),
+                                ]
+                            },
+                        )
+                    })
+                })
+            }),
+            _ => panic!("intersect WAND fixture wants 2 or 3 children"),
+        }
+    }
+
     #[test]
     fn bound_time_uses_new_not_from_count() {
         let stored = 4u8;
@@ -1047,6 +1513,17 @@ mod tests {
                 let cand_b: BTreeSet<u32> = members(&opened_b[0].1).into_iter().collect();
                 let and: Vec<u32> = cand_a.intersection(&cand_b).copied().collect();
                 assert_eq!(and, vec![0, 10]);
+                let list_a: Vec<u32> = cand_a.iter().copied().collect();
+                let list_b: Vec<u32> = cand_b.iter().copied().collect();
+                let mut fronts = [
+                    OrdFront::new(&list_a, &[]),
+                    OrdFront::new(&list_b, &[]),
+                ];
+                assert_eq!(
+                    drain_boolean(&mut fronts, BooleanOp::And),
+                    and,
+                    "AND candidates come from next_conjunction"
+                );
                 let mut saw_min_too_tight = false;
                 for &ordinal in &and {
                     let end = next_interval_end(&only_a, ordinal)
@@ -1255,6 +1732,72 @@ mod tests {
         fixture_from_postings(field_count, mask, weights, &postings, boost)
     }
 
+    fn skip_boundary_children() -> Vec<TermFixture> {
+        let mut postings = vec![
+            (0, 0, 1, 80),
+            (1, 0, 40, 12),
+            (0, SUB, 1, 80),
+            (2, SUB, 100, 8),
+        ];
+        let mut weak = 10u32;
+        while weak < SUB {
+            postings.push((0, weak, 1, 80));
+            weak = weak.saturating_add(64);
+        }
+        let term = fixture_from_postings(3, 0b111, vec![1.0, 2.0, 4.0], &postings, 1.0);
+        vec![term.clone(), term]
+    }
+
+    fn generate_boolean(
+        rng: &mut SplitMix64,
+    ) -> (Vec<TermFixture>, BooleanOp, Vec<u32>, usize, bool) {
+        if rng.under(5) == 0 {
+            return (
+                skip_boundary_children(),
+                BooleanOp::And,
+                Vec::new(),
+                1,
+                false,
+            );
+        }
+        let n = 2 + rng.under(2) as usize;
+        let base = generate(rng);
+        let mut children = vec![base.clone(); n];
+        if rng.under(2) == 0 {
+            children[n - 1] = generate(rng);
+        } else if n == 3 && rng.under(2) == 0 {
+            children[1] = generate(rng);
+        }
+        let op = if n == 2 {
+            if rng.under(2) == 0 {
+                BooleanOp::And
+            } else {
+                BooleanOp::AtLeast(2)
+            }
+        } else if rng.under(3) == 0 {
+            BooleanOp::And
+        } else if rng.under(2) == 0 {
+            BooleanOp::AtLeast(2)
+        } else {
+            BooleanOp::AtLeast(3)
+        };
+        let mut dead = Vec::new();
+        if rng.under(2) == 0 {
+            let some = children
+                .iter()
+                .flat_map(|child| child.raw.keys().map(|(_, ordinal)| *ordinal))
+                .collect::<BTreeSet<_>>();
+            let some: Vec<u32> = some.into_iter().collect();
+            if some.len() > 3 {
+                dead.push(some[some.len() / 2]);
+                dead.push(some[1]);
+            }
+        }
+        let k = 1 + rng.under(8) as usize;
+        let duplicate = rng.under(3) == 0;
+        (children, op, dead, k, duplicate)
+    }
+
     #[test]
     fn randomized_exact_le_bound_and_pruned_matches_exhaustive() {
         let mut rng = SplitMix64(0x5354_4E33_3434);
@@ -1279,6 +1822,189 @@ mod tests {
         );
         assert!(compared > 0);
         assert_eq!(identical, ITERATIONS);
+    }
+
+    #[test]
+    fn intersect_wand_matches_exhaustive_on_named_shapes() {
+        let a = fixture_from_postings(
+            2,
+            0b11,
+            vec![2.0, 1.0],
+            &[
+                (0, 0, 20, 12),
+                (0, SUB - 1, 100, 8),
+                (0, SUB, 4, 8),
+                (0, CHUNK, 41, 9),
+                (1, 10, 10, 12),
+            ],
+            1.0,
+        );
+        let b = fixture_from_postings(
+            2,
+            0b11,
+            vec![1.0, 2.0],
+            &[
+                (1, 0, 41, 9),
+                (1, SUB - 1, 100, 8),
+                (1, SUB, 4, 8),
+                (1, CHUNK, 20, 9),
+                (0, 10, 10, 12),
+            ],
+            1.0,
+        );
+        let c = fixture_from_postings(
+            2,
+            0b11,
+            vec![1.0, 1.0],
+            &[(0, 0, 2, 10), (0, SUB - 1, 85, 8), (1, CHUNK, 1, 8)],
+            1.0,
+        );
+        // Conjunction, including a max-score document on a block boundary.
+        run_intersect_wand(&[a.clone(), b.clone()], BooleanOp::And, &[], 3, false);
+        // Duplicate ordinals inside a child and a tightening top-1 heap.
+        run_intersect_wand(&[a.clone(), b.clone()], BooleanOp::And, &[], 1, true);
+        // Disjunction min>1 / AtLeast, tied pivots (0 and SUB-1 in every child).
+        run_intersect_wand(
+            &[a.clone(), b.clone(), c.clone()],
+            BooleanOp::AtLeast(2),
+            &[],
+            5,
+            false,
+        );
+        run_intersect_wand(
+            &[a.clone(), b.clone(), c.clone()],
+            BooleanOp::AtLeast(3),
+            &[],
+            5,
+            false,
+        );
+        // Dead ordinals around the SUB pivot.
+        run_intersect_wand(
+            &[a.clone(), b.clone()],
+            BooleanOp::And,
+            &[SUB - 1, SUB],
+            3,
+            false,
+        );
+        // Exhausted / non-overlapping child: AND yields no candidates.
+        let miss = fixture_from_postings(2, 0b11, vec![1.0, 1.0], &[(0, 99, 1, 4)], 1.0);
+        a.with_streams(|oa| {
+            miss.with_streams(|om| {
+                let lists = [union_list(oa, false), union_list(om, false)];
+                let expected = independent_boolean_set(&lists, BooleanOp::And, &[]);
+                assert!(
+                    expected.is_empty(),
+                    "AND with miss must yield an independently empty candidate set, got {expected:?}"
+                );
+            });
+        });
+        run_intersect_wand(&[a.clone(), miss], BooleanOp::And, &[], 5, false);
+        // Threshold tightens as the heap fills.
+        run_intersect_wand(&[a, b, c], BooleanOp::AtLeast(2), &[], 2, true);
+    }
+
+    /// Strong hit at 0 on a stream that does not cover later ordinals; weak AND
+    /// hits occupy `[SUB, 2*SUB)`; optional best document sits at `2*SUB`.
+    fn prunable_and_children(best_after_skip: bool) -> (Vec<TermFixture>, u32, usize) {
+        let mut weak = Vec::new();
+        for i in 0..40u32 {
+            weak.push(SUB + i * 20);
+        }
+        let best = SUB * 2;
+        let mut postings = vec![(0u8, 0u32, 1u32, 80u32), (1u8, 0u32, 100u32, 8u32)];
+        for &ordinal in &weak {
+            postings.push((0, ordinal, 1, 80));
+        }
+        if best_after_skip {
+            postings.push((0, best, 1, 80));
+            postings.push((2, best, 177, 8));
+        }
+        let term = fixture_from_postings(3, 0b111, vec![1.0, 2.0, 4.0], &postings, 1.0);
+        (vec![term.clone(), term], best, weak.len())
+    }
+
+    #[test]
+    fn intersect_wand_prunes_weak_later_interval() {
+        let (children, _, weak_count) = prunable_and_children(false);
+        let report = run_intersect_wand(&children, BooleanOp::And, &[], 1, false);
+        eprintln!(
+            "prunable pruned={} skips={:?} weak={weak_count}",
+            report.pruned, report.skips
+        );
+        assert!(
+            report.pruned > 0,
+            "expected interval prune of weak later docs, pruned={}",
+            report.pruned
+        );
+        assert_eq!(report.pruned, weak_count);
+        assert!(
+            report
+                .skips
+                .iter()
+                .any(|&(start, end, n)| { start == SUB && end > SUB && n == weak_count }),
+            "must skip [SUB, …) in one jump so start+1 interval ends fail, skips={:?}",
+            report.skips
+        );
+    }
+
+    #[test]
+    fn intersect_wand_best_after_pruned_interval_boundary() {
+        let (children, best, weak_count) = prunable_and_children(true);
+        let score_0 = children[0].exact_at(0) + children[1].exact_at(0);
+        let score_best = children[0].exact_at(best) + children[1].exact_at(best);
+        assert!(
+            score_best > score_0,
+            "fixture best {best} score {score_best} must beat ordinal 0 score {score_0}"
+        );
+        let report = run_intersect_wand(&children, BooleanOp::And, &[], 1, false);
+        eprintln!(
+            "skip-boundary pruned={} skips={:?} weak={weak_count} best={best} top={:?}",
+            report.pruned, report.skips, report.top
+        );
+        assert!(
+            report.pruned > 0,
+            "weak interval before best={best} must prune, pruned={}",
+            report.pruned
+        );
+        assert_eq!(report.pruned, weak_count);
+        assert!(
+            report
+                .skips
+                .iter()
+                .any(|&(start, end, n)| { start == SUB && end == best && n == weak_count }),
+            "must skip [SUB, {best}) in one jump so a wrong skip target is caught, skips={:?}",
+            report.skips
+        );
+        assert_eq!(
+            report.top.first().map(|(ordinal, _)| *ordinal),
+            Some(best),
+            "best document must sit after the pruned interval boundary, top={:?}",
+            report.top
+        );
+    }
+
+    #[test]
+    fn randomized_intersect_wand_matches_exhaustive() {
+        let mut rng = SplitMix64(0x5354_4E34_4333);
+        let mut pruned = 0u64;
+        for i in 0..ITERATIONS {
+            let (children, op, dead, k, duplicate) = generate_boolean(&mut rng);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_intersect_wand(&children, op, &dead, k, duplicate)
+            }));
+            let report = match result {
+                Ok(report) => report,
+                Err(_) => panic!(
+                    "intersect WAND invariant failed on iteration {i} op={op:?} k={k} dead={dead:?} dups={duplicate}"
+                ),
+            };
+            pruned += report.pruned as u64;
+        }
+        eprintln!("randomized intersect WAND {ITERATIONS} iterations, pruned={pruned}");
+        assert!(
+            pruned > 0,
+            "randomized generator must produce prunable shapes"
+        );
     }
 
     #[test]
@@ -1487,9 +2213,9 @@ mod tests {
             Bm25Params::default(),
         )
         .expect_err("score without channels() is an error");
-        match err {
-            crate::fields::error::AdapterError::Index(_) => {}
-            other => panic!("expected Index error, got {other:?}"),
-        }
+        assert!(
+            matches!(err, crate::fields::error::AdapterError::Index(_)),
+            "expected Index error, got {err:?}"
+        );
     }
 }

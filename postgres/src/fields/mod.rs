@@ -2,15 +2,14 @@
 //
 // See LICENSE in the repository root for license terms.
 
-//! L1 field model (design §3, §5.1).
+//! L1 field model (design §3, §5.1, §7).
 //!
-//! This module owns the fielded-term codec, `LogicalPostingCursor`, the
-//! expansion adapter, fused BM25F arithmetic, df_agg union-count, and the
-//! fused WAND bound. L2 (`tool`) calls this layer. It does not reach into
-//! segment internals except through `Index::term` / `Window` / `expand` /
-//! `scan_window`, the `Term` streams the adapter wraps, and `Ordinals` /
-//! `ChunkBound` the bound reads. STNF trailer writers landed in plan 4.3;
-//! fused bound is plan 4.4.
+//! This module owns channel unpack, the fused scorer, the bound, and the
+//! norms reader. It does not own a key codec. Generation is the buffer
+//! tag, not key spelling. L2 (`tool`) calls this layer. It does not reach
+//! into segment internals except through `Index::term` / `Window` /
+//! `expand` / `scan_window`, the `Term` streams the adapter wraps, and
+//! `Ordinals` / `ChunkBound` the bound reads.
 //!
 //! It does not absorb the owned shims design §3 lists: `operator.rs`,
 //! `score.rs`, `highlight_udfs.rs`, `customscan.rs`, `am.rs`, `options.rs`,
@@ -21,7 +20,6 @@
 #![allow(unused_imports)]
 
 mod bound;
-mod codec;
 mod cursor;
 mod df;
 mod error;
@@ -34,10 +32,9 @@ mod types;
 pub(crate) use bound::{
     fused_bound, fused_interval_bound, fused_interval_bound_from_term, next_interval_end,
 };
-pub(crate) use codec::{decode, fielded_key, header, upper_fence};
 pub(crate) use cursor::{FieldHit, FieldTf, LogicalPostingCursor};
 pub(crate) use df::{query_total_df, union_df_agg, union_df_agg_from_streams};
-pub(crate) use error::{AdapterError, FieldKeyError, KeyDefect, ReportMode};
+pub(crate) use error::AdapterError;
 pub(crate) use expand::{SurfaceWindow, expand, expand_in, lookup};
 pub(crate) use intersect::{Front, Intersect, next_atleast, next_conjunction, next_union};
 pub(crate) use score::{

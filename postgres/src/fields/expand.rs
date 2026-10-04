@@ -10,7 +10,7 @@
 
 use segment::index::{Expanded, Index, Window};
 
-use super::error::{AdapterError, KeyDefect, query_defect};
+use super::error::AdapterError;
 use super::types::LogicalTerm;
 use super::types::Lookup;
 
@@ -64,7 +64,7 @@ fn lookup_inner<'a>(
     field_count: u8,
 ) -> Result<Lookup<'a>, AdapterError> {
     if text.is_empty() {
-        return Err(query_defect(KeyDefect::EmptyToken));
+        return Err(AdapterError::EmptyToken);
     }
     field_count_ok(field_count)?;
     match index.term(text)? {
@@ -438,6 +438,20 @@ mod tests {
     }
 
     #[test]
+    fn empty_lookup_text_is_query_invalid_not_index() {
+        let index = MutableIndex::default();
+        let err = lookup(&index, "", 1, 1).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "malformed fielded term key: decoded token is empty"
+        );
+        assert!(
+            !matches!(err, AdapterError::Index(_)),
+            "empty lookup is invalid input, not index corruption: {err:?}"
+        );
+    }
+
+    #[test]
     fn empty_streams_are_not_an_error() {
         let index = MutableIndex::with_field_count(FIELDS).unwrap();
         let Lookup::Term(missing) = lookup(&index, "foo", all_fields_mask(FIELDS), FIELDS).unwrap()
@@ -716,10 +730,10 @@ mod tests {
             capped.is_err(),
             "error beats Overflow after the cap is already exceeded"
         );
-        match capped {
-            Err(AdapterError::Index(_)) => {}
-            other => panic!("expected Index error, got {other:?}"),
-        }
+        assert!(
+            matches!(capped, Err(AdapterError::Index(_))),
+            "expected Index error, got {capped:?}"
+        );
         assert!(expand_in(&index, SurfaceWindow::All, &ALWAYS, mask, FIELDS).is_err());
     }
 

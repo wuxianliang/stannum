@@ -739,10 +739,6 @@
    "owner": "ben",
    "evidence": "Original Stannum L1 fused WAND bound (design \u00a75.1 saturate derivative, intersecting-block interval truncation, representative_count via TfBucket::new). Not copied from Lead."
   },
-  "postgres/src/fields/codec.rs": {
-   "owner": "ben",
-   "evidence": "Original Stannum L1 fielded-term key codec (~ hex nibble header, doubled-tilde escape, round-trip decode). Not copied from Lead."
-  },
   "postgres/src/fields/cursor.rs": {
    "owner": "ben",
    "evidence": "Original Stannum L1 LogicalPostingCursor over fielded Term streams (union candidates, equal-ordinal coalescing, fused next_bound_interval). Not copied from Lead."
@@ -753,7 +749,7 @@
   },
   "postgres/src/fields/error.rs": {
    "owner": "ben",
-   "evidence": "Original Stannum L1 fielded-key defects with distinct query-error versus verify-corruption report kinds. Not copied from Lead."
+   "evidence": "Original Stannum L1 lookup/expansion AdapterError wrapping segment::Error. Fielded-key defects died with the codec. Not copied from Lead."
   },
   "postgres/src/fields/profile.rs": {
   "owner": "ben",
@@ -769,7 +765,7 @@
   },
   "postgres/src/fields/mod.rs": {
    "owner": "ben",
-   "evidence": "Original Stannum L1 field-model module. Reexports the 4.1 codec, LogicalPostingCursor, expansion adapter, fused BM25F arithmetic, df_agg union-count, and the 4.4 fused WAND bound. States the design section 3 contract (does not absorb the owned shims). Not copied from Lead."
+   "evidence": "Original Stannum L1 field-model module. Owns channel unpack, fused scorer, bound, and norms reader; does not own a key codec. Reexports LogicalPostingCursor, expansion adapter, fused BM25F arithmetic, df_agg union-count, and the fused WAND bound. States the design section 3/7 contract (does not absorb the owned shims). Not copied from Lead."
   },
   "postgres/src/fields/score.rs": {
    "owner": "ben",

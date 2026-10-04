@@ -1471,22 +1471,6 @@ mod tests {
         assert!(matches!(overflow, Expanded::Overflow));
     }
 
-    fn fielded_record(id: u32, columns: &[&str]) -> ForwardRecord {
-        let mut tokens = Vec::new();
-        let mut position = 0u32;
-        for (field, text) in columns.iter().enumerate() {
-            for word in text.split_whitespace() {
-                position += 1;
-                tokens.push((
-                    crate::trailer::test_fielded_key(field as u8, word),
-                    position,
-                ));
-            }
-        }
-        let refs: Vec<(&str, u32)> = tokens.iter().map(|(t, p)| (t.as_str(), *p)).collect();
-        ForwardRecord::from_tokens(Tid::new(id / 50, (id % 50 + 1) as u16).unwrap(), refs).unwrap()
-    }
-
     /// Feeds `columns` through the STN4 posting API: per-field grouping with
     /// raw per-field positions and field lengths.
     fn add_fielded(index: &MutableIndex, id: u32, columns: &[&str]) -> crate::Result<()> {
@@ -1634,7 +1618,13 @@ mod tests {
     fn mutable_index_crc_checks_sidecar_before_flush() {
         let mutable = MutableIndex::with_field_count(2).unwrap();
         mutable
-            .add_record(fielded_record(1, &["beer wine", "beer"]))
+            .add_record(
+                ForwardRecord::from_tokens(
+                    Tid::new(0, 2).unwrap(),
+                    vec![("~0~beer", 1), ("~0~wine", 2), ("~1~beer", 3)],
+                )
+                .unwrap(),
+            )
             .unwrap();
         mutable.check_sidecar().unwrap();
         // Legacy fielded-key content must not reach a flush: this version

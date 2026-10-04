@@ -308,12 +308,12 @@ pub(crate) fn check_writer_field_count(field_count: u8) -> Result<()> {
     }
 }
 
-/// Inspect a stored dictionary term against the fields/codec grammar
-/// (`~` + lowercase hex nibble + `~` + doubled-tilde payload).
+/// Inspect a stored dictionary term against the leftover encoded-term
+/// grammar (`~` + lowercase hex nibble + `~` + doubled-tilde payload).
 ///
-/// `Ok(None)` is not a fielded header. `Ok(Some)` is a decoded surface token.
-/// An unpaired `~` after a matching header is corruption. This is a decoder
-/// only: the encoder stays in `postgres/src/fields/codec.rs`.
+/// `Ok(None)` is not an encoded header. `Ok(Some)` is a decoded surface token.
+/// An unpaired `~` after a matching header is corruption. Open-time
+/// classification still needs this decoder; no encoder remains.
 pub(crate) fn inspect_stored_term(key: &str) -> Result<Option<(u8, String)>> {
     let mut chars = key.chars();
     if chars.next() != Some('~') {
@@ -456,22 +456,6 @@ fn take_u64le(reader: &mut Reader<'_>) -> Result<u64> {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(reader.take(8)?);
     Ok(u64::from_le_bytes(buf))
-}
-
-/// Test-only fielded key. Production encoding stays in postgres fields/codec.
-#[cfg(test)]
-pub(crate) fn test_fielded_key(ordinal: u8, token: &str) -> String {
-    debug_assert!(ordinal <= 15);
-    let extra = token.chars().filter(|&c| c == '~').count();
-    let mut payload = String::with_capacity(token.len() + extra);
-    for c in token.chars() {
-        if c == '~' {
-            payload.push_str("~~");
-        } else {
-            payload.push(c);
-        }
-    }
-    format!("~{ordinal:x}~{payload}")
 }
 
 #[cfg(test)]
@@ -711,12 +695,9 @@ mod tests {
             Some(Error::Corrupt("STNF unpaired tilde"))
         );
         assert_eq!(
-            inspect_stored_term(&test_fielded_key(10, "foo")).unwrap(),
+            inspect_stored_term("~a~foo").unwrap(),
             Some((10, "foo".into()))
         );
-        assert_eq!(
-            inspect_stored_term(&test_fielded_key(0, "~")).unwrap(),
-            Some((0, "~".into()))
-        );
+        assert_eq!(inspect_stored_term("~0~~~").unwrap(), Some((0, "~".into())));
     }
 }

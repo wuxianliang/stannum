@@ -50,8 +50,9 @@ pub(crate) fn union_df_agg_from_streams(streams: &[FieldTerm<'_>]) -> segment::R
     Ok(union_df_agg(field_ordinals))
 }
 
-/// Query-time `total_df` = Σ per-segment `df_agg`. Ordinals are disjoint
-/// across segments; this sum is not a merge of overlapping field streams.
+/// Query-time `total_df` = Σ per-segment parent `TermEntry.df`. Ordinals
+/// are disjoint across segments; this sum is not a merge of overlapping
+/// field streams.
 #[must_use]
 pub(crate) fn query_total_df(per_segment: &[u64]) -> u64 {
     per_segment.iter().copied().sum()
