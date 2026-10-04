@@ -1292,7 +1292,7 @@ channels (design §4).
     `script/test-all full` green on PG18.
   - Review focus: design §4 planner widening; parent Appendix A.
 
-- [ ] **D.5 pgembed checkpoint**
+- [x] **D.5 pgembed checkpoint**
   - Goal: full L3 product path on STN4 (old 5.5 / 4.7 folded here; C.2 must
     already be green).
   - Scope: pgembed pin bump. Bundle the 3.3 backlog test edit
@@ -1303,6 +1303,42 @@ channels (design §4).
     tests/test_stannum_jieba.py` green on multi-column + jieba;
     langchain/llama retriever smoke. Wheel-green invariant holds.
   - Review focus: design §8 D.5; STN3 5.5 done-when.
+  - Result (**pgembed `ec6d028`**, box checked separately): **DONE-WHEN MET.**
+    Three pgembed commits, each one-purpose and never a blanket add —
+    `ca0bc2d` pin C.3→D.4 `6ad9523b308d…`, `c63238a` jieba `extversion`
+    `0.4.0`→`0.5.0`, `ec6d028` the retriever adapters. The `pg_textsearch` WIP
+    stayed untouched throughout. Pin verified as D.4's **implementation** commit,
+    not the later docs commits. Wheel:
+    `dist-standalone/pgembed_stannum-0.3.0rc2-py3-none-macosx_11_0_arm64.whl`,
+    **5,389,545 bytes**, `default_version = '0.5.0'`,
+    `BUILT_FOR_POSTGRES_MAJOR = 18`, dylib sha256
+    `7cecb56a889955c9…` **matching** the installed copy. **Controller re-ran the
+    full pgembed suite on PG18.4: `82 passed / 2 skipped / 0 failed`** — the two
+    skips are the missing-extra tests, which skip *because* the extras are now
+    installed. Jieba is 8/8 including `test_dictionary_drift_reindex_and_presets`
+    after the one-line `extversion` edit (corrected, not weakened: it still pins
+    the version the wheel actually installs).
+    **Multi-column smoke confirms D.2 at the product level** — the three shapes
+    that raised `search() does not support this query on a multi-column index` at
+    C.4 now answer: `"database index"` → [4], `title:("needle title")` → [1],
+    `needl*` → [1,2], with `search` and `search_count` agreeing on every
+    arithmetic-shaped query (11 recorded, same as C.4).
+    **A latent defect found and fixed: pgembed's retriever adapters had never
+    been exercised, because the extras were never installed and both smokes were
+    skipped since before C.4.** With the extras installed, three independent
+    faults surfaced — controller-verified import paths that do not exist in any
+    version of the declared range (`run_in_executor` from
+    `langchain_core.runnables.utils`, where it lives in
+    `langchain_core.runnables.config`; `BaseRetriever` from
+    `llama_index.core.schema`, where it lives in
+    `llama_index.core.base.base_retriever`), an `aretrieve` override that never
+    received a `QueryBundle` because the base class converts before calling the
+    `_aretrieve` hook, and a `TextNode` with a random UUID `id_` that disagreed
+    between the sync and async paths. All three fixed in `ec6d028`; both smokes
+    pass. No version shim was needed — the symbols never moved within the
+    declared ranges, they were simply never imported.
+    **Phase gate PD is now met** (census 1 FAIL / 2 GAP / 51 PASS under the
+    accounting rule, `script/test-all full` green, pgembed suite green).
 
 **Phase gate PD** (normative: design §4 + parent Appendix A): phrase/span/
 highlight/planner contract cases match 0.4.0; census 0 FAIL; pgembed official
@@ -1575,6 +1611,7 @@ the build gate; this section only governs ranked p50.
 | B.3 | | (B.2 SHA) | same keep-green | pin-only |
 | C.4 | 10db73c (pgembed) | 6 | 4 | 44 | pin → C.3 `7fdee282`; wheel 5,360,031 bytes, `BUILT_FOR_POSTGRES_MAJOR = 18`, dylib sha256 matches the installed C.3 build. pytest single-column + jieba + multi-column arithmetic smoke green (81 passed / 2 skipped / 1 failed, the failure being the known D.5 `extversion` backlog). Census unchanged from C.3/D.1: the rule FAIL plus D.2's five, and the four GAPs. **Note this row's census was measured against the C.3 build the pin installs, not against D.1's tree — the pin and the census are deliberately different commits.** |
 | D.5 | | (D.4 SHA) | full official + jieba + retrievers | **C.2 gated** |
+| D.5 | ec6d028 (pgembed) | 1 | 2 | 51 | pin → D.4 `6ad9523b`. Controller-re-run **82 passed / 2 skipped / 0 failed**, jieba 8/8. Three pre-existing retriever-adapter faults fixed because the smokes had never run: two imports from paths that exist in no version of the declared range, an `aretrieve` that never received a `QueryBundle`, and a random `TextNode` id. Census unchanged. |
 | E.3 | | (E-series) | release wheel | joins E.4 |
 
 ---
