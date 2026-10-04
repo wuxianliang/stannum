@@ -17,13 +17,18 @@ pub(crate) struct FieldHit {
     pub(crate) positions: Vec<u32>,
 }
 
+/// One field's stored term-frequency bucket at the cursor's current ordinal.
+/// Positions stay on the payload stream until a phrase needs them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FieldTf {
+    pub(crate) field: u8,
+    pub(crate) bucket: u8,
+}
+
 struct FieldStream<'a> {
     field: u8,
     ordinals: OrdinalCursor<'a>,
     payload: Payload<'a>,
-    /// Next ordinal that truncates the fused bound interval: a covering
-    /// stream's successor, or a not-yet-covering stream's current.
-    successor: Option<u32>,
 }
 
 /// `current_ordinal`, `advance` (every stream to ≥ target; equal ordinals
@@ -32,6 +37,9 @@ struct FieldStream<'a> {
 pub(crate) struct LogicalPostingCursor<'a> {
     fields: Vec<FieldStream<'a>>,
     current: Option<u32>,
+    /// True after a forward walk ran off the end. The next `advance` to a
+    /// smaller target rewinds; a sequential `ordinal+1` walk never does.
+    exhausted: bool,
 }
 
 impl<'a> LogicalPostingCursor<'a> {
@@ -43,12 +51,12 @@ impl<'a> LogicalPostingCursor<'a> {
                 field: stream.field,
                 ordinals: stream.term.ordinals()?.cursor()?,
                 payload: stream.term.payload()?,
-                successor: None,
             });
         }
         let mut cursor = Self {
             fields,
             current: None,
+            exhausted: false,
         };
         cursor.advance(0)?;
         super::profile::add_cursor_open(std::time::Duration::from_nanos(span.ns()));
@@ -63,9 +71,10 @@ impl<'a> LogicalPostingCursor<'a> {
     /// Step every stream to the first ordinal at or after `target`. Equal
     /// ordinals coalesce into one candidate.
     ///
-    /// Published `current` and every stream `successor` are cleared before
-    /// any seek. `current` is published only after every seek (and successor
-    /// peek) succeeds, so a mid-loop error cannot leave a stale ordinal
+    /// Sequential walks (`target` ≥ the published current) seek forward only.
+    /// A backward seek, or a seek after the union is exhausted, rewinds first.
+    /// `current` is cleared before any seek and published only after every
+    /// seek succeeds, so a mid-loop error cannot leave a stale ordinal
     /// together with already-moved streams.
     pub(crate) fn advance(&mut self, target: u32) -> segment::Result<()> {
         let span = super::profile::Span::begin();
@@ -75,42 +84,33 @@ impl<'a> LogicalPostingCursor<'a> {
     }
 
     fn advance_inner(&mut self, target: u32) -> segment::Result<()> {
+        let previous = self.current;
         self.current = None;
-        for stream in &mut self.fields {
-            stream.successor = None;
-        }
+        let going_back = previous.is_some_and(|here| target < here) || self.exhausted;
 
-        let rewind_span = super::profile::Span::begin();
+        let seek_span = super::profile::Span::begin();
         let mut min = None;
         for stream in &mut self.fields {
-            stream.ordinals.rewind()?;
-            stream.ordinals.seek(target)?;
+            if going_back {
+                stream.ordinals.rewind()?;
+                stream.ordinals.seek(target)?;
+            } else if stream.ordinals.current().is_some_and(|at| at < target) {
+                stream.ordinals.seek(target)?;
+            }
             if let Some(at) = stream.ordinals.current() {
                 min = Some(min.map_or(at, |seen: u32| seen.min(at)));
             }
         }
-        super::profile::add_rewind_seek(std::time::Duration::from_nanos(rewind_span.ns()));
-        let Some(here) = min else {
-            return Ok(());
-        };
-
-        let mut successors = Vec::with_capacity(self.fields.len());
-        for stream in &mut self.fields {
-            let peek_span = super::profile::Span::begin();
-            let next = match stream.ordinals.current() {
-                Some(at) if at == here => peek_successor(&mut stream.ordinals)?,
-                Some(at) => Some(at),
-                None => None,
-            };
-            if matches!(stream.ordinals.current(), Some(at) if at == here) {
-                super::profile::add_peek_successor(std::time::Duration::from_nanos(peek_span.ns()));
+        super::profile::add_rewind_seek(std::time::Duration::from_nanos(seek_span.ns()));
+        match min {
+            Some(here) => {
+                self.exhausted = false;
+                self.current = Some(here);
             }
-            successors.push(next);
+            None => {
+                self.exhausted = previous.is_some() || self.exhausted;
+            }
         }
-        for (stream, successor) in self.fields.iter_mut().zip(successors) {
-            stream.successor = successor;
-        }
-        self.current = Some(here);
         Ok(())
     }
 
@@ -125,6 +125,15 @@ impl<'a> LogicalPostingCursor<'a> {
             positions,
         );
         Ok(hits)
+    }
+
+    /// Each field that posts at `current_ordinal`, with the ordinal-stream
+    /// term-frequency bucket. Does not open the payload.
+    pub(crate) fn field_tfs(&self) -> segment::Result<Vec<FieldTf>> {
+        let span = super::profile::Span::begin();
+        let tfs = self.field_tfs_inner()?;
+        super::profile::add_bucket(std::time::Duration::from_nanos(span.ns()));
+        Ok(tfs)
     }
 
     fn field_hits_inner(&self) -> segment::Result<Vec<FieldHit>> {
@@ -153,6 +162,27 @@ impl<'a> LogicalPostingCursor<'a> {
         Ok(hits)
     }
 
+    fn field_tfs_inner(&self) -> segment::Result<Vec<FieldTf>> {
+        let Some(current) = self.current else {
+            return Ok(Vec::new());
+        };
+        let mut tfs = Vec::new();
+        for stream in &self.fields {
+            if stream.ordinals.current() != Some(current) {
+                continue;
+            }
+            let bucket = stream
+                .ordinals
+                .bucket()
+                .ok_or(segment::Error::Corrupt("fielded posting missing tf bucket"))?;
+            tfs.push(FieldTf {
+                field: stream.field,
+                bucket,
+            });
+        }
+        Ok(tfs)
+    }
+
     /// Exclusive end of the fused bound interval covering `current_ordinal`.
     ///
     /// Design §5.1: the earlier of the covering-block exclusive ends and the
@@ -176,17 +206,6 @@ impl<'a> LogicalTerm<'a> {
     pub(crate) fn cursor(&self) -> segment::Result<LogicalPostingCursor<'a>> {
         LogicalPostingCursor::open(&self.streams)
     }
-}
-
-fn peek_successor(ordinals: &mut OrdinalCursor<'_>) -> segment::Result<Option<u32>> {
-    let Some(here) = ordinals.current() else {
-        return Ok(None);
-    };
-    ordinals.advance()?;
-    let next = ordinals.current();
-    ordinals.rewind()?;
-    ordinals.seek(here)?;
-    Ok(next)
 }
 
 #[cfg(test)]

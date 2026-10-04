@@ -51,6 +51,18 @@ pub(crate) fn lookup<'a>(
     mask: u16,
     field_count: u8,
 ) -> Result<Lookup<'a>, AdapterError> {
+    let span = super::profile::Span::begin();
+    let result = lookup_inner(index, text, mask, field_count);
+    super::profile::add_lookup(std::time::Duration::from_nanos(span.ns()));
+    result
+}
+
+fn lookup_inner<'a>(
+    index: &'a dyn Index,
+    text: &str,
+    mask: u16,
+    field_count: u8,
+) -> Result<Lookup<'a>, AdapterError> {
     if text.is_empty() {
         return Err(query_defect(KeyDefect::EmptyToken));
     }

@@ -4,7 +4,7 @@
 // See LICENSE in the repository root for license terms.
 
 use crate::bm25::Bm25Overrides;
-use crate::fields::{Lookup, all_fields_mask, fused_score, lookup, raw_tf_from_hits};
+use crate::fields::{Lookup, all_fields_mask, buckets_from_tfs, fused_score_from_buckets, lookup};
 use crate::highlight::{highlight_text, highlight_text_ansi, positions_from_query};
 use crate::score::{
     PRUNE_MAX_K, PrunedCandidates, VisibleTid, build_standalone_scorer, check_query_fields_on,
@@ -353,6 +353,15 @@ fn collect_fielded_terms(
     }
 }
 
+fn fielded_restricts_below_union(node: &FieldedNode) -> bool {
+    match node {
+        FieldedNode::And(children) => !children.is_empty(),
+        FieldedNode::Not(_) => true,
+        FieldedNode::Or { min, children } => *min >= 2 && !children.is_empty(),
+        _ => false,
+    }
+}
+
 fn fielded_needs_universe(node: &FieldedNode) -> bool {
     match node {
         FieldedNode::All | FieldedNode::Not(_) => true,
@@ -475,6 +484,20 @@ fn fielded_eval(
     b: Option<f32>,
     want_scores: bool,
 ) -> (BTreeSet<Tid>, FxHashMap<Tid, f32>) {
+    let eval_span = crate::fields::profile::Span::begin();
+    let result = fielded_eval_inner(index, query, fields, k1, b, want_scores);
+    crate::fields::profile::add_eval_fielded(std::time::Duration::from_nanos(eval_span.ns()));
+    result
+}
+
+fn fielded_eval_inner(
+    index: &PgRelation,
+    query: &str,
+    fields: &FieldMeta,
+    k1: Option<f32>,
+    b: Option<f32>,
+    want_scores: bool,
+) -> (BTreeSet<Tid>, FxHashMap<Tid, f32>) {
     let tokenizer = unsafe { crate::storage::index_tokenizer(index.as_ptr()) };
     let parsed = parse_tinql_to_query(query, tokenizer.as_ref()).unwrap_or_else(|error| {
         crate::operator::raise_query_error(&error, format!("Stannum score query error: {error}"))
@@ -487,6 +510,7 @@ fn fielded_eval(
     let default_mask = all_fields_mask(field_count);
     let mut keys = Vec::new();
     let root = compile_fielded(&parsed, &fields.names, default_mask, &mut keys);
+    let restrict = fielded_restricts_below_union(&root);
     let mut terms = Vec::new();
     if want_scores {
         // Membership and scoring share the structural parse. A scoring parse
@@ -504,6 +528,7 @@ fn fielded_eval(
     let mut postings: Vec<FxHashSet<Tid>> = vec![FxHashSet::default(); keys.len()];
     let mut scanned = vec![false; keys.len()];
     let mut scores: FxHashMap<Tid, f32> = FxHashMap::default();
+    let mut delayed_score = None;
 
     if want_scores {
         let defaults = unsafe { crate::options::bm25(index.as_ptr()) };
@@ -529,72 +554,25 @@ fn fielded_eval(
                 }
             }
         }
-        for ((source, _), (dead, norms)) in view
-            .sources
-            .iter()
-            .zip(view.dead_sets.iter().zip(view.field_norms.iter()))
-        {
-            let Some(norms) = norms else {
-                pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
-            };
-            let table = source
-                .doc_table()
-                .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-            for (term_index, term) in terms.iter().enumerate() {
-                let key = fielded_key_index(&keys, &term.text, term.mask);
-                let logical = match lookup(&**source, &term.text, term.mask, field_count) {
-                    Ok(Lookup::Term(logical)) => logical,
-                    Ok(Lookup::Terms(_) | Lookup::Overflow) => continue,
-                    Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
-                };
-                if logical.streams.is_empty() {
-                    scanned[key] = true;
-                    continue;
-                }
-                let mut cursor = logical
-                    .cursor()
-                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                let mut n = 0usize;
-                while let Some(ordinal) = cursor.current_ordinal() {
-                    interrupt_at(n);
-                    n += 1;
-                    if dead.contains(ordinal) {
-                        cursor
-                            .advance(ordinal.saturating_add(1))
-                            .unwrap_or_else(|error| {
-                                pgrx::error!("Stannum fielded cursor: {error}")
-                            });
-                        continue;
-                    }
-                    let tid = table
-                        .tid_at(ordinal)
-                        .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
-                    let hits = cursor
-                        .field_hits()
-                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                    let raw = raw_tf_from_hits(&hits, field_count);
-                    let lengths = norms.lengths(ordinal).unwrap_or_else(|| {
-                        pgrx::error!("stannum: STNF row missing for ordinal {ordinal}")
-                    });
-                    let score = fused_score(
-                        term.mask,
-                        &fields.weights,
-                        &raw,
-                        &lengths,
-                        &field_totals,
-                        total_docs,
-                        df[term_index],
-                        term.boost,
-                        params,
-                    );
-                    *scores.entry(tid).or_insert(0.0) += score;
-                    postings[key].insert(tid);
-                    cursor
-                        .advance(ordinal.saturating_add(1))
-                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
-                }
-                scanned[key] = true;
-            }
+        if restrict {
+            delayed_score = Some((params, total_docs, field_totals, df));
+        } else {
+            score_fielded_terms(
+                &view,
+                fields,
+                field_count,
+                &keys,
+                &terms,
+                params,
+                total_docs,
+                &field_totals,
+                &df,
+                &mut postings,
+                &mut scanned,
+                &mut scores,
+                None,
+                true,
+            );
         }
     }
 
@@ -612,6 +590,24 @@ fn fielded_eval(
         FxHashSet::default()
     };
     let members = eval_fielded(&root, &postings, &universe);
+    if let Some((params, total_docs, field_totals, df)) = delayed_score {
+        score_fielded_terms(
+            &view,
+            fields,
+            field_count,
+            &keys,
+            &terms,
+            params,
+            total_docs,
+            &field_totals,
+            &df,
+            &mut postings,
+            &mut scanned,
+            &mut scores,
+            Some(&members),
+            false,
+        );
+    }
     let mut member_set = BTreeSet::new();
     for (i, tid) in members.iter().copied().enumerate() {
         interrupt_at(i);
@@ -626,6 +622,109 @@ fn fielded_eval(
         out.insert(*tid, scores.get(tid).copied().unwrap_or(0.0));
     }
     (member_set, out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_fielded_terms(
+    view: &crate::storage::View,
+    fields: &FieldMeta,
+    field_count: u8,
+    keys: &[(String, u16)],
+    terms: &[FieldedTerm],
+    params: crate::bm25::Bm25Params,
+    total_docs: u64,
+    field_totals: &[u64],
+    df: &[u64],
+    postings: &mut [FxHashSet<Tid>],
+    scanned: &mut [bool],
+    scores: &mut FxHashMap<Tid, f32>,
+    only: Option<&FxHashSet<Tid>>,
+    fill_postings: bool,
+) {
+    for ((source, _), (dead, norms)) in view
+        .sources
+        .iter()
+        .zip(view.dead_sets.iter().zip(view.field_norms.iter()))
+    {
+        let Some(norms) = norms else {
+            pgrx::error!("stannum: multi-column index is missing the STNF field-norms trailer");
+        };
+        let table = source
+            .doc_table()
+            .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
+        for (term_index, term) in terms.iter().enumerate() {
+            let key = fielded_key_index(keys, &term.text, term.mask);
+            let logical = match lookup(&**source, &term.text, term.mask, field_count) {
+                Ok(Lookup::Term(logical)) => logical,
+                Ok(Lookup::Terms(_) | Lookup::Overflow) => continue,
+                Err(error) => pgrx::error!("Stannum fielded lookup: {error}"),
+            };
+            if logical.streams.is_empty() {
+                if fill_postings {
+                    scanned[key] = true;
+                }
+                continue;
+            }
+            let mut cursor = logical
+                .cursor()
+                .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+            let mut n = 0usize;
+            while let Some(ordinal) = cursor.current_ordinal() {
+                interrupt_at(n);
+                n += 1;
+                if dead.contains(ordinal) {
+                    cursor
+                        .advance(ordinal.saturating_add(1))
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                    continue;
+                }
+                let tid = table
+                    .tid_at(ordinal)
+                    .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
+                if fill_postings {
+                    postings[key].insert(tid);
+                    crate::fields::profile::add_hashset_insert();
+                }
+                if only.is_some_and(|members| !members.contains(&tid)) {
+                    cursor
+                        .advance(ordinal.saturating_add(1))
+                        .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                    continue;
+                }
+                crate::fields::profile::add_candidate();
+                let tfs = cursor
+                    .field_tfs()
+                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+                let buckets = buckets_from_tfs(&tfs, field_count);
+                let lengths = {
+                    let span = crate::fields::profile::Span::begin();
+                    let lengths = norms.lengths(ordinal).unwrap_or_else(|| {
+                        pgrx::error!("stannum: STNF row missing for ordinal {ordinal}")
+                    });
+                    crate::fields::profile::add_norms(std::time::Duration::from_nanos(span.ns()));
+                    lengths
+                };
+                let score = fused_score_from_buckets(
+                    term.mask,
+                    &fields.weights,
+                    &buckets,
+                    &lengths,
+                    field_totals,
+                    total_docs,
+                    df[term_index],
+                    term.boost,
+                    params,
+                );
+                *scores.entry(tid).or_insert(0.0) += score;
+                cursor
+                    .advance(ordinal.saturating_add(1))
+                    .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
+            }
+            if fill_postings {
+                scanned[key] = true;
+            }
+        }
+    }
 }
 
 fn collect_fielded_postings(
@@ -664,6 +763,7 @@ fn collect_fielded_postings(
                 .tid_at(ordinal)
                 .unwrap_or_else(|error| pgrx::error!("Stannum document table: {error}"));
             postings.insert(tid);
+            crate::fields::profile::add_hashset_insert();
             cursor
                 .advance(ordinal.saturating_add(1))
                 .unwrap_or_else(|error| pgrx::error!("Stannum fielded cursor: {error}"));
@@ -678,6 +778,7 @@ fn fielded_ranked_rows(
     k1: Option<f32>,
     b: Option<f32>,
 ) -> Vec<(f32, VisibleTid)> {
+    let _profile = crate::fields::profile::Session::begin(query, true, "multi");
     let scores = fielded_scores(index, query, fields, k1, b);
     let ranked_span = crate::fields::profile::Span::begin();
     let heap_oid = unsafe { pg_sys::IndexGetRelation(index.oid(), false) };
@@ -998,6 +1099,10 @@ pub(crate) fn search(
         );
         return TableIterator::new(rows);
     }
+    let _profile = crate::fields::profile::Session::begin(query, true, "single");
+    if crate::fields::profile::enabled() {
+        crate::score::reset_walk_blocks();
+    }
     let mut scorer = build_standalone_scorer(heap_oid, index_oid, query, k1, b);
     if limit == 0 {
         return TableIterator::new(Vec::new());
@@ -1024,6 +1129,12 @@ pub(crate) fn search(
         end_tag,
         rows,
     );
+    if crate::fields::profile::enabled() {
+        let (setup, walk) = crate::score::walk_blocks();
+        let positions = crate::score::position_reads().max(0) as u64;
+        let blocks = setup.saturating_add(walk).max(0) as u64;
+        crate::fields::profile::absorb_single_walk(positions, blocks);
+    }
     TableIterator::new(rows)
 }
 

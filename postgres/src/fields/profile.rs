@@ -4,8 +4,9 @@
 
 //! Optional per-query fielded-path counters. Off unless the backend sees
 //! `STANNUM_FIELDED_PROFILE` as a filesystem path; then one JSON line is
-//! appended per `fielded_eval`. Does not change answers, the BM25F formula,
-//! or on-disk layout. Removable: delete this module and its call sites.
+//! appended per ranked `search()` (multi or single arm). Does not change
+//! answers, the BM25F formula, or on-disk layout. Removable: delete this
+//! module and its call sites.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -16,6 +17,8 @@ use serde::Serialize;
 
 #[derive(Default, Clone, Serialize)]
 pub(crate) struct Counters {
+    pub schema: &'static str,
+    pub arm: String,
     pub query: String,
     pub want_scores: bool,
     pub cursor_open_ns: u64,
@@ -41,7 +44,16 @@ pub(crate) struct Counters {
     pub candidates: u64,
     pub hashset_inserts: u64,
     pub field_hit_allocs: u64,
+    pub bucket_ns: u64,
+    pub bucket_count: u64,
+    pub norms_ns: u64,
+    pub norms_count: u64,
+    pub walk_blocks: u64,
+    pub blocks_skipped: u64,
+    pub cpu_ns: u64,
     pub total_ns: u64,
+    pub exclusive_ns: u64,
+    pub unaccounted_ns: i64,
 }
 
 fn sink() -> Option<&'static PathBuf> {
@@ -62,34 +74,10 @@ pub(crate) fn enabled() -> bool {
 }
 
 thread_local! {
-    static COUNTERS: RefCell<Counters> = const { RefCell::new(Counters {
-        query: String::new(),
-        want_scores: false,
-        cursor_open_ns: 0,
-        cursor_open_count: 0,
-        advance_ns: 0,
-        advance_count: 0,
-        rewind_seek_ns: 0,
-        peek_successor_ns: 0,
-        peek_successor_count: 0,
-        field_hits_ns: 0,
-        field_hits_count: 0,
-        payload_get_ns: 0,
-        payload_get_count: 0,
-        payload_positions: 0,
-        channel_open_ns: 0,
-        channel_open_count: 0,
-        lookup_ns: 0,
-        lookup_count: 0,
-        fused_score_ns: 0,
-        scoring_passes: 0,
-        eval_fielded_ns: 0,
-        ranked_ns: 0,
-        candidates: 0,
-        hashset_inserts: 0,
-        field_hit_allocs: 0,
-        total_ns: 0,
-    }) };
+    static COUNTERS: RefCell<Counters> = RefCell::new(Counters {
+        schema: "stn4-query-profile-v2",
+        ..Counters::default()
+    });
 }
 
 pub(crate) struct Span {
@@ -112,53 +100,64 @@ impl Span {
     }
 }
 
+/// One ranked `search()` sample. Drop flushes one JSON line.
+pub(crate) struct Session {
+    live: bool,
+    cpu_start_ns: u64,
+    wall: Option<Instant>,
+}
+
+impl Session {
+    pub(crate) fn begin(query: &str, want_scores: bool, arm: &str) -> Self {
+        if !enabled() {
+            return Self {
+                live: false,
+                cpu_start_ns: 0,
+                wall: None,
+            };
+        }
+        reset(query, want_scores, arm);
+        Self {
+            live: true,
+            cpu_start_ns: cpu_ns(),
+            wall: Some(Instant::now()),
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if !self.live {
+            return;
+        }
+        if let Some(wall) = self.wall {
+            set_total(wall.elapsed());
+        }
+        add_cpu(cpu_ns().saturating_sub(self.cpu_start_ns));
+        reconcile();
+        flush();
+    }
+}
+
 #[inline]
 fn add(ns: u64, write: impl FnOnce(&mut Counters, u64)) {
-    if ns == 0 && !enabled() {
-        return;
-    }
     if !enabled() {
         return;
     }
     COUNTERS.with(|cell| write(&mut cell.borrow_mut(), ns));
 }
 
-pub(crate) fn reset(query: &str, want_scores: bool) {
+pub(crate) fn reset(query: &str, want_scores: bool, arm: &str) {
     if !enabled() {
         return;
     }
     COUNTERS.with(|cell| {
         *cell.borrow_mut() = Counters {
+            schema: "stn4-query-profile-v2",
+            arm: arm.to_owned(),
             query: query.to_owned(),
             want_scores,
-            ..Counters {
-                query: String::new(),
-                want_scores: false,
-                cursor_open_ns: 0,
-                cursor_open_count: 0,
-                advance_ns: 0,
-                advance_count: 0,
-                rewind_seek_ns: 0,
-                peek_successor_ns: 0,
-                peek_successor_count: 0,
-                field_hits_ns: 0,
-                field_hits_count: 0,
-                payload_get_ns: 0,
-                payload_get_count: 0,
-                payload_positions: 0,
-                channel_open_ns: 0,
-                channel_open_count: 0,
-                lookup_ns: 0,
-                lookup_count: 0,
-                fused_score_ns: 0,
-                scoring_passes: 0,
-                eval_fielded_ns: 0,
-                ranked_ns: 0,
-                candidates: 0,
-                hashset_inserts: 0,
-                field_hit_allocs: 0,
-                total_ns: 0,
-            }
+            ..Counters::default()
         };
     });
 }
@@ -239,6 +238,30 @@ pub(crate) fn add_ranked(d: Duration) {
     });
 }
 
+pub(crate) fn add_bucket(d: Duration) {
+    add(nanos(d), |c, ns| {
+        c.bucket_ns = c.bucket_ns.saturating_add(ns);
+        c.bucket_count = c.bucket_count.saturating_add(1);
+    });
+}
+
+pub(crate) fn add_norms(d: Duration) {
+    add(nanos(d), |c, ns| {
+        c.norms_ns = c.norms_ns.saturating_add(ns);
+        c.norms_count = c.norms_count.saturating_add(1);
+    });
+}
+
+pub(crate) fn add_blocks_skipped(n: u64) {
+    if n == 0 || !enabled() {
+        return;
+    }
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        c.blocks_skipped = c.blocks_skipped.saturating_add(n);
+    });
+}
+
 pub(crate) fn add_candidate() {
     if !enabled() {
         return;
@@ -259,13 +282,51 @@ pub(crate) fn add_hashset_insert() {
     });
 }
 
+/// Single-column comparable probes: phrase position reads and WAND walk pages.
+pub(crate) fn absorb_single_walk(position_reads: u64, walk_blocks: u64) {
+    if !enabled() {
+        return;
+    }
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        c.payload_positions = c.payload_positions.saturating_add(position_reads);
+        c.walk_blocks = walk_blocks;
+    });
+}
+
 pub(crate) fn set_total(d: Duration) {
     add(nanos(d), |c, ns| {
         c.total_ns = ns;
     });
 }
 
-pub(crate) fn flush() {
+fn add_cpu(ns: u64) {
+    add(ns, |c, ns| {
+        c.cpu_ns = ns;
+    });
+}
+
+fn reconcile() {
+    COUNTERS.with(|cell| {
+        let mut c = cell.borrow_mut();
+        // Innermost exclusive work: nested parents (advance/field_hits/cursor_open/
+        // eval_fielded) are omitted so the sum is not double-counted.
+        let exclusive = c
+            .rewind_seek_ns
+            .saturating_add(c.peek_successor_ns)
+            .saturating_add(c.payload_get_ns)
+            .saturating_add(c.fused_score_ns)
+            .saturating_add(c.lookup_ns)
+            .saturating_add(c.channel_open_ns)
+            .saturating_add(c.ranked_ns)
+            .saturating_add(c.bucket_ns)
+            .saturating_add(c.norms_ns);
+        c.exclusive_ns = exclusive;
+        c.unaccounted_ns = c.total_ns as i64 - exclusive as i64;
+    });
+}
+
+fn flush() {
     let Some(path) = sink() else {
         return;
     };
@@ -286,4 +347,20 @@ pub(crate) fn flush() {
 #[inline]
 fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn cpu_ns() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let ok = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if ok != 0 {
+        return 0;
+    }
+    let usage = unsafe { usage.assume_init() };
+    timeval_ns(usage.ru_utime).saturating_add(timeval_ns(usage.ru_stime))
+}
+
+fn timeval_ns(tv: libc::timeval) -> u64 {
+    (tv.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add((tv.tv_usec as u64).saturating_mul(1_000))
 }

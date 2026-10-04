@@ -120,6 +120,13 @@ struct TermReader {
 impl TermReader {
     /// The term-frequency bucket of `ordinal`, if the term lists it.
     fn bucket(&mut self, ordinal: u32, label: &str) -> Option<u8> {
+        let span = crate::fields::profile::Span::begin();
+        let bucket = self.bucket_inner(ordinal, label);
+        crate::fields::profile::add_bucket(std::time::Duration::from_nanos(span.ns()));
+        bucket
+    }
+
+    fn bucket_inner(&mut self, ordinal: u32, label: &str) -> Option<u8> {
         if self.exhausted_at.is_some_and(|at| ordinal >= at) {
             return None;
         }
@@ -573,6 +580,7 @@ impl IndexScorer {
                 });
                 total += scorer.score_bucket(bucket, length);
             }
+            crate::fields::profile::add_candidate();
             return Some(total);
         }
         None

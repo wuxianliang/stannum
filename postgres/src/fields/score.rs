@@ -7,7 +7,7 @@
 use crate::bm25::{Bm25Params, bm25_idf};
 use crate::tf_bucket::TfBucket;
 
-use super::cursor::FieldHit;
+use super::cursor::{FieldHit, FieldTf};
 
 /// Unscoped mask: every field. `field_count == 16` is `u16::MAX` because
 /// `1u16 << 16` does not fit.
@@ -56,6 +56,44 @@ pub(crate) fn raw_tf_from_hits(hits: &[FieldHit], field_count: u8) -> Vec<Option
         }
     }
     slots
+}
+
+/// Per-field stored buckets from ordinal streams. Equal to
+/// `TfBucket::from_count(positions.len())` on a well-formed posting.
+#[must_use]
+pub(crate) fn buckets_from_tfs(tfs: &[FieldTf], field_count: u8) -> Vec<Option<u8>> {
+    let n = usize::from(field_count.min(16));
+    let mut slots = vec![None; n];
+    for tf in tfs {
+        let field = usize::from(tf.field);
+        if field < n {
+            slots[field] = Some(tf.bucket);
+        }
+    }
+    slots
+}
+
+/// `tf*` from stored buckets: `w_f · representative_count(bucket_f)`.
+/// Bit-identical to [`fused_tf`] when each bucket is `from_count(raw_tf_f)`.
+#[must_use]
+pub(crate) fn fused_tf_from_buckets(mask: u16, weights: &[f32], buckets: &[Option<u8>]) -> f32 {
+    debug_assert_eq!(weights.len(), buckets.len());
+    debug_assert!(weights.len() <= 16);
+    let mut tf_star = 0.0_f32;
+    let n = weights.len().min(buckets.len()).min(16);
+    for field in 0..n {
+        if mask & (1u16 << field) == 0 {
+            continue;
+        }
+        let Some(value) = buckets[field] else {
+            continue;
+        };
+        let Some(bucket) = TfBucket::new(value) else {
+            continue;
+        };
+        tf_star += weights[field] * (bucket.representative_count() as f32);
+    }
+    tf_star
 }
 
 /// `len*` = Σ_{all index fields} w_f · length_f, exact u32, left-to-right f32.
@@ -138,17 +176,54 @@ pub(crate) fn fused_score(
     debug_assert_eq!(weights.len(), lengths.len());
     debug_assert_eq!(weights.len(), field_totals.len());
     debug_assert!(weights.len() <= 16);
+    let span = super::profile::Span::begin();
     let tf_star = fused_tf(mask, weights, raw_tf);
     let len_star = fused_len(weights, lengths);
     let avgdl_star = fused_avgdl(weights, field_totals, total_docs);
-    saturate(
+    let score = saturate(
         tf_star,
         len_star,
         avgdl_star,
         fused_idf(total_docs, df_agg),
         boost,
         params,
-    )
+    );
+    super::profile::add_fused_score(std::time::Duration::from_nanos(span.ns()));
+    score
+}
+
+/// Same saturate as [`fused_score`], with `tf*` from stored field buckets.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fused_score_from_buckets(
+    mask: u16,
+    weights: &[f32],
+    buckets: &[Option<u8>],
+    lengths: &[u32],
+    field_totals: &[u64],
+    total_docs: u64,
+    df_agg: u64,
+    boost: f32,
+    params: Bm25Params,
+) -> f32 {
+    debug_assert_eq!(weights.len(), buckets.len());
+    debug_assert_eq!(weights.len(), lengths.len());
+    debug_assert_eq!(weights.len(), field_totals.len());
+    debug_assert!(weights.len() <= 16);
+    let span = super::profile::Span::begin();
+    let tf_star = fused_tf_from_buckets(mask, weights, buckets);
+    let len_star = fused_len(weights, lengths);
+    let avgdl_star = fused_avgdl(weights, field_totals, total_docs);
+    let score = saturate(
+        tf_star,
+        len_star,
+        avgdl_star,
+        fused_idf(total_docs, df_agg),
+        boost,
+        params,
+    );
+    super::profile::add_fused_score(std::time::Duration::from_nanos(span.ns()));
+    score
 }
 
 /// Multi-column score from a parent dictionary entry. Unpacks `channels()`;
@@ -184,12 +259,12 @@ pub(crate) fn fused_score_from_term(
     if cursor.current_ordinal() != Some(ordinal) {
         return Ok(0.0);
     }
-    let hits = cursor.field_hits()?;
-    let raw = raw_tf_from_hits(&hits, field_count);
-    Ok(fused_score(
+    let tfs = cursor.field_tfs()?;
+    let buckets = buckets_from_tfs(&tfs, field_count);
+    Ok(fused_score_from_buckets(
         mask,
         weights,
-        &raw,
+        &buckets,
         lengths,
         field_totals,
         total_docs,
@@ -376,6 +451,22 @@ mod tests {
     }
 
     #[test]
+    fn stored_bucket_tf_star_matches_from_count_of_raw_tf() {
+        let weights = [1.0_f32, 2.0];
+        let mask = 0b11;
+        for raw in 1..=400u32 {
+            let stored = TfBucket::from_count(raw).value();
+            let from_raw = fused_tf(mask, &weights, &[Some(raw), None]);
+            let from_bucket = fused_tf_from_buckets(mask, &weights, &[Some(stored), None]);
+            assert_eq!(
+                from_raw.to_bits(),
+                from_bucket.to_bits(),
+                "raw tf {raw} stored bucket {stored}"
+            );
+        }
+    }
+
+    #[test]
     fn fused_tf_reads_position_count_not_the_stored_bucket() {
         let positions = vec![10_u32, 20, 30, 40];
         assert_eq!(positions.len(), 4);
@@ -505,12 +596,12 @@ mod tests {
         let mut cursor = term.cursor().unwrap();
         let mut ranked = Vec::new();
         while let Some(ordinal) = cursor.current_ordinal() {
-            let hits = cursor.field_hits().unwrap();
-            let raw = raw_tf_from_hits(&hits, field_count);
-            let score = fused_score(
+            let tfs = cursor.field_tfs().unwrap();
+            let buckets = buckets_from_tfs(&tfs, field_count);
+            let score = fused_score_from_buckets(
                 term.mask,
                 weights,
-                &raw,
+                &buckets,
                 &lengths_by_ordinal[ordinal as usize],
                 field_totals,
                 total_docs,
