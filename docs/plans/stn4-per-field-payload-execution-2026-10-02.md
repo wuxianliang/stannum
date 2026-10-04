@@ -67,6 +67,24 @@ numbering. Phases 0–3 and 4.1–4.6 on `stn3` stay done.
 - **Gates are tests, not opinions.** Every phase ends in a suite that runs in
   CI. A step whose gate is red after two fix rounds escalates to the human
   with the failing evidence — it does not get re-rolled until green by luck.
+- **Interrupt boundary rule** (adopted 2026-10-04 after C.2 and C.3 each hit a
+  CI-only link failure). Plain Rust `#[test]` code must never transitively
+  reach `pgrx::check_for_interrupts!` or another PostgreSQL-global-dependent
+  interrupt implementation: the macro expands to inline code reading
+  PostgreSQL's `InterruptPending` **data** symbol, which the plain test binary
+  cannot resolve on Linux (macOS binds lazily, so only CI sees it). Every
+  long-running retrieval, expansion, and positional algorithm must accept an
+  explicit progress/interrupt hook; PostgreSQL entry points supply the
+  production hook, plain unit tests supply a no-op or counting hook, and the
+  hook is invoked at bounded work intervals **including** skip / dead-entry /
+  no-match loops. Runtime flags are not link isolation, and blanket
+  `cfg(test)` suppression must not disable cancellation in PostgreSQL-backed
+  tests. Validate both the Linux plain-test link and the PostgreSQL-backed
+  cancellation behavior on PG18. Existing model: `fields/intersect.rs`
+  (`Intersect` / `Front`). Do not bury a default PostgreSQL interrupt call
+  inside a supposedly pure walker. Verify with `nm -u`: the plain test binary
+  must have **0** `InterruptPending` references while the release `.so` keeps
+  at least **1**.
 - **Never edit:** `contract/expected/**` (except by the pinned recording job),
   released `postgres/sql/stannum--*--*.sql` scripts, upstream files outside
   the owned-shim list (parent design §3). Weakening any gate, `contract/`
@@ -620,7 +638,7 @@ D.\* after C.2. E.1 may already have started after A.4.
   - Provenance caveat (recorded, not hand-fixed): `boolean.json`'s `source.extension_commit` is the suite repo's `postgres/` HEAD, not the producer commit; the runner only checks `engine`/`extension_version` on merge.
   - Review focus: design §9; the zero-boolean-coverage hole that let the defect live.
 
-- [ ] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
+- [x] **C.3 Dead codec** — scope includes: delete `fields/codec.rs`, encoded-key
   exports and fixtures, **AND the STNF-v1 df-sidecar query reader +
   query-facing `DfEntry` APIs**; retain only the isolated STNF-v1 trailer
   parser needed for `ValidV1`/`StaleFielded` classification. Done when:
@@ -650,6 +668,26 @@ D.\* after C.2. E.1 may already have started after A.4.
     - `script/test-all quick` green; `cargo test -p stannum --lib fields`
       green; workspace tests green.
   - Review focus: design §7 Replace (`codec.rs`), §8 C.3.
+  - Result (**code @ 7fdee28**, box checked separately): codec deleted along
+    with `KeyDefect` / `ReportMode` / `FieldKeyError` / `query_defect` and the
+    STNF-v1 df-sidecar query reader; `query_total_df` now sums parent
+    `TermEntry.df`; `segment/src/trailer.rs::inspect_stored_term` and
+    `postgres/src/storage/buffer_label.rs::legacy_fielded_key_shape` retained;
+    `merge_still_rejects_legacy_v1_encoded_term_segments` still rejects a v1
+    encoded-term segment; `header` renamed `blob_header` and
+    `reject_fielded_keys_without_trailer` renamed
+    `reject_legacy_encoded_terms_without_trailer` so the remaining decoder is
+    not read as an encoder counterpart. Oracle review in the controller's
+    session (twice) produced 1 P0 + 3 P1, all repaired: empty lookup text keeps
+    its 0.4.0 query diagnostic instead of being reported as corrupt index data;
+    the intersect-WAND tests' "exhaustive" side no longer descends from
+    `drain_boolean`; each child's bound is the raw `fused_interval_bound` with
+    no `exact_at(pivot)` floor; pruning walks per interval with proven
+    multi-ordinal skips and a best document after a pruned boundary; the
+    interval walk is asserted to partition the candidate set. Three named
+    mutation proofs plus a fourth (overlapping interval) are recorded in the
+    loop log. Census **6 FAIL / 4 GAP / 44 PASS** on PG18.4 release build —
+    see the ledger row and the two census-measurement rules added this step.
 
 - [ ] **C.4 pgembed checkpoint (STN4 representation wheel)**
   - Goal: after C.2 green, pin a STN4-capable commit and prove the wheel
@@ -666,9 +704,170 @@ D.\* after C.2. E.1 may already have started after A.4.
     full official suite.
 
 **Phase gate PC** (normative: design §2 acceptance, §5, §8 C.1–C.2): smoke
-bits match 0.4.0 on STN4 indexes; census is again 5 FAIL / 2 GAP / 32 PASS;
-mandatory 1.8× holds on both corpora; p50 holds or carries a named waiver in
-the JSON. D.\* and the D.5 wheel do not waive this gate.
+bits match 0.4.0 on STN4 indexes; the census returns to the pre-STN4 shape
+(`5 FAIL / 2 GAP / 32 PASS` was the 39-case 4.5 baseline; the boolean suite
+added later brings the suite to 54, so the gate is the accounting rule in the
+adjudication section, not a stale denominator); mandatory 1.8× holds on both
+corpora; p50 holds or carries a named waiver in the JSON. D.\* and the D.5
+wheel do not waive this gate.
+
+---
+
+## Oracle adjudications — Phase D and Phase E (2026-10-04)
+
+The oracle adjudicated the owner-decision items before Phase D starts. These
+are binding on every step below; a step that contradicts one of them is out of
+spec and stops for a re-adjudication.
+
+**Positional semantics have a clear authority order. Adopt design §4 as
+normative:**
+
+> On a multi-column index, a phrase or positional expression is evaluated
+> wholly within one field. An unscoped positional expression matches if at
+> least one eligible field satisfies that expression; a field-scoped
+> expression evaluates only its selected field. Positions or intervals from
+> different fields never combine to satisfy a phrase, NEAR, or THEN
+> expression.
+
+This does **not** turn ordinary unscoped boolean conjunction into same-field
+conjunction: the any-field retrieval rule remains in force for its leaves.
+
+| item | decision | required 0.5.0 behavior |
+|-------|----------|-------------------------|
+| `fields.patterns` | **ADOPT baseline compatibility; REJECT permanent multi-column rejection** | implement each supported wildcard, prefix, regex, fuzzy, and range expansion on a multi-column index with the baseline's matching and expansion-limit behavior. Implementing prefixes alone does not satisfy the case. |
+| `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term` | **REJECT rejection as the finished semantic** | expand and evaluate inside the boolean tree; convert both GAPs into executable assertions. Loud rejection is appropriate only while incomplete. |
+| `fields.boolean_duplicate_leaf` | **REJECT the 2× divergence; restore baseline folding** | `alpha AND alpha` must preserve the baseline membership and score. Restore the normalization / scoring-term fold — *not* indiscriminate token deduplication, which would break repeated phrase terms and differently boosted clauses. The plan's earlier "documented single-column divergence" framing of this case is withdrawn. |
+| `catalog.functions` | **ADOPT the existing GAP; owner E.2** | controller-measured on PG18.4 against the **release** build: live 42 vs recorded 41 functions, **lost = 0**, and the single gain is `capabilities()` — exactly what `contract/divergences/stannum.yaml` already documents. The divergence entry is **correct as written and needs no change**. E.2's remaining work is to verify `capabilities()` visibility/privileges. **Do not** widen it: `corrupt_index_page()` and `index_page_kinds()` are `#[cfg(feature = "pg_test")]`-only UDFs (`postgres/src/udfs.rs` 423/437) that exist **only in a test build** — they appear in the catalog only if the census is run against the extension `cargo pgrx test` installed, which is a measurement error, not an addition. |
+| `catalog.gucs` | **DEFER-WITH-OWNER: E.2** | a GAP establishes neither compatibility nor intentional drift. E.2 must inventory and classify names, types, defaults, contexts, and behavior before any divergence is granted. |
+
+**Corrected census gate.** The D.4 done-when text `0 FAIL / 2 GAP / 37 PASS`
+is **REJECTED**: it accounts for 39 cases while the suite holds 54, and an
+obsolete denominator must not become permission to omit coverage. The gate is
+accounting-based instead:
+
+- every current case is accounted for;
+- zero *unapproved* failures;
+- every remaining GAP is named, explained, and owned;
+- an intentional difference is an executable, narrowly scoped exception — not
+  prose beside a raw failure.
+
+With the six current FAILs resolved and both regex GAPs converted to passing
+assertions (Phase D.1 + D.2), the unchanged suite reads **0 FAIL / 2 GAP /
+52 PASS** — the two remaining GAPs being `catalog.functions` (already correctly
+documented; E.2 only verifies `capabilities()` visibility) and `catalog.gucs`
+(E.2 must classify before granting or closing it). If E.2 resolves
+`catalog.gucs`, the end state is **0 FAIL / 1 GAP / 53 PASS**.
+
+**Two census-measurement rules that a controller got wrong once (2026-10-04).**
+Both were caught and corrected by re-measuring; they are now discipline:
+
+1. **The census runs against the release build, on PostgreSQL 18, with the
+   pgembed prefix's `bin` first on PATH.** `initdb` / `pg_ctl` / `psql` on the
+   default PATH are Homebrew's PostgreSQL **17.11**, whose prefix also holds a
+   **stale** `stannum.dylib` from an earlier `cargo pgrx test` run. Starting a
+   scratch server without prefixing PATH silently measures PG17.11 against that
+   stale build. Correct form:
+   `PATH=/Users/wxl/Projects/pgembed/src/pgembed/pginstall/bin:$PATH` for the
+   server, and `cargo pgrx install --release --package stannum
+   --no-default-features --features pg18 --pg-config <that prefix>/bin/pg_config`
+   first. Two visible symptoms of getting it wrong: `calls.stop_words` and
+   `catalog.functions` change answer, and the pg_test-only UDFs
+   `corrupt_index_page()` / `index_page_kinds()` appear in the catalog.
+2. **Never mix builds or majors inside one measurement.** The controller ran
+   one census on PG17.11 against a stale `pg_test` build and read it as PG18.4;
+   the corrected PG18.4 release-build reading is **6 FAIL / 4 GAP / 44 PASS**
+   (FAIL: `fields.boolean_duplicate_leaf`, `fields.phrase_no_cross`,
+   `fields.phrase_scoped`, `fields.then_no_cross`, `fields.near_no_cross`,
+   `fields.patterns`; GAP: `catalog.functions`, `catalog.gucs`,
+   `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term`).
+   The *only* legitimate PG17.11 readings are the explicitly labelled C.2-R
+   control rows in the census ledger.
+
+**Planner fallbacks.** Correctness is release-critical; not every optimization
+is. Release-critical for E.5: heap/sequential evaluation of supported scoped
+queries (must apply field identity, tokenizer configuration, boolean
+semantics, and same-field positional rules), bitmap execution / recheck
+(recheck exact; candidate generation must have no false negatives), and
+ranked/custom-scan scope and pruning (membership, scores, ordering, and
+conservative pruning bounds preserved). Deferrable by D.4 with a documented,
+tested fallback: a specialized bitmap or other accelerated path, and
+scope-specific cost/selectivity refinement (only legality: estimates affect
+plan choice, never the answer). An accepted limitation may say *"scoped query
+shape X currently uses validated fallback plan Y rather than accelerated path
+Z; query semantics are unchanged"* — it may not say the fallback drops scope
+or that a previously supported query now errors. Both plan modes must assert
+the observed plan **and** the result; planner GUCs alone do not prove which
+executor ran.
+
+**C.3's residual P1 has an owner: D.4.** The second oracle review of the
+repaired C.3 tree found **no P0** and one P1 — the intersect-WAND harness pins
+`next_conjunction`, `next_atleast`, `fused_interval_bound` and
+`next_interval_end`, but *not* a production boolean-WAND orchestration loop,
+because **that loop does not exist yet**: `postgres/src/search.rs`
+`fielded_eval_inner` walks the intersection and scores every candidate, and
+`fielded_visible_ranked` heap-selects already-scored rows, so the bound
+machinery this harness pins is the design §5.1 / plan-4.4 foundation rather
+than live code. The narrow fix it offered — drive the production routine or add
+a seam asserting interval monotonicity, disjoint skips, next-pivot-after-skip
+and point-bound ≤ interval-bound — is therefore assigned to **D.4**, whose
+done-when already makes ranked/custom-scan scope and pruning release-critical.
+When D.4 lands the production fused-WAND walk, this harness becomes its
+reference oracle and a production-pinned test is required. C.3's own scope
+closed what was closable: the candidate set, the raw bound, and interval
+skipping are all pinned, with three named mutation proofs.
+
+Also settled by that review and recorded as test comments in `bound.rs` /
+`error.rs`: summing per-child interval bounds is a valid upper bound because
+each child's `fused_interval_bound(start, end)` bounds that child's
+contribution, an absent child contributes `0.0`, and looseness costs pruning
+efficiency only (an unsafe `max()` aggregation when several children
+contribute positively is caught by the existing per-candidate
+`exact <= bound` assertion). Its precondition is nonnegativity, enforced at
+`tinql/src/parser/descent.rs` `boost_suffix`
+(`!(0.0..=BoostFactor::MAX).contains(&factor)`) for query boosts and at
+`postgres/src/storage/mod.rs::apply_field_weights`
+(`!weight.is_finite() || weight <= 0.0`) for index weights — negative boosts
+are not legal input, so no negative-boost regression test is warranted. And
+`AdapterError::EmptyToken`'s display text `malformed fielded term key: decoded
+token is empty` is **frozen API text** retained for 0.4.0 query-diagnostic
+compatibility, not leftover codec terminology to clean up later.
+
+**Upgrade policy for 0.5.0.** Supported through E.1's migration route:
+released 0.4.0 single-column **and** multi-column indexes — codec cleanup
+cannot retroactively classify released indexes as unsupported development
+artifacts. STN4-development v1 indexes: **REJECT** LSG migration, require an
+actionable rebuild error. 0.1.0 / STN3-development fielded-term indexes:
+rebuild-only; do not promise direct migration on current evidence. Other
+older, unknown, or malformed formats: **REJECT** heuristic migration — add
+support only with an explicit classifier, converter, and fixture. Generation
+is determined by validated storage metadata / tags, **not** by whether a token
+resembles `~0~foo`; legacy term decoding may still be needed *after*
+positively selecting an authorized legacy migration path, so deleting the
+production codec does not prove migration needs no reader. The E.1 REINDEX
+runbook must guarantee: which formats migrate vs rebuild with actionable
+errors; that supported rebuild DDL rebuilds from the heap without first
+successfully scanning the rejected format; full preservation of the index
+definition (columns/order, expressions/predicates, tokenizer/dictionary
+configuration, field weights, reloptions); the stated and tested
+update/restart/REINDEX ordering on PG18; post-rebuild verification of
+membership, ranking, field scopes, positional behavior, and integrity; and
+that an interrupted rebuild publishes no partial index and loses no heap data
+(`REINDEX CONCURRENTLY` only if tested).
+
+**Implementation order: keep `D.1 → D.2 → D.3 → D.4 → D.5`.** There is no
+cheaper reordering justified by the dependency graph — D.2 would otherwise
+invent temporary scope handling that D.1 must replace. The cheaper schedule is
+to prepare D.2's independent fixtures and D.4's plan matrix *while* D.1 lands.
+Oracle review focus per step: **D.1** scope survives normalization and boolean
+composition, unknown fields fail deterministically, no ad hoc query-string
+rewriting; **D.2** no cross-field intervals, scoped expressions open only
+eligible channels, expansions preserve boolean structure, independent
+exhaustive results agree with production walking/pruning; **D.3** no
+wrong-field highlights, no offset confusion, no snippet change to
+membership/ranking, repeated terms and multibyte text correct; **D.4**
+observed-plan coverage, correct fallbacks, ranking consistency, complete
+census accounting, `script/test-all full` on PG18; **D.5** its own checklist
+and final evidence, not inferred from D.4.
 
 ---
 
@@ -686,11 +885,36 @@ channels (design §4).
     `scope_scan_query`); `postgres/src/operator.rs`
     (`check_clause_field_scope` error texts); single-column “field syntax
     requires a multi-column index” rule.
+  - Controller root-cause note (2026-10-04, proven against 0.4.0 at
+    `/tmp/stannum-main-46` @ `7ab511b`): `fields.boolean_duplicate_leaf`
+    `flat_ranked` doubles because `postgres/src/score.rs` scores from
+    `parse_tinql_to_scoring_query`, which lowers with
+    `SimplificationProfile::StructuralScoring` — a profile that keeps repeated
+    flat AND/OR terms so each occurrence adds its boost. **That variant does not
+    exist in 0.4.0**: 0.4.0's `score.rs` used `parse_tinql_to_query` (the
+    `Structural`, deduplicating profile) for every scoring path, and 0.4.0 had
+    no `parse_tinql_to_scoring_query` at all. It arrived with the STN3 dev line.
+    `bool_multi` already matches 0.4.0 bit-exact because the fielded path
+    composes the deduplicated structural query. No conformance case pins the
+    duplicate-boost behavior (the only corpus containing a repeated term is
+    `catalog.scoring.yaml` `cat_s17`'s `[2, a a b]`, queried with the single-term
+    `==> 'a'`). Check which of the three `parse_tinql_to_scoring_query` call
+    sites in `postgres/src/score.rs` (4786, 5023, 5434) sit on the `search()` /
+    `score()` path; phrase and boost-dependent callers keep
+    `StructuralPreserveTermMultiplicity`.
   - Done when: Appendix A operator cases green —
     `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0 --area fields`
     no longer FAILs on scope plumbing (phrase/span may still FAIL until
     D.2). `script/pgrx-lock.py -- cargo pgrx test pg18 -p stannum` green.
-  - Review focus: design §4 field-scoped queries; parent Appendix A.
+    **Also D.1's** (per the 2026-10-04 adjudication): restore the
+    duplicate-clause fold in `postgres/src/score.rs` so `alpha AND alpha` on a
+    single-column index keeps 0.4.0 membership and score — 0.5.0 currently
+    scores it 2× because scoring terms come from a duplicate-preserving parse
+    where 0.4.0 saw the folded structural list. Fold duplicates only; do **not**
+    deduplicate tokens outright (repeated phrase terms and differently boosted
+    clauses depend on them). `fields.boolean_duplicate_leaf` must go PASS and
+    the `contract/divergences/stannum.yaml` entry removed.
+  - Review focus: design §4 field-scoped queries; parent Appendix A;
 
 - [ ] **D.2 Same-field phrases + spans**
   - Goal: unscoped phrase = OR of per-field bindings (never cross-field
@@ -703,7 +927,19 @@ channels (design §4).
   - Done when:
     - `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0 --case fields.phrase_no_cross --case fields.phrase_scoped --case fields.then_no_cross --case fields.near_no_cross --case fields.patterns`
       : **0 FAIL** (match 0.4.0 recordings).
-  - Review focus: design §4 phrases/spans.
+    - Per the 2026-10-04 adjudication, `fields.patterns` means **every**
+      expansion shape on a multi-column index — unscoped wildcard, wildcard,
+      regex, fuzzy, and range — with the baseline's matching and
+      expansion-limit behavior. Prefixes alone do not satisfy this case.
+    - `fields.boolean_regex_on_multi` and `fields.boolean_mixed_regex_and_term`
+      go **PASS** and their `contract/divergences/stannum.yaml` GAP entries are
+      converted into executable assertions (rejection was a safety measure while
+      incomplete, never the release contract).
+    - If a recorded answer genuinely contradicts design §4's positional rule,
+      stop and get a case-specific positional divergence adjudicated — do not
+      concatenate positions to reproduce it and never rewrite a frozen
+      recording.
+  - Review focus: design §4 phrases/spans;
 
 - [ ] **D.3 Field-aware highlights + snippets**
   - Goal: 5-arg/bound forms with field; wrapper-field / no-mark / first-mark
@@ -727,10 +963,19 @@ channels (design §4).
     `clause_estimate` unscoped — close the Phase-5 checklist from STN3 2.2).
     Un-ignore title/body `#[ignore]` tests from 2.2.
   - Done when: every Appendix A fixture green on both plan modes.
-    Full census: **0 FAIL / 2 GAP / 37 PASS** (the five former FAILs are
-    PASS; GAPs unchanged) —
-    `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0`
-    exits 0. `script/test-all full` green on PG18.
+    Full census accounting gate (the `0 FAIL / 2 GAP / 37 PASS` text is
+    **withdrawn** — it counted a 39-case suite; see the adjudication section):
+    every current case accounted, zero unapproved failures, every remaining GAP
+    named / explained / owned, intentional differences executable and narrowly
+    scoped. Expected end state: **0 FAIL / 2 GAP / 52 PASS** — GAP
+    `catalog.functions` (already correctly documented) and `catalog.gucs`
+    (E.2 must classify it); **0 FAIL / 1 GAP / 53 PASS** if E.2 closes
+    `catalog.gucs` —
+    `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0`.
+    Both plan modes assert the observed plan **and** the result. A deferred
+    acceleration ships only with a tested fallback and a divergence entry that
+    says plan Z is unavailable for shape X, never that the fallback drops scope.
+    `script/test-all full` green on PG18.
   - Review focus: design §4 planner widening; parent Appendix A.
 
 - [ ] **D.5 pgembed checkpoint**
@@ -992,6 +1237,7 @@ the build gate; this section only governs ranked p50.
 | C.1 | 547f080 | 5 | 2 | 32 | five §5.2 rows bit-exact vs 0.4.0; FAIL = phrase/span/patterns (Phase D); GAP = catalog.gucs + catalog.functions |
 | C.2-R (PG17.11 control) | 8ba6683 | 7 | 1 | 31 | **Same before and after the C.2-R repair** (control experiment: identical FAIL ids on both builds). Extra vs the C.1 row: `calls.stop_words` (`builtin_stop_words('auto')` = zh+en since 0b37be0, an ancestor of the C.1 commit) and `catalog.functions` (documented GAP whose `expected.extra` no longer matches). Both pre-date C.2-R; the C.1 row was measured on a PG18.4 engine and does not reproduce on PG17.11. Unresolved. |
 | Boolean coverage (PG17.11, controller re-run) | 7e6438f | 7 | 4 | 43 | New `contract/cases/boolean.yaml` (15 cases; truth-table corpus derivations independently re-derived by the controller and matched) + `contract/expected/stannum-0.4.0/boolean.json` recorded from the 0.4.0 build at `/tmp/stannum-main-46` @ `7ab511b` (answers verified against the hand-derived table; existing recordings byte-identical). Contributions: 1 new FAIL = `fields.boolean_duplicate_leaf` `flat_ranked` only — pre-existing single-column IndexScorer duplicate-clause 2x vs the 0.4.0 fold, documented in `contract/divergences/stannum.yaml`, not introduced here; 2 new GAPs = `fields.boolean_regex_on_multi` / `fields.boolean_mixed_regex_and_term` (0.5.0 rejects instead of silently dropping; D.2 owns). The other 12 boolean cases PASS bit-exact vs 0.4.0. `fields.boolean_mixed_regex_and_term` FAILed silently on the pre-repair build (5 rows from the dropped prefix) — this is the hole the coverage closes. Controller re-run differs from the implementer's `6 FAIL / 4 GAP / 44 PASS` only by `calls.stop_words`, the pre-existing PG17 environment difference. Caveat: `boolean.json`'s `source.extension_commit` is the suite repo's postgres HEAD, not the producer commit. |
+| C.3 | 7fdee28 | 6 | 4 | 44 | **Measured on PG18.4 against the release build** (see the two census-measurement rules above) — no case-id delta from the boolean-coverage row's PG18 equivalent, as expected of a pure deletion. FAIL ids: `fields.phrase_no_cross`, `fields.phrase_scoped`, `fields.then_no_cross`, `fields.near_no_cross`, `fields.patterns` (Phase D.2), plus `fields.boolean_duplicate_leaf` — which the 2026-10-04 adjudication reassigns to **D.1** (restore the fold; the controller proved the cause against 0.4.0: `bool_multi` is bit-exact while `bool_flat` scores ≈1.97×). GAP ids: `catalog.functions` (**correct as written** — live 42 vs recorded 41, lost = 0, the only gain `capabilities()`; no divergence edit needed), `catalog.gucs`, `fields.boolean_regex_on_multi`, `fields.boolean_mixed_regex_and_term` (D.2 converts both to assertions). Controller gates on the C.3 tree: `cargo test -p stannum --lib` 131/0 (61 in `fields`, 14 in `bound`), workspace 14 suites, `cargo pgrx test pg18` **347 passed / 0 failed / 5 ignored** (145.68s), `script/test-all quick` 7/7, headers 2/2, fmt + clippy (`pg18 pg_test`, `-D warnings`) clean, `nm -u`: plain test binary **0** `InterruptPending`, release `.so` **1**. Oracle reviewed twice in the controller's session: 1 P0 + 3 P1 (empty-token error category; shared candidate oracle; `.max(exact)` bound floor; no interval-skip coverage), all repaired with mutation proofs; final verdict **no P0**, residual P1 (no production boolean-WAND orchestration loop to pin, because it does not exist yet) assigned to **D.4**. |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
 | E.4 | | 0 | ≤2 | | release gate |
 
