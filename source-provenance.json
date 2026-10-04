@@ -755,7 +755,11 @@
    "owner": "ben",
    "evidence": "Original Stannum L1 fielded-key defects with distinct query-error versus verify-corruption report kinds. Not copied from Lead."
   },
-  "postgres/src/fields/expand.rs": {
+  "postgres/src/fields/profile.rs": {
+  "owner": "ben",
+  "evidence": "New Stannum per-query fielded-path counters: cursor opens, advances, rewind seeks, successor peeks, field hits, payload gets and positions, channel opens, lookups, fused scoring, membership evaluation and ranking. Off unless STANNUM_FIELDED_PROFILE names a path; changes no answer, the BM25F formula, or the on-disk layout. Removable by deleting the module and its call sites."
+ },
+ "postgres/src/fields/expand.rs": {
    "owner": "ben",
    "evidence": "Original Stannum L1 multi-column expansion adapter (Index::term / Window / expand, two-stage limit, scope mask). Not copied from Lead."
   },

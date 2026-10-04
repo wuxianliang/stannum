@@ -26,7 +26,7 @@ mod cursor;
 mod df;
 mod error;
 mod expand;
-mod profile;
+pub(crate) mod profile;
 mod score;
 mod types;
 

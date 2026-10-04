@@ -693,6 +693,7 @@ fn fielded_ranked_rows(
         })
         .collect();
     rank_rows(&mut rows);
+    crate::fields::profile::add_ranked(std::time::Duration::from_nanos(ranked_span.ns()));
     rows
 }
 
