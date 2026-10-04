@@ -43,6 +43,14 @@ a nonzero exit if any failed; `--fail-fast` stops at the first failure and
   with `psycopg` 3 and PyYAML, named by `STANNUM_PYTHON` (default `python3`),
   for example `python3 -m venv .venv && .venv/bin/pip install -r
   benchmarks/requirements.txt`.
+  **Set `STANNUM_PYTHON` explicitly on any machine whose default `python3` lacks
+  the dependencies.** Without it, `script/test-all full` reports
+  `conformance: FAILED (exit 1)` with
+  `ModuleNotFoundError: No module named 'psycopg'` on code that is fine — the
+  project's own venv (`.venv`, git-ignored) is not on any `python3`'s path, and
+  Homebrew's `python3` has neither `psycopg` nor `PyYAML`. CI does not hit this
+  because its Python carries the dependencies. Correct local invocation:
+  `STANNUM_PYTHON=$PWD/.venv/bin/python script/test-all full`.
 - Everything else in Python needs only the standard library and `psql`.
 
 ### The pgrx lock
