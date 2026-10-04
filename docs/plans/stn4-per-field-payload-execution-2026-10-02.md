@@ -902,6 +902,21 @@ channels (design §4).
     sites in `postgres/src/score.rs` (4786, 5023, 5434) sit on the `search()` /
     `score()` path; phrase and boost-dependent callers keep
     `StructuralPreserveTermMultiplicity`.
+  - **Controller scope note (2026-10-04, verified on `7fdee28`): the D.1 scope
+    line names two symbols whose real state differs.** `scope_scan_query`
+    exists at `postgres/src/score.rs:5700` but is currently the **identity**
+    with the doc comment *"Single-column indexes have no field metadata, so this
+    is the identity and every match is ordinal 0. Phase 5 applies Appendix A's
+    implicit scope"* — so implementing it is D.1's actual work, and it already
+    has three callers wiring it (`postgres/src/am.rs:268`, `score.rs:4775`,
+    `customscan.rs:1473`). `project_to_field` **does not exist at all**: the
+    only references are comments deferring it to this phase
+    (`postgres/src/highlight_udfs.rs:40`, `postgres/src/tool/highlight.rs:125`).
+    The operator side already calls `crate::score::check_expr_fields`
+    (`postgres/src/operator.rs:632`, from `check_clause_field_scope`, which
+    validates only `T_Const` text operands). Do not invent a new seam: extend
+    `scope_scan_query` and `check_expr_fields`, and add `project_to_field` only
+    where the highlight path actually needs named-field confinement.
   - Done when: Appendix A operator cases green —
     `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0 --area fields`
     no longer FAILs on scope plumbing (phrase/span may still FAIL until
