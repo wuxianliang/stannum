@@ -689,7 +689,7 @@ D.\* after C.2. E.1 may already have started after A.4.
     loop log. Census **6 FAIL / 4 GAP / 44 PASS** on PG18.4 release build —
     see the ledger row and the two census-measurement rules added this step.
 
-- [ ] **C.4 pgembed checkpoint (STN4 representation wheel)**
+- [x] **C.4 pgembed checkpoint (STN4 representation wheel)**
   - Goal: after C.2 green, pin a STN4-capable commit and prove the wheel
     still builds. This is **not** D.5 (phrases/highlights/planner still
     pending). C.2 gates this checkpoint.
@@ -702,6 +702,50 @@ D.\* after C.2. E.1 may already have started after A.4.
     until D.2). Record counts.
   - Review focus: design §8 “C.2 gates D wheel”; D.5 still required for the
     full official suite.
+  - Result (**pgembed `10db73c`**, box checked separately): pin bumped
+    B.2 `17703ecb` → C.3 **`7fdee282814faf5dec821a116bf0cd59f19b1e5b`**
+    (`STANNUM_COMMIT` in `pgbuild/Makefile`), single-line commit, the
+    concurrent `pg_textsearch` work deliberately left out of it.
+    **Build caveat, worth knowing before D.5: `tools/build_standalone_extension_wheel.py`
+    does not compile by SHA** — it packages the `stannum.dylib` already in the
+    shared prefix. The pin was therefore made real by fetching
+    `7fdee282…` from GitHub, running
+    `script/pgrx-lock.py -- cargo pgrx install --release --no-default-features
+    --features pg18 --pg-config <prefix>/bin/pg_config` (~1m37s), and then
+    packaging. **Do not use `make -C pgbuild all` / `pgbuild stannum` for a
+    checkpoint**: the Makefile sets
+    `INSTALL_PREFIX ?= $(pwd)/../src/pgembed/pginstall` and
+    `stannum: postgres $(INSTALL_PREFIX)/lib/postgresql/stannum.$(PG_DLSUFFIX)`,
+    so a default `make` rebuilds/rewrites the whole shared PostgreSQL install.
+    Wheel: `dist-standalone/pgembed_stannum-0.3.0rc2-py3-none-macosx_11_0_arm64.whl`,
+    **5,360,031 bytes**, `default_version = '0.5.0'`, `BUILT_FOR_POSTGRES_MAJOR
+    = 18`; its `stannum.dylib` sha256 `855de8cd5e1b9ed3…` **matches** the
+    installed C.3 build. The wheel's own version string (`0.3.0rc2`) is the
+    pgembed artifact version, not the extension version — E.3 owns aligning it.
+    **The bundle metadata stamp still records B.2 `17703ecb`**, because the step
+    avoided `make`; that provenance stamp is now stale relative to the shipped
+    dylib and E.3 must reconcile it.
+    **pytest** (`tests/test_pgembed_stannum.py` + `tests/test_stannum_jieba.py`,
+    PG18.4): controller re-ran it, **81 passed / 2 skipped / 1 failed**
+    (55.34s). Single-column, DDL, field weights, field-scoped queries, hybrid
+    RRF and every jieba case (tokenize, Chinese words, word boundaries, word
+    sequence phrases, English case folding, highlight, full_score) are green.
+    The single failure is `test_dictionary_drift_reindex_and_presets`,
+    `assert '0.5.0' == '0.4.0'` at `tests/test_stannum_jieba.py:132` — the
+    **known D.5 backlog** (D.5 owns the `extversion` edit), left as-is.
+    `langchain` / `llama_index` retriever smokes are skipped (extras not
+    installed) — D.5 territory.
+    **Multi-column smoke (recorded counts, title/body, 5 rows, weights
+    title:3 / body:1):** arithmetic-shaped queries all succeed and
+    `search` agrees with `search_count` on every one — `needle` 2/2 (ids 1,2);
+    `title:(needle)` 1/1 (1); `body:(needle)` 1/1 (2); `database` 2/2 (3,4);
+    `title:(database)` 1/1 (3); `body:(database)` 1/1 (4);
+    `database AND index` 1/1 (4); `database OR kernel` 2/2 (3,4);
+    `title:(query) OR body:(storage)` 2/2 (4,3); `needle AND filler` 2/2 (1,2);
+    `title:(needle) OR body:(needle)` 2/2 (1,2). As expected **before D.2**,
+    `"database index"`, `title:("needle title")` and `needl*` all raise
+    `stannum.search() does not support this query on a multi-column index` —
+    the phrase/pattern shapes D.2 clears, not C.4 failures.
 
 **Phase gate PC** (normative: design §2 acceptance, §5, §8 C.1–C.2): smoke
 bits match 0.4.0 on STN4 indexes; the census returns to the pre-STN4 shape
@@ -1368,7 +1412,7 @@ the build gate; this section only governs ranked p50.
 | STN3 3.3 | 68386ec | a963080d… | 3F/71P/2S official; jieba 7/8 (stale extversion) | current pin |
 | A.5 | | (A.4 SHA) | single-col + jieba green; multi-col reds expected | pin-only |
 | B.3 | | (B.2 SHA) | same keep-green | pin-only |
-| C.4 | | (C.2 SHA) | arithmetic multi-col smoke; phrases may still error | **C.2 gated** |
+| C.4 | 10db73c (pgembed) | 6 | 4 | 44 | pin → C.3 `7fdee282`; wheel 5,360,031 bytes, `BUILT_FOR_POSTGRES_MAJOR = 18`, dylib sha256 matches the installed C.3 build. pytest single-column + jieba + multi-column arithmetic smoke green (81 passed / 2 skipped / 1 failed, the failure being the known D.5 `extversion` backlog). Census unchanged from C.3/D.1: the rule FAIL plus D.2's five, and the four GAPs. |
 | D.5 | | (D.4 SHA) | full official + jieba + retrievers | **C.2 gated** |
 | E.3 | | (E-series) | release wheel | joins E.4 |
 
