@@ -1356,7 +1356,7 @@ approved failure, owned by E.2.
 E.1 may start after A.4 (classification is the new CI row). E.4 waits for
 D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
 
-- [ ] **E.1 Two-artifact migration CI**
+- [x] **E.1 Two-artifact migration CI**
   - Goal: 0.4.0→0.5.0 still follows parent §8; leftover STN4-dev v1 indexes
     rebuild-error rather than LSG-migrate. Replay the design §6.3 fixture
     table in CI.
@@ -1379,6 +1379,48 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     job must fail if any classification or string mismatches.
   - Review focus: design §6.1, §6.3 fixture table, §8 E.1; parent §8
     procedure steps 1–6.
+  - Result (**code @ 213604c**, box checked separately): **locally green;
+    CI is scheduled, so it has not yet run on a GitHub runner.**
+    `postgres/tests/two_artifact_migration.py` (1565 lines) +
+    `postgres/tests/test_two_artifact_migration.py` (6 no-server unit tests) +
+    the `two-artifact-migration` job in `.github/workflows/ci.yml`
+    (**schedule + `workflow_dispatch` only, never on push or PR**, because it
+    builds two artifacts) + a `two-artifact` step in `script/test-all`.
+    **Artifact strategy:** CI checks the pinned `7ab511b` (Cargo `0.4.0`, the
+    tree that recorded `contract/expected/stannum-0.4.0`) out into
+    `stannum-0.4.0/`, and runs
+    `cargo pgrx install` against **one PG18 prefix** — only the extension files
+    are swapped, so no second PostgreSQL is built. A local run uses
+    `--old-snapshot <dir>` with a prebuilt extension install instead
+    (dylib sha256 `4a54570c…`); no network is needed either way.
+    **Controller verification: `== two-artifact-migration PASS`, EXIT=0,
+    6.3s, 70 distinct fixture assertions, no network.** Every design §6.3 row is
+    covered, including: kind/magic/meta **byte evidence** for the 0.4.0
+    single/multi/jieba/empty/buffer-only indexes (`kind=1`, `magic=b'LSG3'`/
+    `b'LSG4'`, `segments=0` for empty); `PreStn3` with its exact
+    `requires REINDEX to 0.5.0 (pre-STN3 segment)` string; `StaleFielded` and
+    `MixedFielded` with their exact strings; five `Corrupt` rows (buffer
+    malformed, malformed trailer, missing trailer, bad FCH1, buffer-only
+    malformed); **no-page-dirty on refused INSERT** (`*_nodirty`) for every
+    rebuild-error class; **REINDEX-then-answer** for every rebuildable class;
+    `kind5_lsg` → `Corrupt` with the mixed-format string and
+    `kind5_lsg_not_prestn3` proving it is *not* the §8 migration string;
+    `~0~foo` tags staying `Current` across restart; and the tagged/untagged
+    zero-term rows including insert-flush-restart still `Current` after a later
+    restart.
+    **The job cross-checks its own four error strings against production
+    sources before any fixture runs** (`ASSERT source-pins PASS`), which is a
+    stronger anti-drift guarantee than the fixtures: the controller's mutation
+    of `PRE_STN3` was caught immediately by
+    `AssertionError: segment/src/error.rs no longer contains '… MUTATED'` with
+    EXIT=1, and the agent's parallel mutation of the expected class made all
+    five `old_*` fixtures FAIL. Both restored.
+    **Not yet exercised on a GitHub runner** — that is this step's one open
+    item; the job only fires on schedule or dispatch. Gates: lib 137/0,
+    `fields` 64/0, workspace 14 suites, fmt + clippy clean, `script/test-all
+    quick` 7/7 and headers 2/2 (including the 6 new Python unit tests),
+    `nm -u` **0** `InterruptPending`, pgrx 374/0 (before E.1's Python-only
+    change), census **1 FAIL / 2 GAP / 51 PASS**, TIN **exit 0** 169/189.
 
 - [ ] **E.2 Runbook + divergence ledger**
   - Goal: operators can cut over; development fielded-terms indexes are a
