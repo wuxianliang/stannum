@@ -11,9 +11,10 @@ result is listed.
 ## [0.5.0] - 2026-10-01
 
 The first Stannum 0.5.0 cut (`stannum.version()` returns `0.5.0`), versioned
-independently of Lead. Catalog upgrade from 0.4.0 is SQL-only: it adds
-`stannum.capabilities()` and keeps the four `jieba_*` dictionary functions as
-surface stubs until jieba lands.
+independently of Lead. Catalog upgrade from 0.4.0 is SQL-only and adds one
+function: `stannum.capabilities()`. The four `jieba_*` dictionary functions keep
+their 0.4.0 definitions, so the upgrade is a catalog delta only — no segment
+conversion, no REINDEX required by the upgrade itself.
 
 ### Added
 
@@ -91,6 +92,39 @@ surface stubs until jieba lands.
   vacuumed and checked database serve every workload of a campaign;
   `--ranked-validation-queries` samples the exhaustive ranked check;
   `build-image --base` builds a native image for local runs.
+- A multi-column index, `stannum(title, body)`, whose terms carry one stream per
+  indexed field instead of one concatenated key. Each stream keeps its own
+  term frequency and document length, so field statistics never blur, and a
+  query reads only the fields it names. `field_weights = 'title:3,body:1'`
+  selects the per-field BM25F weights used when fusing them. A single-column
+  index has no field metadata: its scope is the identity, and its weights are
+  pinned to 1.0. Weights change only through `REINDEX` —
+  `ALTER INDEX … SET (field_weights = …)` is rejected with *"REINDEX to change
+  field_weights"* — and a rebuild preserves them, alongside the index's
+  expressions, predicates and the rest of its reloption list.
+- Field scope in query matching. `title:(…)` and the `==>` operator mask a
+  term to one field's streams, so a phrase, a proximity pair or a regex never
+  crosses a field boundary, and an unknown field fails deterministically rather
+  than silently widening the query. Scoped phrases, spans and patterns stay
+  inside their field; an unscoped one may still span fields, as before.
+- Field scope in ranking and highlighting. `stannum.highlight` and
+  `stannum.highlight_ansi` confine their marks and their snippet selection to a
+  named field, taking it as a fifth argument alongside the query. The scope
+  survives normalization and boolean composition, and applies on every planner
+  path the operator can choose, custom scan included and
+  `enable_custom_scan = off` alike.
+- The `jieba` tokenizer, as the `tokenizer = 'jieba'` index option: word-level
+  Chinese segmentation beside the existing `unicode` and `whitespace`
+  analyzers, which are unchanged. `stannum.tokenize(text, tokenizer =>
+  'jieba')` exposes the analysis, and the four `jieba_*` dictionary functions
+  add, remove, report and reload words at runtime. A dictionary edit makes
+  `stannum.index_analysis().matches` false until the affected index is rebuilt,
+  so drift cannot pass silently, and the rebuilt index matches the new
+  dictionary. `score_stop_words = 'auto:zh'` (or `auto`, `auto:en`) stops words
+  per language, and `stannum.builtin_stop_words('zh')` lists them.
+- `stannum.capabilities()`, a single immutable JSONB document naming the
+  contract version, the engine and format, the shipped features and the
+  enforced query limits, so a client can ask instead of inferring.
 
 ### Changed
 

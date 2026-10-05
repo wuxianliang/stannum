@@ -8,8 +8,9 @@
 --   Altered: none
 --   Dropped: none
 -- jieba_add_word, jieba_delete_word, jieba_dict_version, and jieba_reload_dict
--- remain; 0.5.0 keep-surface stubs emit SQL byte-identical to the 0.4.0
--- snapshot. No segment conversion. Invoker rights only.
+-- keep their 0.4.0 definitions; the upgrade is SQL byte-identical for them, so
+-- no ALTER or DROP is needed here even though 0.5.0 implements them against a
+-- real dictionary. No segment conversion. Invoker rights only.
 
 -- Keep this definition identical to the 0.5.0 fresh-install snapshot so
 -- extension fingerprints remain equal.

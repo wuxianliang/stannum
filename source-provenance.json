@@ -691,7 +691,7 @@
   "postgres/sql/stannum--0.4.0--0.5.0.sql": {
    "owner": "mixed",
    "upstream_path": "postgres/src",
-   "evidence": "Upgrade SQL adding capabilities(); jieba_* keep-surface stubs already match 0.4.0. Credits PlanetScale because it extends a snapshot generated from inherited Lead and original Stannum Rust definitions."
+   "evidence": "Upgrade SQL adding capabilities(); the jieba_* definitions are unchanged from 0.4.0. Credits PlanetScale because it extends a snapshot generated from inherited Lead and original Stannum Rust definitions."
   },
   "postgres/sql/stannum--0.4.0.sql": {
    "owner": "mixed",
