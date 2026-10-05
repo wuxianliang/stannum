@@ -878,16 +878,25 @@ documented; E.2 only verifies `capabilities()` visibility) and `catalog.gucs`
 Both were caught and corrected by re-measuring; they are now discipline:
 
 1. **The census runs against the release build, on PostgreSQL 18, with the
-   pgembed prefix's `bin` first on PATH.** `initdb` / `pg_ctl` / `psql` on the
+   release prefix's `bin` first on PATH.** `initdb` / `pg_ctl` / `psql` on the
    default PATH are Homebrew's PostgreSQL **17.11**, whose prefix also holds a
    **stale** `stannum.dylib` from an earlier `cargo pgrx test` run. Starting a
    scratch server without prefixing PATH silently measures PG17.11 against that
-   stale build. Correct form:
-   `PATH=/Users/wxl/Projects/pgembed/src/pgembed/pginstall/bin:$PATH` for the
-   server, and `cargo pgrx install --release --package stannum
-   --no-default-features --features pg18 --pg-config <that prefix>/bin/pg_config`
-   first. Two visible symptoms of getting it wrong: `calls.stop_words` and
-   `catalog.functions` change answer, and the pg_test-only UDFs
+   stale build. Correct form: put the prefix that holds the release build first
+   on PATH, and reinstall that build with
+   `cargo pgrx install --release --package stannum --no-default-features
+   --features pg18 --pg-config <that prefix>/bin/pg_config` first.
+   **The prefix named here used to be
+   `/Users/wxl/Projects/pgembed/src/pgembed/pginstall` and it does not exist in
+   this checkout** (2026-10-05): `pgembed`'s own editable-install warning
+   confirms `src/pgembed/pginstall/bin` is absent, and `cargo pgrx` is still
+   configured to use it, so every `cargo pgrx test` / `install` fails with
+   "The specified pg_config binary … does not exist" until
+   `PGRX_PG_CONFIG_PATH` is set. The working release prefix for this checkout is
+   **`/tmp/stn3-a2-prefix`** (PostgreSQL 18.4). Verify any prefix the same way
+   before trusting a measurement — see the `pg_proc` sanity check below — and
+   treat a missing prefix as a blocker to report, never a reason to measure
+   against whatever is on PATH.
    `corrupt_index_page()` / `index_page_kinds()` appear in the catalog.
 2. **Never mix builds or majors inside one measurement.** The controller ran
    one census on PG17.11 against a stale `pg_test` build and read it as PG18.4;
@@ -1696,6 +1705,12 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
 
 - [ ] **E.4 Conformance + parity sweep — GATE**
   - Goal: three suites green on the STN4 0.5.0 artifact.
+  - **IN PROGRESS.** E.2's two named rebuild-guarantee gaps are closed and
+    controller-verified with an independent mutation proof (`c20f7ca`). The
+    three suites are measured. **Two items remain:** the census's literal
+    "0 FAIL" does not survive the binding duplicate-leaf ruling, and the
+    pgembed full-suite measurement needs a prefix this checkout does not have.
+    Both are recorded below rather than smoothed over.
   - Scope: upstream TIN conformance (`conformance/run.py --engine stannum
     --check conformance/expected/tin-1.0.3`); full contract suite; pgembed
     suite; **[pg-agent]** v13 suite replay.
@@ -1706,6 +1721,110 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Review focus: parent §4.3 — any recorded-answer change without a
     contract bump is a bug; design §6.4 (`capabilities().engine.format`
     remains `"STN3"`; `contract_version` stays 1).
+
+  **E.2's two gaps closed (`c20f7ca`), controller-verified.** The new
+  `postgres/tests/rebuild_guarantees.py` suite (483 lines, registered in
+  `script/test-all cluster`, no new CI job) covers both. A multi-column index
+  **cannot** carry an expression key —
+  `postgres/src/storage/mod.rs:641` rejects `attnum <= 0` when
+  `key_count >= 2` — and `field_weights` is pinned to 1.0 on a single-column
+  index (`storage/mod.rs:668`), so the guarantee is covered by **two**
+  legally-built indexes rather than one: `docs_expr_idx` on
+  `stannum((lower(body))) WHERE published` (envelope field `expr`, weight 1.0)
+  and `docs_idx` on `stannum(title, body)` with
+  `field_weights='title:3,body:1'` and jieba. `fillfactor` was **not** used:
+  stannum's `amoptions` does not register it, so it cannot appear in an index
+  `WITH` clause — the reloption list is carried by `tokenizer` /
+  `case_folding` / `k1` / `b` instead.
+  **The controller re-ran the mutation proof itself rather than trusting it.**
+  Skipping `apply_field_weights` when
+  `pg_sys::ReindexIsProcessingIndex(index.rd_id)` makes `CREATE INDEX` still
+  write `title:3` and `REINDEX` collapse it to `1.0`; the suite fails with
+  `AssertionError: ('envelope_fields', [('title', 3.0), ('body', 1.0)],
+  [('title', 1.0), ('body', 1.0)])`, exits 1, and passes again (exit 0) once
+  the mutation is reverted. That is the rebuild-specific defect class E.2's
+  guarantee names, so the assertion has teeth. Two additional facts the
+  controller verified and the brief did not know: the `ALTER INDEX … SET
+  (field_weights)` guard only fires in a session where `stannum.so` is already
+  loaded (the test primes it with a `stannum.search_count` call first), and
+  `pgrx`'s configured `pg_config` is the pgembed `pginstall` prefix, **which
+  does not exist in this checkout** — the working release build lives in
+  `/tmp/stn3-a2-prefix` (PostgreSQL 18.4, 42 procs, 0 `pg_test`-only UDFs),
+  reached with `PGRX_PG_CONFIG_PATH`.
+  **One controller repair.** The agent's kill discriminator treated any
+  relfilenode change as a partial publish, which false-fails whenever the kill
+  lands after the rebuild finished. Both paths now swap the relfilenode check
+  against the reindex exit status: a completed rebuild legitimately swaps it
+  (retry), an interrupted one that still published is a defect (hard fail).
+
+  **Suite measurements, all controller re-run on PG18.4 against the release
+  build:**
+
+  | suite | result |
+  |---|---|
+  | `postgres/tests/rebuild_guarantees.py` (new) | pass, exit 0 |
+  | mutation proof (independent) | fail with the envelope assertion above, then pass after revert |
+  | contract census | **1 FAIL / 2 GAP / 51 PASS of 54** |
+  | TIN conformance | exit 0, **12 DIFF / 3 GAP / 5 IMPROVED / 169 PASS of 189**, `catalog.I-01` still a documented GAP |
+  | `script/test-all quick` | **7 passed, 0 failed** |
+  | `cargo test --locked --workspace` | ok (137 / 341 / 27 / 58 / 4 across suites) |
+  | `cargo clippy --workspace --all-targets -D warnings` (`pg18 pg_test`) | clean |
+  | `cargo fmt --all -- --check` | clean |
+  | `nm -u` plain test binaries | **0** `InterruptPending` (two binaries checked) |
+  | `nm -u` release `.so` | **1** `InterruptPending` |
+  | catalog sanity after every reinstall | **42** procs, **0** `corrupt_index_page` / `index_page_kinds` |
+
+  **A measurement-mode correction the controller got wrong once.**
+  `contract/run.py --engine stannum` **without `--check`** is *record mode* and
+  emits `OK` for every case (53 OK, 1 PASS of 54). That is not a census. The
+  census requires
+  `python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0`.
+  The figures above are from the `--check` run. Nothing was written either
+  way: the write at `contract/run.py:1437` is gated behind `--record`, and
+  `git status` plus an mtime scan over `contract/` confirm `contract/expected/**`
+  is untouched.
+
+  **Why the census is not literally "0 FAIL", and why that is correct.** The
+  adjudicated duplicate-leaf ruling (binding on every step: "a step that
+  contradicts one of them is out of spec and stops for a re-adjudication")
+  requires `0.5.0` to preserve **additive** duplicate-term weights on every
+  scoring surface, and requires `fields.boolean_duplicate_leaf` to be left as a
+  **raw FAIL whose account is the ledger** with the divergence entry
+  **deleted**. E.4's done-when text says "0 FAIL". Making this case pass would
+  restore the 0.4.0 fold, which is exactly what adjudication 3 rejected — for
+  a mixed query such as `alpha AND alpha AND beta` folding changes the
+  relative contribution and can reorder results. **The step is therefore
+  measured against the accounting-based gate the adjudication substituted for
+  the obsolete denominator: every case accounted for; zero *unapproved*
+  failures; every GAP named, explained and owned.** The one FAIL is approved,
+  explained and owned; both GAPs are documented with their classification.
+  The FAIL detail confirms the account rather than contradicting it:
+  membership and tie ordering are unchanged and only `flat_ranked`'s score
+  bits differ (`3f9f9306` vs the recorded `3f1f9306`).
+
+  **Blocked, not green: the pgembed full suite.** `test_bundled_tools.py` and
+  `test_tigerfs_pg18.py` need a built `src/pgembed/pginstall` prefix, which this
+  checkout does not have and which `make build` cannot produce in this
+  session. The pgembed **unit** suite is measured (`173 passed / 69 skipped /
+  6 failed`, all six `BundledPostgresMetadataError`, baseline unchanged); the
+  full suite against a real wheel install is **not**, and E.3's earlier
+  `82 passed / 2 skipped / 0 failed` is not reproducible for the same reason.
+  E.4 cannot honestly claim "pgembed full suite green" until someone runs it
+  against a built prefix. Owner: E.4, and the controller should ask the user.
+
+  **Not yet run: the [pg-agent] v13 replay.** The plan marks it
+  optional-but-recommended. `~/Projects/pg-agent` v13 exists (tag `v13` at
+  `78e77c7`, 46 test files, all psycopg-based) and
+  `v13/mgraph/test_stannum_usage.py` is explicitly a **stannum 0.4.0 usage
+  gate** that pins `pgembed == "0.3.0rc2"` and asserts recorded SQL text —
+  exactly the downstream-compatibility signal a 0.5.0 replay wants. It needs a
+  server with 0.5.0 and the pinned pgembed version. Owner: E.4.
+
+  **Also not corrected here:** pgrx's `pg_config` still points at the missing
+  pgembed `pginstall` prefix, so every `cargo pgrx test` / `install` needs
+  `PGRX_PG_CONFIG_PATH` until either that prefix is rebuilt or the configured
+  path is changed. This contradicts the plan's §0 census-measurement rule as
+  written and is recorded as a doc correction to make.
 
 - [ ] **E.5 Release 0.5.0**
   - Goal: ship STN4 as the 0.5.0 representation inside STN3 terms.
