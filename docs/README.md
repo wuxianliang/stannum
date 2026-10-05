@@ -89,3 +89,16 @@ the STN4 line does not carry.
 
 Upstream changes still land as reviewed, tagged snapshots — never by chasing
 `upstream/main` — and the pinned SHA is recorded in [UPSTREAM.md](UPSTREAM.md).
+
+## Release posture
+
+No publishing. A tag names a source state that something else builds against —
+it is not distributed. `pgembed`'s `pgbuild/Makefile` pins this repository and
+pg-agent consumes the wheel pgembed builds, so the tag is the handoff point and
+nothing more. Nothing is uploaded to PyPI, PGXN or any other index, and
+[RELEASING.md](RELEASING.md)'s publishing steps are not performed.
+
+`pg_typesafe` is the same arrangement: the fork at `wuxianliang/pg_typesafe`
+is what pgembed builds, its 0.1.0 pin being current, and it is published
+nowhere. Both repositories are ours to maintain; upstream receives nothing
+from them.
