@@ -2110,7 +2110,7 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Done when: tag exists; origin `stn3` and release artifacts pushed;
     tracker closed. E.4 green is required.
   - Review focus: parent §9; design §6.4.
-  - **CLOSED (`025bcb6`, tag `v0.5.0`).** The snapshot was checked rather than
+  - **CLOSED (`272c38c`, tag `v0.5.0`).** The snapshot was checked rather than
     assumed: `cargo pgrx schema pg18 --package stannum --no-default-features
     --features pg18` regenerates SQL that `extension_upgrade.normalized()`
     finds byte-identical to the committed `postgres/sql/stannum--0.5.0.sql`
