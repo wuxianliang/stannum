@@ -1498,6 +1498,40 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Done when: wheel installs the 0.5.0 extension and the full pgembed suite
     is green against it (joins E.4).
   - Review focus: STN3 6.3 done-when; design §8 E.3.
+  - **PARTIAL — do not check this box yet.** The mechanical half is done and
+    controller-verified; the backlog half is blocked on a decision only the
+    oracle can make, so this step is held open deliberately rather than closed
+    on a partial basis.
+    **Done (pgembed `ea02d16`, pin D.4 `6ad9523b` → E-series `3227d7a`,
+    controller-verified):** release build installed from the pinned SHA, wheel
+    built through `tools/build_standalone_extension_wheel.py --extension
+    stannum` at **5,389,563 bytes** with `default_version = '0.5.0'` and dylib
+    sha256 `7cecb56a889955c9…`; the **full pgembed suite is green against it
+    (`82 passed / 2 skipped / 0 failed`, controller re-run on PG18.4)**. The
+    wheel installs the 0.5.0 extension, which is the done-when's operative
+    clause.
+    **Blocked — the 2.8/3.3 `build-metadata.json` backlog.** The generated
+    bundle metadata hardcodes `stannum.source_commit="d895c8e9…"`, and the
+    controller established that the **uncommitted `pg_textsearch` work is what
+    set that value**: its diff on `tools/generate_bundle_metadata.py` changes
+    it from `e163585c…` to `d895c8e9…` while adding the `pg_textsearch` block.
+    **Neither value matches the pin** (`6ad9523b` before E.3, `3227d7a` after),
+    so the wheel's `build-metadata.json` **provenance does not describe the
+    artifact it ships** — the same class of defect already recorded at C.4,
+    where the bundle stamp lagged the shipped dylib. The fix is to derive
+    `source_commit` (and ideally the version) from `pgbuild/Makefile`'s
+    `STANNUM_COMMIT` rather than hardcoding it, but **that file is under an open
+    oracle review** (`pg_textsearch` is a phony target missing from the
+    `EXTENSIONS` list `all` consumes; `os.replace` overwrites a symlinked
+    `--output` destination rather than writing through it; `atomic_write` uses
+    `mkstemp`'s 0600 mode for public metadata). Landing the fix before that
+    review closes would collide, so it waits on an oracle adjudication.
+    Also outstanding and inert unless the run happens to include a
+    `pg_textsearch` build: `CI flake` — `crash-before-publication` failed on
+    `3227d7a` (`x86-64 / PostgreSQL 18`, docs-only commit with byte-identical
+    code) and passed on re-run. **Third occurrence** on identical code
+    (`1967cfa`, the `80de21e`-era run, `3227d7a`). It needs an owner: a bounded
+    retry in `.github/workflows/ci.yml` for that step.
 
 - [ ] **E.4 Conformance + parity sweep — GATE**
   - Goal: three suites green on the STN4 0.5.0 artifact.
