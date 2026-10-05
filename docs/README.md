@@ -73,18 +73,19 @@ search. Run commands from the repository root.
 
 ## Repository branches
 
-`stn3` is the development branch, forked from `upstream/main`: our work lives
-in `postgres/src/tool/`, `postgres/src/fields/`, the owned shims in
-[tinql/](../tinql/src), `tokenizer/` and `contract/`, and conflict on an
-upstream merge is expected in the same files each time. Tags name releases;
+One branch: `main`. It is the development line and the release line, forked
+from `upstream/main`, and it carries everything Stannum owns —
+`postgres/src/tool/`, `postgres/src/fields/`, the owned shims in
+[tinql/](../tinql/src), `tokenizer/` and `contract/` — with conflict on an
+upstream merge expected in the same files each time. Tags name releases;
 `v0.5.0` is the first.
 
-`main` is **maintenance-only** as of 0.5.0. It carried 0.4.0 until the 0.5.0
-parity gate went green, was then brought to the released line, and from here
-takes only fixes for what it has already shipped. New work goes on `stn3` or a
-fresh branch from it, and reaches `main` by a release merge, not by being
-developed there.
+`stn3` was this branch's name while `main` still held 0.4.0, which the branch
+strategy required until the 0.5.0 parity gate went green. With that gate green
+there was no second line left to keep: `stn3` became `main` at 0.5.0, and the
+0.4.0 line it replaced is preserved as the `archive/line-0.4.0` tag, which
+holds the upstream 0.4.x snapshots and the `lsg2`/`lsg4` segment fixtures that
+the STN4 line does not carry.
 
-Upstream changes land as reviewed, tagged snapshots — never by chasing
-`upstream/main` — and the pinned SHA is recorded in
-[UPSTREAM.md](UPSTREAM.md). Both branches push to `origin`.
+Upstream changes still land as reviewed, tagged snapshots — never by chasing
+`upstream/main` — and the pinned SHA is recorded in [UPSTREAM.md](UPSTREAM.md).

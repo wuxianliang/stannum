@@ -2132,34 +2132,33 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     in matching, ranking, highlighting and the planner, jieba and its
     dictionary functions, and `stannum.capabilities()` — instead of the state
     of the first cut on 2026-10-01.
-    `docs/README.md` records the branch policy the merge implements: `stn3` is
-    the development branch, `main` carried 0.4.0 until this parity gate and is
-    now maintenance-only, and upstream changes still land as reviewed tagged
-    snapshots. Both branches push to `origin`.
-  - **The merge — attempted, measured, and deliberately deferred.** `main` and
-    `stn3` had genuinely diverged — 153 commits on `stn3` not in `main`, 62 on
-    `main` not in `stn3`, mostly the contract-freeze and 0.4.0 replay work done
-    on `main` during the STN3 plan's early phases. So this is a real merge, not
-    the fast-forward the STN3-era wording suggested, and it is not small:
-    **53 conflicted files, 322 conflict hunks**, concentrated in
-    `postgres/src/score.rs` (38), `storage/mod.rs` (34), `dict.rs` (24),
-    `segment/src/segment.rs` (22), `search.rs` (21) and `customscan.rs` (17).
-    **Why it was aborted rather than forced.** The conflict is not mechanical.
-    `main` carries the STN3 Phase-4 fielded-terms implementation —
-    `segment/src/postings.rs`, `segment/src/maintenance/`, `Bm25fScorer`,
-    `FieldHit`/`PayloadCursor` — and `stn3` carries the STN4 representation
-    that **deleted** those files in favour of per-field channels
-    (`segment/src/channels.rs`, `Term::channels()`). Design §9 names this class
-    as expected on an upstream merge and §7 records the codec as "dead as a
-    codec"; reconciling it is a per-symbol decision about which representation
-    survives, which is exactly the work the contract census exists to gate.
-    Resolving 322 hunks to satisfy a compiler and then letting CI on `main`
-    adjudicate the semantics would be the gate-weakening the constraints
-    forbid, and the release does not depend on it. `main` is untouched at
-    `7ab511b`, equal to `origin/main`; `git merge --abort` left it clean.
-    **Owner: a follow-up step, with the contract census as its gate.** The
-    release is unaffected: the tag names `stn3`, and `docs/README.md` already
-    states the policy this merge implements.
+    `docs/README.md` records the branch policy this release implements: one
+    branch, `main`, carrying both the development and the release line, with
+    upstream changes still landing as reviewed tagged snapshots.
+  - **The single branch, and what retiring the 0.4.0 line cost.** `main` had
+    held 0.4.0 until this parity gate, as the branch strategy required, and
+    merging it would have been the wrong way to retire it. The two lines had
+    genuinely diverged — 153 commits on `stn3` not in `main`, 62 on `main` not
+    in `stn3` — the merge measured **53 conflicted files and 322 hunks**, and
+    the conflict is semantic rather than mechanical: `main` carries the STN3
+    Phase-4 fielded-terms implementation (`segment/src/postings.rs`,
+    `segment/src/maintenance/`, `Bm25fScorer`, `PayloadCursor`) that STN4
+    deleted in favour of per-field channels (`segment/src/channels.rs`,
+    `Term::channels()`). Each hunk is a decision about which representation
+    survives, which is the work the contract census gates, and the release did
+    not depend on the outcome. Resolving 322 hunks to satisfy a compiler and
+    letting CI adjudicate the semantics would have been the gate-weakening the
+    constraints forbid.
+    So `stn3` became `main` instead, and the line it replaced is preserved as
+    the `archive/line-0.4.0` tag at `7ab511b`, which holds the upstream 0.4.x
+    snapshots (18 paths under `postgres/src`, 14 under `segment/src`) and the
+    `lsg2`/`lsg4` segment fixtures that the STN4 line does not carry. What
+    could be lost was measured before it was dropped: `stn3`'s `contract/` tree
+    is a strict superset of `main`'s — one extra case and its recording, nothing
+    missing — and `stn3`'s CI passed on its own tree, so no gate needed
+    anything that stayed behind. Recorded in full because **"one branch" is a
+    decision about what is dropped**, and the dropped part had to be named
+    before it was dropped, not after.
   - **Tracker closed.** E.5 was the last open item in this plan; the census
     ledger's final row is E.4 at 1 FAIL / 2 GAP / 51 PASS, the FAIL being the
     adjudicated `fields.boolean_duplicate_leaf`.
