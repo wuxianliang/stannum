@@ -1806,7 +1806,7 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     the gate-weakening the constraints forbid, so it stays an open item with
     E.4 as owner until the failure recurs and can be read. Owner: E.4.
 
-- [ ] **E.4 Conformance + parity sweep — GATE**
+- [x] **E.4 Conformance + parity sweep — GATE**
   - Goal: three suites green on the STN4 0.5.0 artifact.
   - **IN PROGRESS — BLOCKED ON MANDATORY PACKAGING VALIDATION.** The contract,
     conformance and stannum-side gates are measured and green. The pgembed
@@ -1854,6 +1854,84 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Review focus: parent §4.3 — any recorded-answer change without a
     contract bump is a bug; design §6.4 (`capabilities().engine.format`
     remains `"STN3"`; `contract_version` stays 1).
+
+  **CLOSED (pgembed `7fc5763` + `277106d`, controller-measured, run
+  [37289894913](https://github.com/wuxianliang/pgembed/actions/runs/37289894913)).**
+  The stannum-side suites were already green and stay green; what this step
+  owed was the packaging measurement, and it is now a CI job on the candidate
+  wheel instead of a prefix nobody can reproduce.
+  **The candidate.** `pgbuild/Makefile`'s `STANNUM_COMMIT` was moved from the
+  E.3 pin `3227d7af` to `7465464aeb74cfc57afdfd8507f1878c31cbd0e6` (the STN4
+  0.5.0 head). The extension's Rust sources are byte-identical between the two
+  (`git diff --stat 3227d7a..7465464 -- postgres/src postgres/sql Cargo.toml`
+  is empty), so the shipped library does not change; what changes is what the
+  pin names — `7465464` carries E.2's `postgres/tests/rebuild_guarantees.py`
+  that `3227d7af` predates, and a pin that names a neighbouring tree is what
+  the adjudication forbids.
+  **What was measured, on the wheel the run itself built.** Both platforms, in a
+  fresh `python -m venv` per job, wheel pip-installed, nothing editable, no
+  `PYTHONPATH`:
+
+  | platform | wheel | sha256 |
+  |---|---|---|
+  | macOS arm64 | `pgembed-0.3.0rc2-cp312-cp312-macosx_26_0_arm64.whl` | `7ea126cae2a64d5586afa8bb9239c673a2841122147e26e78fe711746212cc39` |
+  | Linux x86_64 | `pgembed-0.3.0rc2-cp312-cp312-manylinux_2_28_x86_64.whl` | `f3cf5e080d78a153ea3bfd47d16b8076c031371af04013a72ea1375d2623efc5` |
+
+  Provenance, taken from the same run's bundle attestation: **stannum 0.5.0 @
+  `7465464aeb74cfc57afdfd8507f1878c31cbd0e6`** — equal to the Makefile pin,
+  asserted rather than printed — and **postgres 18.4 @ `REL_18_4`**
+  (`f5cc8171…`).
+  **Results.** New job `stannum_release_gate` (both platforms): **92 passed /
+  2 skipped**, 0 failures, 0 errors, ~75 s per platform, over
+  `test_stannum_release_gate.py`, `test_pgembed_stannum.py`,
+  `test_stannum_jieba.py`, `test_bundled_tools.py`. The two skips are
+  `test_langchain_retriever_missing_extra_names_the_extra` and
+  `test_llama_index_retriever_missing_extra_names_the_extra` — the negative
+  assertions that only make sense when the extra is *absent*; the job installs
+  `langchain-core` / `llama-index-core`, so the positive smokes ran instead.
+  **Permitted-skip disposition: exactly those two, for that reason.**
+  The three suites the named gate clauses cover run in the same run against the
+  same wheel artifact: `test_bundled_tools.py` **7 passed** (and again inside
+  the gate job), `-m integration tests/test_pgembed.py tests/test_tigerfs_pg18.py`
+  **35 passed / 1 deselected** on all three platforms, TigerFS mount gate
+  **1 passed / 2 deselected** on macOS arm64. The split across two jobs is
+  stated rather than implied: both jobs consume the wheel built in the same run
+  by the same Makefile pin.
+  **The 42-proc / no-`pg_test` check is now executable, not a note.**
+  `tests/test_stannum_release_gate.py` asserts the imported `pgembed` is the
+  installed wheel's and serves the bundle from inside it (no source checkout,
+  no external prefix), that the bundle metadata's stannum `source_commit`
+  equals the Makefile pin, and on a live server: extversion `0.5.0`, **42**
+  functions in the `stannum` schema, **0** `corrupt_index_page` /
+  `index_page_kinds`, `capabilities()` = `contract_version` 1 / `engine.format`
+  `"STN3"` / `engine.version` `0.5.0`, and a working `==>` query. Controller
+  cross-checked the numbers against the release prefix before dispatching, and
+  rehearsed the whole file against a real wheel install: with the Makefile pin
+  mismatching the bundle's recorded commit it failed on exactly that assertion
+  (mutation proof), with the pin aligned 3/3 passed.
+  **The first dispatch failed on this step's own bug, before any test ran.**
+  `cat evidence/source-locks.json` found nothing: the attestation artifact
+  publishes `wheelhouse/` and `release-evidence/` as separate directories, so a
+  download recreates both under their common root and the real path is
+  `evidence/release-evidence/source-locks.json`. The fix (`277106d`) locates the
+  manifests instead of guessing, and turns the identity line into the
+  assertion above. Recorded rather than smoothed over: a hardcoded path that
+  only *prints* the candidate identity is exactly how a wrong candidate gets
+  measured while the log still looks right.
+  The gate job is also in `publish-to-pypi`'s `needs`, so a red gate stops the
+  release instead of riding alongside it.
+  **Still open, owned here.** The `crash-before-publication` CI flake (third
+  occurrence on identical code; the job log for that run is no longer
+  retrievable, so no bounded retry was added — see E.3) stays open until the
+  failure recurs and can be read. The `PGRX_PG_CONFIG_PATH` / missing-prefix
+  rule still has to be promoted into §0 and `docs/testing.md`.
+  **Not blocking, and not stannum's.** The [pg-agent] v13 replay is
+  optional-but-recommended and is blocked by pg-agent's own
+  `trg_tools_ddl_bump` event trigger, which breaks `CREATE EXTENSION stannum`
+  on both `0.4.0` and `0.5.0` (byte-identical amhandler DDL; the install
+  succeeds with the trigger dropped). That is a harness defect for pg-agent's
+  owner, and its absence does not block E.4 — the pgembed measurement was the
+  missing one and it is now in hand.
 
   **E.2's two gaps closed (`c20f7ca`), controller-verified.** The new
   `postgres/tests/rebuild_guarantees.py` suite (483 lines, registered in
@@ -2206,7 +2284,7 @@ the build gate; this section only governs ranked p50.
 | D.3 | 1431229 | 1 | 2 | 51 | Unchanged from D.2, which is the expected result for a step whose gate is "do not regress": `fields.snippets` and `fields.highlight_spans` still PASS and `--area fields` is 7 PASS / 0 FAIL. Three Phase-2.4 `#[ignore]`d shape tests un-ignored and green; `am.rs`-level title/body operator-scope tests stay ignored for D.4. |
 | D.4 | | 0 | 2 | 37 | **required** — Appendix A complete |
 | D.4 | 6ad9523 | 1 | 2 | 51 | Unchanged from D.3, the expected outcome: planner coverage changes which executor answers, not what it answers. `script/test-all full` on PG18 **13 passed, 0 failed** (controller re-run), including conformance, pgrx (374/0), postings-lifecycle after the key-less-bitmap fix, and extension-upgrade. |
-| E.4 | | 0 | ≤2 | | release gate |
+| E.4 | 7465464 | 1 | 2 | 51 | Unchanged from D.4, the expected result: E.4 moved no stannum code, it discharged the packaging measurement. FAIL = the adjudicated `fields.boolean_duplicate_leaf` (raw, divergence entry deleted); GAP = `catalog.functions`, `catalog.gucs`. The release-gate half is the pgembed wheel measurement recorded in the step, not a census delta. |
 
 ---
 
@@ -2221,6 +2299,7 @@ the build gate; this section only governs ranked p50.
 | D.5 | | (D.4 SHA) | full official + jieba + retrievers | **C.2 gated** |
 | D.5 | ec6d028 (pgembed) | 1 | 2 | 51 | pin → D.4 `6ad9523b`. Controller-re-run **82 passed / 2 skipped / 0 failed**, jieba 8/8. Three pre-existing retriever-adapter faults fixed because the smokes had never run: two imports from paths that exist in no version of the declared range, an `aretrieve` that never received a `QueryBundle`, and a random `TextNode` id. Census unchanged. |
 | E.3 | | (E-series) | release wheel | joins E.4 |
+| E.4 | 7fc5763 + 277106d (pgembed) | 7465464aeb74cfc57afdfd8507f1878c31cbd0e6 | gate job **92 passed / 2 skipped** per platform; `test_bundled_tools.py` 7P; `-m integration test_pgembed.py + test_tigerfs_pg18.py` 35P/1 deselected on all three platforms; TigerFS mount 1P/2 deselected | run [37289894913](https://github.com/wuxianliang/pgembed/actions/runs/37289894913) on branch `stn4-e4-release-gate`. Candidate wheels: macOS arm64 sha256 `7ea126cae2a64d5586afa8bb9239c673a2841122147e26e78fe711746212cc39`, Linux x86_64 sha256 `f3cf5e080d78a153ea3bfd47d16b8076c031371af04013a72ea1375d2623efc5`. Provenance asserted inside the job (stannum 0.5.0 @ the Makefile pin, postgres 18.4 @ REL_18_4) plus the in-test 42-proc / no-`pg_test`-UDF / `capabilities()` checks on a live server. First dispatch failed on the step's own hardcoded artifact path (`evidence/source-locks.json`; real layout `evidence/release-evidence/…`) before any test ran — fixed in `277106d`, which also made the identity an assertion. The 2 skips are the two "extra is present" mirror assertions. |
 
 ---
 
