@@ -1422,7 +1422,7 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     `nm -u` **0** `InterruptPending`, pgrx 374/0 (before E.1's Python-only
     change), census **1 FAIL / 2 GAP / 51 PASS**, TIN **exit 0** 169/189.
 
-- [ ] **E.2 Runbook + divergence ledger**
+- [x] **E.2 Runbook + divergence ledger**
   - Goal: operators can cut over; development fielded-terms indexes are a
     documented REINDEX, not a supported upgrade.
   - Scope: operator doc (downtime window, replicas rebuilt not replayed,
@@ -1434,6 +1434,60 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     (2 GAP remaining unless closed).
   - Review focus: design §6.1, §6.3 last paragraph (StaleFielded after
     0.5.0 ships is stn3-dev only).
+  - Result (**code @ b8789e0**, box checked separately): **DONE-WHEN MET.**
+    New `docs/upgrade.md` (151 lines) linked from `docs/README.md`,
+    `docs/RELEASING.md` and `docs/compatibility.md`, plus the ledger's
+    `catalog.gucs` classification.
+    **The runbook covers** what migrates vs rebuilds with the pinned actionable
+    text for each class (`PreStn3`, `StaleFielded`, `MixedFielded`, kind-5+LSG
+    corrupt, rebuild-only, reject); that generation is decided by validated
+    metadata and buffer tags and never by a token that resembles `~0~foo`; that
+    a 0.4.0 **multi-column** index is kind-1 with LSG segments and therefore
+    takes the same supported `PreStn3` path as single-column, and is not a
+    fielded-terms leftover; the downtime window (one `stannum.so` per
+    postmaster, traffic off until every index is rebuilt); replicas **rebuilt
+    from the upgraded primary, never replayed across the library swap**, with a
+    clean-shutdown checkpoint as the replay boundary; rollback as restore with
+    no downgrade; the cutover's seven ordered steps; and the REINDEX runbook
+    (non-concurrent only, with the reason `REINDEX CONCURRENTLY` is deliberately
+    not promised), including the full list of index-definition fields preserved
+    and the five post-rebuild checks.
+    **The runbook ends with an audit of the adjudication's six rebuild
+    guarantees** that names which are covered by a test and which rest on
+    documentation: **3 tested**, 2 **partly tested**, 1 **documented, only
+    partly tested**. The two named gaps, carried forward: there is no
+    post-rebuild dump of expressions, predicates, `field_weights` or the full
+    reloption list; and no test interrupts `REINDEX INDEX` itself (only
+    `CREATE INDEX CONCURRENTLY` and a crash mid-fold). Both are honest
+    findings, recorded rather than smoothed over — E.4 should close them.
+    **`catalog.gucs` classified.** The controller verified the classification
+    independently: with `LOAD 'stannum'` in one session, the live engine shows
+    **21** `stannum.*` GUCs, and **9 recorded + 12 documented-gained match
+    field-for-field (name, setting, reset_val, min_val, max_val, vartype,
+    context), 12/12 and 9/9, with nothing unaccounted for.** Eight gained
+    settings are the production surface (`count_fold`, `deferred_merge_docs`,
+    `max_expansion_terms`, `read_cache_mb`, `reader_cache_mb`, `reclaim_pages`,
+    `warmup_chunks`, `warmup_min_matches`); four are a deliberate
+    diagnostic/measurement surface (`profile_count_selection`,
+    `count_page_threshold`, `force_count_pages`, `debug_seed_score`), and
+    `debug_seed_score` is **superuser** because it can change ranked results.
+    **None is accidental drift.**
+    **`catalog.functions` ratified with the E.2 checks.** Controller-verified
+    against the release build on the live PG18.4 cluster: **42 `pg_proc`
+    functions, 0 `pg_test`-only UDFs** (`corrupt_index_page` and
+    `index_page_kinds` are `#[cfg(feature = "pg_test")]` and correctly absent),
+    and `capabilities()` is **invoker-rights** (`prosecdef = f`, owned by
+    `postgres`, executable) with no `SECURITY DEFINER` — exactly what the
+    ledger and `docs/compatibility.md` now claim.
+    Gates: lib 137/0, workspace 14 suites, fmt + clippy clean,
+    `script/test-all quick` 7/7, headers 2/2, `nm -u` **0** `InterruptPending`,
+    census **1 FAIL / 2 GAP / 51 PASS** (unchanged — the divergence change is a
+    summary rewrite, not a new divergence), TIN conformance **exit 0** 169/189.
+    **Note:** the implementing agent's session became unreachable through the
+    MCP tool while its verification list was still running; the controller
+    verified every gate and claim itself from the finished on-disk state, and
+    the agent's own mutation-proof request was not run — the ledger's status
+    rests on the controller's field-for-field measurement instead.
 
 - [ ] **E.3 Wheel alignment**
   - Goal: pgembed 0.5.0-aligned wheel (PG18, `BUILT_FOR_POSTGRES_MAJOR`
