@@ -661,7 +661,19 @@ unsafe fn relevant_stannum_indexes(
 ) -> Vec<pg_sys::Oid> {
     unsafe {
         let stannum_name = CString::new("stannum").expect("static access method name is valid");
-        let stannum_am = pg_sys::get_index_am_oid(stannum_name.as_ptr(), false);
+        // The library is loaded before the access method it ships exists. An
+        // extension script creates the amhandler function first and the access
+        // method after it, and a `LOAD` or a `CREATE FUNCTION` naming this
+        // library loads it in a database that has no extension installed at
+        // all. This hook plans every relation in that backend, so a missing
+        // access method has to mean "no stannum indexes here" rather than an
+        // error: otherwise planning any query — including the extension's own
+        // script, and anything an event trigger runs between its statements —
+        // fails with `access method "stannum" does not exist`.
+        let stannum_am = pg_sys::get_index_am_oid(stannum_name.as_ptr(), true);
+        if stannum_am == pg_sys::InvalidOid {
+            return Vec::new();
+        }
         let mut seen = FxHashSet::default();
         let mut indexes = Vec::new();
         let mut push = |oid: pg_sys::Oid| {

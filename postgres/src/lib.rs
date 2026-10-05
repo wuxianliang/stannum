@@ -1690,6 +1690,26 @@ mod tests {
         .unwrap();
     }
 
+    /// The library is loaded in this backend, so the planner hooks are
+    /// installed, while the access method the extension ships is gone — exactly
+    /// the state an extension script leaves behind between creating the amhandler
+    /// function and creating the access method, and the state any `LOAD` or
+    /// `CREATE FUNCTION` naming this library produces in a database that never
+    /// installed the extension. Planning must still work.
+    #[pg_test]
+    fn planning_survives_a_database_without_the_access_method() {
+        Spi::run("CREATE TABLE plan_probe (i int); INSERT INTO plan_probe VALUES (1), (2);")
+            .unwrap();
+        Spi::run("DROP EXTENSION stannum CASCADE").unwrap();
+        assert!(
+            Spi::get_one::<i64>("SELECT count(*) FROM plan_probe").unwrap() == Some(2),
+            "planning a query failed after the access method was dropped"
+        );
+        Spi::get_one::<String>("EXPLAIN (COSTS OFF) SELECT count(*) FROM plan_probe")
+            .unwrap()
+            .expect("explain produced no plan");
+    }
+
     /// Field scope on `==>` through the custom scan.
     #[pg_test]
     fn title_body_operator_scope_custom_scan() {

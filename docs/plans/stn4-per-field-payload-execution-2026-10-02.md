@@ -2096,6 +2096,33 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   second one is exactly the mistake that would have produced a false
   attribution to stannum.
 
+  **CORRECTED (2026-10-05, controller): the paragraph above is wrong about whose
+  defect this is, and wrong in the direction that mattered.** It was measured
+  against the dev-line library in the prefix (`d895c8e`), which contains the
+  same defect, so "both 0.4.0 and 0.5.0 fail" was really "both 0.5.0-family
+  libraries fail" — no true 0.4.0 binary was ever compared. pg-agent's isolation
+  experiments and the controller's lldb backtrace agree on the mechanism:
+  ```
+  errfinish ← get_am_type_oid("stannum") raises "access method \"stannum\" does not exist"
+  ← stannum::customscan::dictionary_parallel_for_relation
+  ← stannum::customscan::rel_pathlist_hook   ← installed by _PG_init, i.e. at dlopen
+  ← set_rel_pathlist → make_one_rel → query_planner → pg_plan_query → ExplainQuery
+  ```
+  `_PG_init` installs `set_rel_pathlist_hook`, and `_PG_init` runs when the
+  library is **dlopened** — by any `CREATE FUNCTION … AS 'stannum', …` or `LOAD`,
+  not only by `CREATE EXTENSION`. From then on, that backend plans **every**
+  relation through the hook, and `relevant_stannum_indexes()` looked the access
+  method up with `missing_ok = false`. An extension script creates the amhandler
+  function *before* the access method, so between those two statements the method
+  does not exist and planning anything fails. The event trigger was incidental:
+  it merely supplied a query to run in that window.
+  **Origin: `18a3892` (2026-10-01, the 0.5.0 cut day), "Apply the jieba
+  dictionary parallel policy to every relevant index"** — the commit that
+  introduced both that hook body and the `missing_ok = false` lookup. It is in
+  0.5.0 and not in the 0.4.0 line, so **this is a stannum regression and the fix
+  belongs here, not in pg-agent.** v13's replay should be re-run once the fix
+  ships, and must not be recorded as a harness defect.
+
   **Also not corrected here:** pgrx's `pg_config` still points at the missing
   pgembed `pginstall` prefix, so every `cargo pgrx test` / `install` needs
   `PGRX_PG_CONFIG_PATH` until either that prefix is rebuilt or the configured
