@@ -15,9 +15,22 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 PG_PORT = "28959"
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def workspace_version():
+    """Version pgrx writes into pg_extension. Cargo.toml is the only declaration."""
+    cargo = ROOT / "Cargo.toml"
+    with cargo.open("rb") as handle:
+        data = tomllib.load(handle)
+    version = data.get("workspace", {}).get("package", {}).get("version")
+    if not isinstance(version, str) or not version:
+        raise AssertionError(f"{cargo} [workspace.package].version is missing")
+    return version
 
 DOCS_SQL = """
 CREATE TABLE docs (id int PRIMARY KEY, body_jieba text, body_default text);
@@ -184,9 +197,14 @@ class JiebaTokenizerTests(unittest.TestCase):
                 self.assertGreater(float(line.split("|", 1)[1]), 0.0)
 
     def test_dictionary_drift_reindex_and_presets(self):
+        expected = workspace_version()
+        installed = self.sql(
+            "SELECT extversion FROM pg_extension WHERE extname='stannum';"
+        )
         self.assertEqual(
-            self.sql("SELECT extversion FROM pg_extension WHERE extname='stannum';"),
-            "0.5.0",
+            installed,
+            expected,
+            f"installed extversion is {installed}, Cargo.toml declares {expected}",
         )
         self.assertEqual(
             self.sql("SELECT matches FROM stannum.index_analysis('docs_jieba');"),
