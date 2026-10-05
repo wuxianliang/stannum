@@ -1002,8 +1002,158 @@ membership, ranking, field scopes, positional behavior, and integrity; and
 that an interrupted rebuild publishes no partial index and loses no heap data
 (`REINDEX CONCURRENTLY` only if tested).
 
+**E.3's pgembed provenance adjudication (2026-10-05, three rulings).**
+E.3's mechanical half was already done and controller-verified — the release
+build from pin `3227d7af`, the standalone wheel at 5,389,563 bytes shipping
+`default_version = '0.5.0'`, and the full pgembed suite green against it
+(`82 passed / 2 skipped / 0 failed` on PG18.4). What held the box open was a
+decision the controller may not make alone, because the defect it governs is
+about what a shipped artifact is *allowed to claim*.
+
+**The defect.** `tools/generate_bundle_metadata.py`'s literal `EXTENSIONS`
+table is the only source of per-extension version and commit for the published
+`build-metadata.json`. For stannum it recorded
+`d895c8e98d89bcb40dcf374799f2e58df801c7ae`, while `pgbuild/Makefile:288`
+actually builds and *verifies* `STANNUM_COMMIT :=
+3227d7afecd2b66e669c083266043c7cb6f9ada5` (the recipe asserts
+`rev-parse HEAD == STANNUM_COMMIT` at Makefile:778).
+`tests/test_bundled_tools.py` meanwhile asserted a third value,
+`e163585cb9d6b6f78b8de067a9c4aa33ea238063`. The wheel built during E.3
+therefore shipped provenance for a source it did not contain — the same defect
+class already recorded at C.4, where the bundle stamp lagged the shipped
+dylib. It is not cosmetic: `tools/release_evidence.py` turns `source_commit`
+into a release **source lock**, so a wrong value silently mis-attributes a
+shipped binary in release evidence.
+
+**Ruling A — derive provenance from the Makefile's verified pins (option 2 of
+four).** An explicit **source-lock handoff**, not Make-syntax scraping (which
+`?=`, command-line overrides and conditionals would defeat). The Makefile
+passes one lock per extension, from the same variables the recipes verify; a
+lock is a git **commit** or an archive **sha256**. The generator then: requires
+a lock for every built extension; requires *exactly one* immutable identity;
+emits the value from the lock rather than a duplicate hardcoded table; and
+**hard-fails** on a missing or conflicting lock. For a built extension,
+`version` comes from the installed extension control file's `default_version`,
+never from the table — a built extension with no readable `default_version`
+fails rather than silently falling back to a stale value. The table keeps only
+its *structural* fields (`stem`, `create_name`, `preload_name`,
+`requires_preload`, `built_for_postgres_major`).
+
+Rejected, with the reasons recorded: **hand-maintenance (option 1)** is
+unacceptable operationally — it already drifted twice and guarantees another
+two-file desync on the next pin bump; **hash the produced library (option 3)**
+confuses artifact identity with source identity, changes with toolchain and
+linker, and would break the deterministic exact-value locks (a library digest
+may be added later as a *separate* `artifact_sha256` field, never in place of
+`source_commit`); **literal table + verify-and-fail (option 4)** is a valid
+lower-risk fallback that still leaves duplicate data and a two-file bump. The
+exact-value assertions in `test_bundled_tools.py` and
+`test_release_evidence.py` are **kept and updated** to the intentional value
+`3227d7af...` — they must not be weakened to existence checks.
+
+**Ruling B — `pg_textsearch` leaves the bundle.** It is the **benchmark
+comparison target** for stannum, not a bundled extension, and must not become a
+first-class bundl**ed** component merely because a build recipe and a metadata row
+exist. It was, in fact, doubly dead: absent from both `EXTENSIONS` default
+lists (Makefile:49/51) while `all: postgres $(EXTENSIONS) …` (:373) meant the
+default build never ran it, *and* declared `.PHONY` (:372) so even an explicit
+`make pg_textsearch` re-ran on every invocation and its recipe ran a bare
+`$(MAKE) -C … install` with no `$(INSTALL_PREFIX)`-scoped staging. Removal
+covers the metadata block, the `.PHONY` target, the source variables,
+verification stamp, recipes, clean rules, `NATIVE_BUILD_DIRS` entry, bundle
+config-stamp key, the `src/pgembed/__init__.py` entries, and every
+release-evidence expectation — plus a regression check that a built prefix and
+wheel contain no `pg_textsearch` artifacts. The **benchmark path survives** and
+provisions its own external pg_textsearch against the same PG18.4 environment;
+it may not assume the wheel prefix contains the competitor. Bundling it instead
+would require an explicit product/redistribution decision (licence,
+attribution, support, wheel size) *and* complete first-class build integration;
+for the record, the missing `DESTDIR` was **not** judged a defect — passing
+`PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config` can legitimately install through
+PGXS.
+
+**Ruling C — one atomic-write policy, 0644, refuse symlinks.** There were two
+`atomic_write` implementations (the extract path and the live path with the
+`JEV_OVERLAY_CRASH_BEFORE_RENAME` hook); they converge into one shared helper
+with a mode parameter. `tempfile.mkstemp` stays (it is deliberate — no
+symlink-at-temp races), but `os.fchmod(fd, 0o644)` is applied **while the
+descriptor is open and before** `os.replace`, never after: a crash between
+rename and chmod would ship a 0600 *public* provenance file. The destination
+mode is **not** preserved from an existing file, which could preserve the
+already-broken 0600 forever. A symlinked destination — including a dangling
+one — and a symlinked parent are **refused** on `lstat`-style checks that do not
+follow the link; writing through the link is rejected because it permits output
+outside the intended prefix. `args.output.unlink(missing_ok=True)`
+(generator:429) is **removed**: it was the actual cause of the symlink
+destruction, opened a window with no metadata file, and lost the previous valid
+metadata if generation then failed. Terminology correction recorded: `os.replace`
+does not write *through* a destination symlink, it replaces the directory entry;
+the destructive behaviour came from the explicit `unlink`. Refusing is still
+the correct policy. Private intermediate evidence files stay 0600.
+
+**Finding 1 — a symlinked *grandparent* is written through (P1, ruling had a gap).**
+The ruling named a symlinked destination and a symlinked destination parent. The
+implementation checks the destination and its **immediate** parent only, so with
+`$O/share-link -> $O/share` the generator exits 0 and writes
+`$O/share/pgembed/build-metadata.json` **through** the link — the exact failure the
+ruling's own rationale forbids ("permits output outside the intended prefix").
+`lstat` on `share-link/pgembed` sees `pgembed` as its final component, so the link
+above it is invisible. The controller did **not** guard the whole ancestor chain
+unconditionally, because `INSTALL_PREFIX` is legitimately a symlink in practice
+(`/usr/local`, a symlinked build directory, Darwin's `/tmp` → `/private/tmp`) and
+refusing those would break real builds for no safety gain. **Adjudicated scoping,
+binding:** keep `atomic_write` prefix-agnostic; add an install-prefix-aware
+validation step in `main()` and `run_overlay()`, both of which know the prefix;
+walk **every component of `output` below `install_prefix`** with `lstat` and reject
+any symlinked intermediate component; **intentionally permit the prefix itself and
+its ancestors to be symlinks**. Two refinements the controller had missed: use
+`realpath()` only to establish that alternate spellings denote the same physical
+location — never as the object of the walk, which would hide the very child
+symlinks being checked; and reject an output that is not a descendant of the prefix
+**before** walking or creating directories, so a `..` component cannot be
+normalized away and skip the symlink before it. Three regression tests required:
+symlinked grandparent rejected with nothing written through it; symlinked install
+prefix **accepted**; the Darwin equivalent-prefix case where practical.
+
+**Finding 2 — two Firebird submodule identities changed in release evidence
+(P2, adjudicated as keep-and-pin).** Ruling A makes `firebird_fdw`'s
+`source_submodules` derive from the `libfq` / `libtommath` / `firebird-client`
+locks instead of a hardcoded literal, and two of the three emitted values differ
+from what shipped before: `libtommath` gains the `v` that
+`pgbuild/Makefile`'s `LIBTOMMATH_TAG := v1.2.1` actually carries (`1.2.1:` →
+`v1.2.1:`), and `firebird-client` gains the archive digest (`5.0.3.1683-0` →
+`5.0.3.1683-0:<sha256>`), so it is now an immutable identity rather than a
+version, matching its two siblings' `version:sha256` shape. `libfq` is unchanged.
+Because `tools/release_evidence.py` copies `source_submodules` verbatim into the
+emitted `source_locks`, this is a content change to published release evidence that
+the adjudication had not named. **Adjudicated: option (a) — keep the lock-derived
+values and pin them exactly.** Normalizing `v1.2.1` back to `1.2.1` for cosmetic
+compatibility is forbidden: a provenance value must describe the recipe, not
+stabilize a document. The 0.5.0 evidence showing `v1.2.1:` where 0.4.0 showed
+`1.2.1:` for the same upstream tarball is acceptable precisely because it is
+documenting the current recipe, not promising byte-for-byte stability with the
+previous document. **Required pins:** the complete `source_submodules` mapping in
+`tests/test_bundle_metadata.py`, and the exact serialized `source_locks` in
+`tests/test_release_evidence.py` — preferably derived from the generated metadata
+rather than duplicated as independent literals, so the two cannot drift.
+
+**A fourth stale value, found during verification and recorded (not part of this
+change).** `tests/test_postgres_build.py` pinned the bundle config stamp's
+`stannum=ad4d3b74…` while `pgbuild/Makefile` already said `3227d7af` — a fourth
+disagreement beyond the three catalogued above. The implementing agent corrected it
+to `3227d7af` and added an assertion that the stamp contains no `pg_textsearch=`.
+
+**Verification limits of this record, stated plainly.** The controller could not
+reproduce the earlier full-suite figure (`82 passed / 2 skipped / 0 failed`) because
+that measurement was taken against an installed wheel whose prefix and venv no
+exist (`/tmp` was cleaned); this checkout has no `src/pgembed/pginstall`, and the
+6 failures in `-m "not integration"` are all
+`BundledPostgresMetadataError: bundled PostgreSQL metadata is unavailable … run
+'make build'` — environmental, not logic. E.3's done-when clause was verified at
+the time against that wheel; the provenance repair is verified against the
+controller's own synthetic prefix.
+
 **Implementation order: keep `D.1 → D.2 → D.3 → D.4 → D.5`.** There is no
-cheaper reordering justified by the dependency graph — D.2 would otherwise
 invent temporary scope handling that D.1 must replace. The cheaper schedule is
 to prepare D.2's independent fixtures and D.4's plan matrix *while* D.1 lands.
 Oracle review focus per step: **D.1** scope survives normalization and boolean
@@ -1489,7 +1639,7 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     the agent's own mutation-proof request was not run — the ledger's status
     rests on the controller's field-for-field measurement instead.
 
-- [ ] **E.3 Wheel alignment**
+- [x] **E.3 Wheel alignment**
   - Goal: pgembed 0.5.0-aligned wheel (PG18, `BUILT_FOR_POSTGRES_MAJOR`
     audit), standalone binaries, release evidence. Close 2.8/3.3 backlog:
     `build-metadata.json` stannum version/source_commit hardcodes if this
@@ -1498,10 +1648,12 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Done when: wheel installs the 0.5.0 extension and the full pgembed suite
     is green against it (joins E.4).
   - Review focus: STN3 6.3 done-when; design §8 E.3.
-  - **PARTIAL — do not check this box yet.** The mechanical half is done and
-    controller-verified; the backlog half is blocked on a decision only the
-    oracle can make, so this step is held open deliberately rather than closed
-    on a partial basis.
+  - **CLOSED (pgembed `fdf1201`, oracle adjudicated and reviewed).** The
+    mechanical half and the backlog half are both done; see the adjudication
+    registry above for all three rulings and the review addendum. The
+    done-when's operative clause was verified against the wheel built at pin
+    `3227d7a`; the provenance repair is verified against a synthetic PG18.4
+    prefix the controller built by hand.
     **Done (pgembed `ea02d16`, pin D.4 `6ad9523b` → E-series `3227d7a`,
     controller-verified):** release build installed from the pinned SHA, wheel
     built through `tools/build_standalone_extension_wheel.py --extension
@@ -1510,28 +1662,37 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     (`82 passed / 2 skipped / 0 failed`, controller re-run on PG18.4)**. The
     wheel installs the 0.5.0 extension, which is the done-when's operative
     clause.
-    **Blocked — the 2.8/3.3 `build-metadata.json` backlog.** The generated
-    bundle metadata hardcodes `stannum.source_commit="d895c8e9…"`, and the
-    controller established that the **uncommitted `pg_textsearch` work is what
-    set that value**: its diff on `tools/generate_bundle_metadata.py` changes
-    it from `e163585c…` to `d895c8e9…` while adding the `pg_textsearch` block.
-    **Neither value matches the pin** (`6ad9523b` before E.3, `3227d7a` after),
-    so the wheel's `build-metadata.json` **provenance does not describe the
-    artifact it ships** — the same class of defect already recorded at C.4,
-    where the bundle stamp lagged the shipped dylib. The fix is to derive
-    `source_commit` (and ideally the version) from `pgbuild/Makefile`'s
-    `STANNUM_COMMIT` rather than hardcoding it, but **that file is under an open
-    oracle review** (`pg_textsearch` is a phony target missing from the
-    `EXTENSIONS` list `all` consumes; `os.replace` overwrites a symlinked
-    `--output` destination rather than writing through it; `atomic_write` uses
-    `mkstemp`'s 0600 mode for public metadata). Landing the fix before that
-    review closes would collide, so it waits on an oracle adjudication.
-    Also outstanding and inert unless the run happens to include a
-    `pg_textsearch` build: `CI flake` — `crash-before-publication` failed on
-    `3227d7a` (`x86-64 / PostgreSQL 18`, docs-only commit with byte-identical
-    code) and passed on re-run. **Third occurrence** on identical code
-    (`1967cfa`, the `80de21e`-era run, `3227d7a`). It needs an owner: a bounded
-    retry in `.github/workflows/ci.yml` for that step.
+    **The 2.8/3.3 backlog is closed (pgembed `fdf1201`).** All three rulings
+    were implemented and controller-verified: the generator takes one
+    `--source-lock` per component from the Makefile variables the recipes
+    already verify, reads `version` from the installed control file's
+    `default_version`, and hard-fails on a missing lock, a missing
+    `default_version`, a malformed identity, a conflicting duplicate or an
+    unknown name. On the controller's own synthetic PG18.4 prefix the stannum
+    record now emits `version = 0.5.0`,
+    `source_commit = source_ref = 3227d7afecd2b66e669c083266043c7cb6f9ada5`,
+    `source_sha256 = null`, at mode **0644**, with `pg_textsearch` absent.
+    Suite: `173 passed / 69 skipped / 6 failed`, where the 6 are
+    `BundledPostgresMetadataError: bundled PostgreSQL metadata is unavailable …
+    run 'make build'` — this checkout has no `src/pgembed/pginstall`, so they
+    are environmental and unchanged from the pre-repair baseline of 170. The
+    earlier `82 passed / 2 skipped / 0 failed` figure is **not reproducible
+    here**: it was measured against an installed wheel whose prefix and venv
+    are gone (`/tmp` was cleaned), and this tree has no built prefix. E.4 must
+    re-measure against a real wheel install before it can call the pgembed
+    suite green.
+    **Carried into E.4 rather than closed here, and why.** Two of E.2's named
+    rebuild-guarantee gaps remain open (no post-rebuild dump of expressions,
+    predicates, `field_weights` or the full reloption list; no test interrupts
+    `REINDEX INDEX` itself), and the `CI flake` — `crash-before-publication`
+    failed on `3227d7a` (`x86-64 / PostgreSQL 18`, a docs-only commit with
+    byte-identical code) and passed on re-run, its **third** occurrence on
+    identical code (`1967cfa`, the `80de21e`-era run, `3227d7a`). The
+    controller did **not** add the recorded "bounded retry": the log for that
+    run is no longer retrievable (the GitHub job-logs endpoint returns 404),
+    so a retry would be retrying past a failure nobody can describe. That is
+    the gate-weakening the constraints forbid, so it stays an open item with
+    E.4 as owner until the failure recurs and can be read. Owner: E.4.
 
 - [ ] **E.4 Conformance + parity sweep — GATE**
   - Goal: three suites green on the STN4 0.5.0 artifact.
