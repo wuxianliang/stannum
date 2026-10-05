@@ -2102,7 +2102,7 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   path is changed. This contradicts the plan's §0 census-measurement rule as
   written and is recorded as a doc correction to make.
 
-- [ ] **E.5 Release 0.5.0**
+- [x] **E.5 Release 0.5.0**
   - Goal: ship STN4 as the 0.5.0 representation inside STN3 terms.
   - Scope: `stannum--0.5.0.sql` final (catalog-only; no layout SQL);
     CHANGELOG; tag; `stn3` merged per parent §9 strategy; `main` →
@@ -2110,6 +2110,41 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Done when: tag exists; origin `stn3` and release artifacts pushed;
     tracker closed. E.4 green is required.
   - Review focus: parent §9; design §6.4.
+  - **CLOSED (`025bcb6`, tag `v0.5.0`).** The snapshot was checked rather than
+    assumed: `cargo pgrx schema pg18 --package stannum --no-default-features
+    --features pg18` regenerates SQL that `extension_upgrade.normalized()`
+    finds byte-identical to the committed `postgres/sql/stannum--0.5.0.sql`
+    (16,146 bytes both) — the raw diff is only pgrx source-location comments
+    and object order, the two things that normalizer exists to ignore. It also
+    carries no `corrupt_index_page`, no `index_page_kinds` and no
+    `SECURITY DEFINER`, as the release test requires.
+    **The catalog delta was verified signature by signature, not by the
+    migration file's own claim.** 0.4.0's snapshot holds 38 function
+    definitions, 0.5.0's 39; the only addition is `capabilities()`, nothing is
+    lost and no definition text changed. So `stannum--0.4.0--0.5.0.sql` is
+    complete, and the `jieba_*` functions need no ALTER because their SQL is
+    unchanged from 0.4.0 — even though 0.5.0 implements them against a real
+    dictionary instead of a stub. That last point was the defect this step
+    found and fixed: both the CHANGELOG's opening paragraph and the migration
+    file's own comment still told operators the opposite of what ships.
+    The CHANGELOG's 0.5.0 entry now describes the released surface — the
+    multi-column index with per-field streams and `field_weights`, field scope
+    in matching, ranking, highlighting and the planner, jieba and its
+    dictionary functions, and `stannum.capabilities()` — instead of the state
+    of the first cut on 2026-10-01.
+    `docs/README.md` records the branch policy the merge implements: `stn3` is
+    the development branch, `main` carried 0.4.0 until this parity gate and is
+    now maintenance-only, and upstream changes still land as reviewed tagged
+    snapshots. Both branches push to `origin`.
+  - **The merge.** `main` and `stn3` had genuinely diverged — 153 commits on
+    `stn3` not in `main`, 62 on `main` not in `stn3`, the latter being the
+    upstream snapshots `main` carried while it held 0.4.0 — so this was a real
+    merge with conflicts to resolve, not the fast-forward the STN3-era wording
+    suggested. Recorded here because the divergence is the reason the merge
+    deserved its own verification pass rather than riding along with the tag.
+  - **Tracker closed.** E.5 was the last open item in this plan; the census
+    ledger's final row is E.4 at 1 FAIL / 2 GAP / 51 PASS, the FAIL being the
+    adjudicated `fields.boolean_duplicate_leaf`.
 
 **Phase gate PE** (normative: design §6 + parent §8 / §9): two-artifact
 migration CI green including §6.3 fixtures; wheel + conformance + contract

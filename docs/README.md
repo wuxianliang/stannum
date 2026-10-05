@@ -70,3 +70,21 @@ search. Run commands from the repository root.
   taken.
 - [Boldi–Vigna crate](../boldi-vigna/README.md): the positional operator
   evaluator inherited from Lead.
+
+## Repository branches
+
+`stn3` is the development branch, forked from `upstream/main`: our work lives
+in `postgres/src/tool/`, `postgres/src/fields/`, the owned shims in
+[tinql/](../tinql/src), `tokenizer/` and `contract/`, and conflict on an
+upstream merge is expected in the same files each time. Tags name releases;
+`v0.5.0` is the first.
+
+`main` is **maintenance-only** as of 0.5.0. It carried 0.4.0 until the 0.5.0
+parity gate went green, was then brought to the released line, and from here
+takes only fixes for what it has already shipped. New work goes on `stn3` or a
+fresh branch from it, and reaches `main` by a release merge, not by being
+developed there.
+
+Upstream changes land as reviewed, tagged snapshots — never by chasing
+`upstream/main` — and the pinned SHA is recorded in
+[UPSTREAM.md](UPSTREAM.md). Both branches push to `origin`.
