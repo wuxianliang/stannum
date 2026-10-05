@@ -2380,9 +2380,65 @@ the build gate; this section only governs ranked p50.
 | E.3 | | (E-series) | release wheel | joins E.4 |
 | E.4 | 7fc5763 + 277106d (pgembed) | 7465464aeb74cfc57afdfd8507f1878c31cbd0e6 | gate job **92 passed / 2 skipped** per platform; `test_bundled_tools.py` 7P; `-m integration test_pgembed.py + test_tigerfs_pg18.py` 35P/1 deselected on all three platforms; TigerFS mount 1P/2 deselected | run [37289894913](https://github.com/wuxianliang/pgembed/actions/runs/37289894913) on branch `stn4-e4-release-gate`. Candidate wheels: macOS arm64 sha256 `7ea126cae2a64d5586afa8bb9239c673a2841122147e26e78fe711746212cc39`, Linux x86_64 sha256 `f3cf5e080d78a153ea3bfd47d16b8076c031371af04013a72ea1375d2623efc5`. Provenance asserted inside the job (stannum 0.5.0 @ the Makefile pin, postgres 18.4 @ REL_18_4) plus the in-test 42-proc / no-`pg_test`-UDF / `capabilities()` checks on a live server. First dispatch failed on the step's own hardcoded artifact path (`evidence/source-locks.json`; real layout `evidence/release-evidence/…`) before any test ran — fixed in `277106d`, which also made the identity an assertion. The 2 skips are the two "extra is present" mirror assertions. |
 
+## Post-release: the 0.5.0 planner-hook regression (2026-10-05)
+
+A pg-agent v13 baseline run surfaced it, but the cause was ours.
+
+**Defect.** Loading the library installs `set_rel_pathlist_hook` via `_PG_init`,
+and `_PG_init` runs at **dlopen** — by any `CREATE FUNCTION … AS 'stannum', …`
+or `LOAD`, not only by `CREATE EXTENSION`. `relevant_stannum_indexes()` then
+looked the access method up with `missing_ok = false`, and an extension script
+creates the amhandler function *before* the access method, so in that window
+planning **any** query failed with `access method "stannum" does not exist`.
+Introduced by `18a3892` (2026-10-01, the 0.5.0 cut day), in 0.5.0 and not in
+the 0.4.0 line.
+
+**Fix** (`0c3bb25`): the lookup asks for a missing method and yields no indexes,
+which is what an absent method means. Behaviour with the method present is
+unchanged.
+
+**Evidence**, all measured on a rebuilt library in a scratch prefix:
+
+| check | result |
+|---|---|
+| the repro (dlopen, then plan in the same backend) | ERROR before, 3413 after |
+| `CREATE EXTENSION stannum` with a v13-shaped event trigger installed | FAIL before, PASS after |
+| custom scan / bitmap / seq scan plan shapes | all still resolve stannum indexes |
+| `cargo pgrx test pg18` | **375 passed / 0 failed / 0 ignored** |
+| contract census vs the unchanged 0.4.0 baseline | **1 FAIL / 2 GAP / 51 PASS** — the recorded figures |
+| clippy / fmt | clean (`pg18,pg_test`) |
+
+**The regression test has teeth**: its sequence (library loaded, extension
+dropped so the access method is gone but the hooks stay installed, then query
+and EXPLAIN) errors on the pre-fix library and passes on this one.
+
+**One census surprise, resolved as an environment artifact.** `calls.stop_words`
+failed on macOS against the fixed build, with a word list that looked
+different. It was not: the 259 words were identical as a *set*, and
+`ORDER BY tok COLLATE "C"` reproduced the recording exactly. The case sorted on
+a bare `ORDER BY tok`, so its answer followed the platform's default collation
+— macOS `en_US.UTF-8` orders the Han words first, glibc orders them after, and
+the recording was made on Linux. The case now pins the collation (`4a1efee`);
+no recorded answer changed and `contract/expected/**` is untouched. Worth
+noting because a case whose answer depends on the host is a gate that passes
+for the wrong reason somewhere else.
+
+**Also a controller mistake, recorded for the same reason.** After running
+`cargo pgrx test` against the scratch prefix, the census gained
+`corrupt_index_page` and `index_page_kinds` and `catalog.functions` reddened:
+`cargo pgrx test` installs the pg_test build into the prefix the test harness
+uses, which is exactly what `script/pgrx-lock.py`'s docstring warns about.
+Reinstalling the release build restored the expected GAP. The prefix is a
+scratch copy, so nothing shipped was affected.
+
+**Status of the v13 replay.** Unblocked: with the fix, `CREATE EXTENSION
+stannum` succeeds with the `trg_tools_ddl_bump` triggers present. The
+pg-agent side should re-run its baseline against a pgembed wheel built from
+`0c3bb25` or later; the four frozen reds it predicted remain outside this
+scope.
+
 ---
 
-## Upstream re-pins
 
 | date | from → to | reason | contract suite |
 |------|-----------|--------|----------------|
