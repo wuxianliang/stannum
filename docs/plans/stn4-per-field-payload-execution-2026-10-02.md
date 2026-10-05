@@ -1245,7 +1245,27 @@ status alone. This was a controller measurement error, not an implementation
 defect, and it is recorded because it is exactly the class of mistake that
 produces a false green.
 
-**Implementation order: keep `D.1 → D.2 → D.3 → D.4 → D.5`.** There is no
+  **The v13 replay, round 1 — blocked with no signal (controller-verified).**
+  The controller independently confirmed the implementing agent's claims rather
+  than relaying them: PyPI does have an arm64 macOS wheel for
+  `pgembed==0.2.0`, but that wheel's bundled prefix is **PostgreSQL 17.9** with
+  extensions `pg_duckdb pg_search pg_textsearch plpgsql vector vectorscale` and
+  **no stannum at all** (no `stannum.control`, no `stannum.dylib`), and
+  `pgembed==0.3.0rc2` is unpublished, so the standalone 0.5.0 wheel cannot be
+  pip-installed against either. The environment therefore failed verification at
+  the PostgreSQL-version step and **no test ran** — which is the correct outcome:
+  a PG17 prefix with no stannum cannot produce 0.5.0 compatibility signal, and
+  copying 0.5.0 files into it would load a PG18 extension under PG17.
+  Also controller-verified: **`v13` is not a tag** in the pg-agent repo (the tag
+  list is empty); the intended tree is commit `78e77c7`, extractable with
+  `git archive 78e77c7`. And the `CREATE EXTENSION pg_cron / pg_jsonschema /
+  pgmq / typesafe` strings in `v13/` are **README prose and a "banned
+  statements" assertion list**, not runtime setup — at setup time only seven
+  modules (`characterize`, `economy`, `memory`, `mgraph`, `mgraph_assembly`,
+  `periphery`, `summary`) actually probe for `stannum`. That is what makes a
+  partial, PostgreSQL-plus-stannum-only replay viable, and round 2 is running it.
+
+  **Implementation order: keep `D.1 → D.2 → D.3 → D.4 → D.5`.** There is no
 invent temporary scope handling that D.1 must replace. The cheaper schedule is
 to prepare D.2's independent fixtures and D.4's plan matrix *while* D.1 lands.
 Oracle review focus per step: **D.1** scope survives normalization and boolean
@@ -1915,23 +1935,37 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   membership and tie ordering are unchanged and only `flat_ranked`'s score
   bits differ (`3f9f9306` vs the recorded `3f1f9306`).
 
-  **Blocked, not green: the pgembed full suite.** `test_bundled_tools.py` and
-  `test_tigerfs_pg18.py` need a built `src/pgembed/pginstall` prefix, which this
-  checkout does not have and which `make build` cannot produce in this
-  session. The pgembed **unit** suite is measured (`173 passed / 69 skipped /
-  6 failed`, all six `BundledPostgresMetadataError`, baseline unchanged); the
-  full suite against a real wheel install is **not**, and E.3's earlier
-  `82 passed / 2 skipped / 0 failed` is not reproducible for the same reason.
-  E.4 cannot honestly claim "pgembed full suite green" until someone runs it
-  against a built prefix. Owner: E.4, and the controller should ask the user.
-
-  **Not yet run: the [pg-agent] v13 replay.** The plan marks it
-  optional-but-recommended. `~/Projects/pg-agent` v13 exists (tag `v13` at
-  `78e77c7`, 46 test files, all psycopg-based) and
-  `v13/mgraph/test_stannum_usage.py` is explicitly a **stannum 0.4.0 usage
-  gate** that pins `pgembed == "0.3.0rc2"` and asserts recorded SQL text —
-  exactly the downstream-compatibility signal a 0.5.0 replay wants. It needs a
-  server with 0.5.0 and the pinned pgembed version. Owner: E.4.
+  **ONE blocker holds both remaining gates — a built pgembed bundle prefix.**
+  The controller initially recorded these as two blockers; they are one. The
+  pgembed full suite needs a built `src/pgembed/pginstall` (`test_bundled_tools.py`
+  and `test_tigerfs_pg18.py` read its bundle metadata), and the **[pg-agent] v13
+  replay needs the same thing**: the controller grepped every
+  `CREATE EXTENSION` in `v13/` and the suite creates `pg_cron`,
+  `pg_jsonschema`, `pgcrypto`, `pgmq`, `stannum` **and** `typesafe` — a full
+  bundle, not PostgreSQL plus stannum. That prefix does not exist in this
+  checkout (`pgembed`'s own editable-install warning confirms
+  `src/pgembed/pginstall/bin` is absent), and building it means `make all` in
+  `pgbuild/`: PostgreSQL 18.4 plus eighteen extensions, hours of wall clock
+  against a disk at **91% (18 GiB free)**. `pgembed==0.3.0rc2` is also **not on
+  PyPI** (published: 0.2.0, 0.1.9), so the version pin in
+  `v13/mgraph/test_stannum_usage.py` cannot be satisfied from the index either
+  — a **concrete setup blocker**, which is the oracle's category 3 and the
+  authorized reason to record-and-ask rather than loosen the assertion.
+  **Measured while blocked:** the pgembed **unit** suite is
+  `173 passed / 69 skipped / 6 failed`, all six
+  `BundledPostgresMetadataError`, baseline unchanged from before the repair;
+  E.3's earlier `82 passed / 2 skipped / 0 failed` is **not reproducible** for
+  the same reason (that prefix and venv are gone). **In flight:** the v13
+  replay against a released `pgembed==0.2.0` bundle plus the
+  `pgembed_stannum-0.3.0rc2` standalone wheel (the E.3 candidate, 5,389,563
+  bytes, `default_version = '0.5.0'`, pin `3227d7a`), in a disposable `/tmp`
+  venv, with every failure bucketed by the adjudication's five categories. It is
+  **recommended, not gating**: its absence alone does not block E.4.
+  **The mandatory pgembed full-suite measurement does**, and it must come from a
+  candidate wheel in a clean environment with the Makefile source pin
+  identifying the candidate and the 42-proc check on the build actually loaded.
+  The controller should ask the user to either build the prefix here or run that
+  wheel measurement on another machine / CI runner.
 
   **Also not corrected here:** pgrx's `pg_config` still points at the missing
   pgembed `pginstall` prefix, so every `cargo pgrx test` / `install` needs
