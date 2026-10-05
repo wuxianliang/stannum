@@ -1162,6 +1162,89 @@ exist (`/tmp` was cleaned); this checkout has no `src/pgembed/pginstall`, and th
 the time against that wheel; the provenance repair is verified against the
 controller's own synthetic prefix.
 
+**E.4's three adjudications (2026-10-05).**
+
+1. **The census is not "0 FAIL" and the done-when text is amended, not the
+gate.** E.4's text said *"contract census 0 FAIL"*; the measured census is
+**1 FAIL / 2 GAP / 51 PASS of 54** and the FAIL is
+`fields.boolean_duplicate_leaf`. The duplicate-leaf ruling is binding on every
+step and requires additive weights *and* this case to stay a **raw FAIL** with
+its divergence entry **deleted**, so making it pass would restore the fold that
+adjudication 3 rejected on correctness grounds. **Ruling: the contract portion
+is substantively satisfied under the accounting gate, and the done-when text is
+amended** to the accounting form reproduced in the step. Continue reporting
+**1 FAIL / 2 GAP / 51 PASS of 54**; do not restore folding, rewrite the
+baseline, re-add the divergence, or manufacture a PASS. **The accounting must
+validate the approved difference, not merely whitelist the case id:** a new
+membership, ordering, or unrelated score discrepancy inside that case is still
+an unapproved failure. The unchanged membership and tie ordering with only the
+approved `flat_ranked` score-bit difference is what supports the account.
+
+2. **The pgembed full suite is a HARD gate, not optional.** The plan's
+"record it and ask the user" disposition is allowed for the pg-agent replay and
+**does not extend** to pgembed. The unit-suite measurement
+(`173 passed / 69 skipped / 6 failed`, the six being missing bundle metadata)
+establishes an **environmental blocker, not a green release measurement**, and
+E.3's historical `82 passed / 2 skipped` is evidence, not a substitute for
+testing the current candidate. **Accepted as discharging the gate** (any one of
+which may be on another machine or a CI runner): a candidate wheel containing
+the intended STN4 `0.5.0` release build, with wheel hash, stannum source
+commit, PostgreSQL version and bundle metadata recorded; a clean environment
+importing that installed wheel with **no editable checkout or external-prefix
+fallback silently substituting its bundle**; the full suite including
+`test_bundled_tools.py` and `test_tigerfs_pg18.py` with explicit dispositions
+for permitted skips; and verification that the loaded extension is the
+candidate, including the **42-proc / no-pg_test-UDF** check plus provenance
+identifying the actual build. **`pgbuild/Makefile`'s source pin must identify
+the candidate being measured** — testing `/tmp/stn3-a2-prefix` alone cannot
+discharge the bundle gate. No local prefix needs to be built in this session;
+dispatch the wheel measurement elsewhere and leave E.4 **blocked on mandatory
+packaging validation**. Recording the blocker and asking the user is the correct
+handoff, **not permission to pass the gate.**
+
+3. **The [pg-agent] v13 replay is a separate, serialized substep.** Freeze tag
+`v13` at `78e77c7`, its fixtures and dependencies including
+`pgembed==0.3.0rc2`; connect it to a verified `0.5.0` server; keep its evidence
+separate from the pgembed wheel gate; and after anything that overwrites the
+shared install, restore and verify the release build before the next
+measurement. **Failure classification, binding:** *compatibility signal* =
+unchanged SQL or supported index options stop working, signatures disappear or
+change incompatibly, or membership / ranking / bounds / highlighting /
+tokenizer / index integrity regress on unchanged inputs. *Approved intentional
+difference* = the narrowly demonstrated additive duplicate-weight change under
+the existing ruling — preserve the raw failure and account for it, **do not
+waive scoring failures generally**. *Harness/configuration failure* = the
+installed pgembed is not `0.3.0rc2`; that pin is a **test prerequisite, not an
+assertion to dismiss** — fix the environment and rerun. *Expected
+version-label difference* = an assertion specifically requiring stannum `0.4.0`
+meets the intended `0.5.0`; record it narrowly, and it excuses nothing
+functional. *Changed fixture* = **not automatically noise**: restore the tagged
+input or run a matched `0.4.0`/`0.5.0` comparison on identical data; a
+tokenizer-induced change on identical source data is behavioral signal, not
+fixture drift. Where attribution is unclear, the paired replay must differ only
+in the extension version. The replay stays optional-but-recommended: a genuine
+setup blocker may be recorded with a request for the user to run it, but no
+replay pass may be claimed, and **its absence alone does not block E.4 — the
+missing pgembed measurement does.**
+
+**The census-mode discipline, promoted to the docs.** The controller ran
+`contract/run.py --engine stannum` **without `--check`** and briefly read its
+`53 OK, 1 PASS of 54` as a census; `OK` comes from the no-`--check` branch
+(`contract/run.py:1385`) and means nothing. Nothing was written — the write at
+`contract/run.py:1437` is gated behind `--record`, and `git status` plus an
+mtime scan confirm `contract/expected/**` is untouched. The oracle ruled the
+correction complete but asked for tighter terminology (a **non-check
+execution/reporting run**, not "record mode", since persistence needs
+`--record`) and for the rule to be promoted into `contract/README.md` and
+`docs/testing.md`: **"A contract census requires `--check
+contract/expected/stannum-0.4.0`. Output from a run without `--check` is not
+gate evidence. `--record` is an intentional baseline-writing operation."**
+Gate automation must reject the omission of `--check` and evaluate the
+`Summary` line plus the approved accounting rather than `OK` text or exit
+status alone. This was a controller measurement error, not an implementation
+defect, and it is recorded because it is exactly the class of mistake that
+produces a false green.
+
 **Implementation order: keep `D.1 → D.2 → D.3 → D.4 → D.5`.** There is no
 invent temporary scope handling that D.1 must replace. The cheaper schedule is
 to prepare D.2's independent fixtures and D.4's plan matrix *while* D.1 lands.
@@ -1705,6 +1788,13 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
 
 - [ ] **E.4 Conformance + parity sweep — GATE**
   - Goal: three suites green on the STN4 0.5.0 artifact.
+  - **IN PROGRESS — BLOCKED ON MANDATORY PACKAGING VALIDATION.** The contract,
+    conformance and stannum-side gates are measured and green. The pgembed
+    full suite is a **hard gate** (oracle ruling, below) and cannot be
+    discharged in this checkout: it needs a built
+    `src/pgembed/pginstall` prefix that does not exist and that `make build`
+    cannot produce in a session. E.4 stays open until a candidate-wheel
+    measurement returns from another machine or a CI runner.
   - **IN PROGRESS.** E.2's two named rebuild-guarantee gaps are closed and
     controller-verified with an independent mutation proof (`c20f7ca`). The
     three suites are measured. **Two items remain:** the census's literal
@@ -1714,10 +1804,33 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   - Scope: upstream TIN conformance (`conformance/run.py --engine stannum
     --check conformance/expected/tin-1.0.3`); full contract suite; pgembed
     suite; **[pg-agent]** v13 suite replay.
-  - Done when: contract census 0 FAIL (GAPs only if still documented);
-    conformance green (I-01 divergence stays documented); pgembed full
-    suite green; pg-agent optional-but-recommended — if unavailable, record
-    it and ask the user to run it. D.5 and E.3 both join this gate.
+  - Done when: contract census against the unchanged
+    `contract/expected/stannum-0.4.0` baseline: every case accounted for;
+    zero **unapproved** failures; every GAP named, explained, and owned.
+    Preserve `fields.boolean_duplicate_leaf` as a **raw FAIL** under the
+    binding duplicate-leaf ruling, with the approved additive-weight
+    difference executable, narrowly scoped, and accounted for in the ledger.
+    Its divergence entry remains **deleted**. **An approved raw FAIL is not a
+    literal zero-failure census; the accounting must validate the approved
+    difference, not merely whitelist the case id** — a new membership,
+    ordering, or unrelated score discrepancy inside that case would remain an
+    unapproved failure. Reported as **1 FAIL / 2 GAP / 51 PASS of 54**.
+    Conformance green (I-01 divergence stays documented).
+    **pgembed full suite green is a hard gate, not optional** (oracle ruling
+    2026-10-05): it requires a candidate pgembed wheel, built from a
+    `pgbuild/Makefile` source pin that identifies the measured candidate,
+    installed into a clean environment with no editable checkout or
+    external-prefix fallback silently substituting its bundle, running the
+    full suite including `test_bundled_tools.py` and
+    `test_tigerfs_pg18.py`, plus the 42-proc / no-pg_test-UDF sanity check on
+    the actually loaded build. The unit-suite measurement
+    (`173 passed / 69 skipped / 6 failed`) establishes an environmental
+    blocker, not a green release measurement. Recording the blocker and
+    asking the user to run it is the correct handoff, **not permission to pass
+    the gate.** [pg-agent] v13 replay: optional-but-recommended, dispatched as
+    its own serialized substep; if a concrete setup blocker prevents it,
+    record it and ask the user, without claiming a replay pass — its absence
+    alone does not block E.4, the missing pgembed measurement does.
   - Review focus: parent §4.3 — any recorded-answer change without a
     contract bump is a bug; design §6.4 (`capabilities().engine.format`
     remains `"STN3"`; `contract_version` stays 1).

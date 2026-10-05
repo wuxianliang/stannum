@@ -22,6 +22,23 @@ a nonzero exit if any failed; `--fail-fast` stops at the first failure and
 `--logs DIR` writes each command's output to `DIR/<command>.log`. A failed
 `install` always stops the run, since later steps would test another build.
 
+## A census needs `--check`
+
+**A contract census requires `--check contract/expected/stannum-0.4.0`.
+Output from a run without `--check` is not gate evidence.**
+
+Without `--check` the runner compares nothing: it walks every case and prints
+`OK` for it, which reads exactly like a green sweep and means nothing. Call
+that a **non-check execution/reporting run** — not "record mode", because
+persisting a baseline requires `--record`, and a plain `--engine stannum`
+invocation writes no files at all. `--record` is an intentional
+baseline-writing operation; use it only to capture a new baseline, never to
+"fix" a failing case by overwriting what it was compared against.
+
+Gate automation must reject the omission of `--check` and evaluate the
+`Summary` line plus the approved accounting, rather than treating `OK` text or
+the exit status alone as a green. See [`contract/README.md`](../contract/README.md).
+
 ## Prerequisites
 
 - The Rust toolchain `rust-toolchain.toml` pins, with rustfmt and Clippy.

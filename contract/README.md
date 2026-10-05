@@ -75,3 +75,23 @@ failure after `CREATE SCHEMA` still drops the scratch schema.
 python3 contract/run.py --help
 python3 contract/run.py --engine stannum --check contract/expected/stannum-0.4.0
 ```
+
+## A census requires `--check`
+
+**A contract census requires `--check contract/expected/stannum-0.4.0`.
+Output from a run without `--check` is not gate evidence.**
+
+Without `--check` the runner never compares anything: it walks every case
+and prints `OK` for it (53 `OK`, 1 `PASS` of 54 at the time of writing), which
+reads exactly like a green sweep and means nothing. That output is a
+non-check execution/reporting run. Call it that, not "record mode":
+persisting a baseline requires `--record`, and a plain
+`--engine stannum` invocation writes no files at all.
+
+`--record` is an intentional baseline-writing operation. Use it only to
+capture a new baseline, and never to "fix" a failing case by overwriting
+what it was compared against.
+
+Gate automation must reject the omission of `--check` and must evaluate the
+`Summary` line plus the approved accounting, rather than treating `OK` text
+or the exit status alone as a green.
