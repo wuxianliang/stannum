@@ -2136,12 +2136,30 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
     the development branch, `main` carried 0.4.0 until this parity gate and is
     now maintenance-only, and upstream changes still land as reviewed tagged
     snapshots. Both branches push to `origin`.
-  - **The merge.** `main` and `stn3` had genuinely diverged — 153 commits on
-    `stn3` not in `main`, 62 on `main` not in `stn3`, the latter being the
-    upstream snapshots `main` carried while it held 0.4.0 — so this was a real
-    merge with conflicts to resolve, not the fast-forward the STN3-era wording
-    suggested. Recorded here because the divergence is the reason the merge
-    deserved its own verification pass rather than riding along with the tag.
+  - **The merge — attempted, measured, and deliberately deferred.** `main` and
+    `stn3` had genuinely diverged — 153 commits on `stn3` not in `main`, 62 on
+    `main` not in `stn3`, mostly the contract-freeze and 0.4.0 replay work done
+    on `main` during the STN3 plan's early phases. So this is a real merge, not
+    the fast-forward the STN3-era wording suggested, and it is not small:
+    **53 conflicted files, 322 conflict hunks**, concentrated in
+    `postgres/src/score.rs` (38), `storage/mod.rs` (34), `dict.rs` (24),
+    `segment/src/segment.rs` (22), `search.rs` (21) and `customscan.rs` (17).
+    **Why it was aborted rather than forced.** The conflict is not mechanical.
+    `main` carries the STN3 Phase-4 fielded-terms implementation —
+    `segment/src/postings.rs`, `segment/src/maintenance/`, `Bm25fScorer`,
+    `FieldHit`/`PayloadCursor` — and `stn3` carries the STN4 representation
+    that **deleted** those files in favour of per-field channels
+    (`segment/src/channels.rs`, `Term::channels()`). Design §9 names this class
+    as expected on an upstream merge and §7 records the codec as "dead as a
+    codec"; reconciling it is a per-symbol decision about which representation
+    survives, which is exactly the work the contract census exists to gate.
+    Resolving 322 hunks to satisfy a compiler and then letting CI on `main`
+    adjudicate the semantics would be the gate-weakening the constraints
+    forbid, and the release does not depend on it. `main` is untouched at
+    `7ab511b`, equal to `origin/main`; `git merge --abort` left it clean.
+    **Owner: a follow-up step, with the contract census as its gate.** The
+    release is unaffected: the tag names `stn3`, and `docs/README.md` already
+    states the policy this merge implements.
   - **Tracker closed.** E.5 was the last open item in this plan; the census
     ledger's final row is E.4 at 1 FAIL / 2 GAP / 51 PASS, the FAIL being the
     adjudicated `fields.boolean_duplicate_leaf`.
