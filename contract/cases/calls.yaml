@@ -68,7 +68,7 @@ cases:
     corpus: docs
     capture:
       - value:
-          sql: "SELECT tok FROM stannum.builtin_stop_words('auto') AS t(tok) ORDER BY tok"
+          sql: "SELECT tok FROM stannum.builtin_stop_words('auto') AS t(tok) ORDER BY tok COLLATE \"C\""
   - id: calls.tokenize_named
     description: pgembed tokenizes with tokenizer => the index tokenizer.
     corpus: docs
