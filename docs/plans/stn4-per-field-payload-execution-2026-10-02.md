@@ -1967,6 +1967,57 @@ D.5 **and** E.3; E.5 does not ship without E.4 green. C.2 is not waived.
   The controller should ask the user to either build the prefix here or run that
   wheel measurement on another machine / CI runner.
 
+  **A local bundle build was attempted and is blocked by the network.**
+  `make -j8 all` in `pgembed/pgbuild` failed for every **git-based** source
+  checkout: `LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to
+  github.com:443` and `Operation too slow. Less than 1000 bytes/sec transferred
+  the last 30 seconds`. The **archive-based** downloads (pgvector, timescaledb,
+  pgmq, pg_partman, pgtap, pgsql-http, firebird, libfq, libtommath, vectorchord,
+  age) all succeeded, so this is github's git protocol specifically. The
+  PostgreSQL 18.4 checkout itself never completed. The controller removed only
+  the artifacts that run created (verified by mtime; the pre-existing
+  `stannum-7fdee282…` dir and the tracked Makefile/docs/patches/skills were left
+  alone) and freed the space. **So the bundle genuinely cannot be built in this
+  session, by network, not by effort.**
+
+  **The v13 replay, round 2 — environment verified, and the failure is not
+  stannum's.** The controller ran it directly after the dispatching agent's
+  transport died mid-task. Environment built and verified by the controller: a
+  disposable `/tmp` venv holding a **copy** of the local `pgembed` package whose
+  `pginstall` is a **copy** of the release prefix (never a write into it; the
+  original is untouched at mtime Oct 2), plus a **synthesized**
+  `pgembed-0.3.0rc2.dist-info` — recorded in
+  `/tmp/pgagent-replay/SYNTHESIZED_PGEMBED_DISTINFO.txt`, and a test
+  prerequisite, not an assertion to dismiss. Verified on the running server:
+  **PostgreSQL 18.4**, `default_version = '0.5.0'`, **42** `stannum` `pg_proc`
+  functions, **0** `corrupt_index_page` / `index_page_kinds`.
+  `v13/mgraph/test_stannum_usage.py` then failed during `load_stage` with
+  `access method "stannum" does not exist` at `stannum--0.5.0.sql` line 24.
+  **The controller traced it to a conclusion rather than guessing.** The
+  `amhandler` DDL at `stannum--0.5.0.sql:29-33` is **byte-identical** to
+  `stannum--0.4.0.sql:24-28` (same text, different line offset), so it is not a
+  0.5.0 change. `CREATE EXTENSION stannum` **succeeds** in a clean database on
+  the same server and prefix, and succeeds again after `DROP`. And the
+  attribution test, which the controller first got **wrong** — it ran
+  `DROP EVENT TRIGGER IF EXISTS v13_tools_ddl_bump` when the triggers
+  `v13_core.sql` actually creates are named **`trg_tools_ddl_bump`** and
+  `trg_tools_ddl_bump_drop`**, so `IF EXISTS` silently dropped nothing and the
+  retry failed identically — passes once the **correct** names are dropped, over
+  a fresh connection so no aborted transaction carries its error forward:
+  **WITH** the v13 event triggers, `CREATE EXTENSION stannum` fails with
+  `access method "stannum" does not exist`; **WITHOUT** them it **succeeds**.
+  **Bucket 3, harness: pg-agent v13's own `trg_tools_ddl_bump` event trigger
+  breaks on stannum's extension DDL, in both 0.4.0 and 0.5.0.** It is not a
+  0.5.0 compatibility regression, and — because every v13 module loads through
+  `load_stage` — it means **no** v13 test can run against stannum on either
+  version until pg-agent fixes the trigger. That is a pre-existing harness
+  defect for pg-agent's owner, and it must not be recorded as a stannum failure.
+  The two transient red herrings the controller hit and resolved: a post-failure
+  `SELECT` reporting a stale aborted-transaction error (psycopg2, not database
+  corruption), and the incorrect trigger-name drop above. Recorded because the
+  second one is exactly the mistake that would have produced a false
+  attribution to stannum.
+
   **Also not corrected here:** pgrx's `pg_config` still points at the missing
   pgembed `pginstall` prefix, so every `cargo pgrx test` / `install` needs
   `PGRX_PG_CONFIG_PATH` until either that prefix is rebuilt or the configured
