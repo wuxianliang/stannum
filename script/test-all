@@ -193,6 +193,7 @@ step() {
             run stannum-jieba python3 postgres/tests/test_stannum_jieba.py
             run postings-lifecycle python3 postgres/tests/postings_lifecycle.py
             run merge-lifecycle python3 postgres/tests/merge_lifecycle.py
+            run rebuild-guarantees python3 postgres/tests/rebuild_guarantees.py
             run ranked-fuzz-smoke python3 postgres/tests/ranked_fuzz.py --smoke
             run vacuum-cleanup-pins python3 postgres/tests/vacuum_cleanup_pins.py
             run mutation-targets python3 benchmarks/mutation_targets.py ;;

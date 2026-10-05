@@ -947,6 +947,10 @@
    "owner": "ben",
    "evidence": "Original Stannum implementation; reviewed new-path history and compared against upstream source. Introduced in c66fd1b570fc111d9cbe3d399065736d8013a447."
   },
+  "postgres/tests/rebuild_guarantees.py": {
+   "owner": "ben",
+   "evidence": "Original Stannum E.4 rebuild-guarantee cluster tests. Not copied from Lead."
+  },
   "postgres/tests/search_srf.py": {
    "owner": "ben",
    "evidence": "Port of the 0.4.0 installed SQL, permission, RLS, and MVCC fallback integration test onto STN3."
