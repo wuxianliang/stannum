@@ -699,6 +699,26 @@
    "notice": "withheld",
    "evidence": "Byte-identical copy of main's released 0.4.0 snapshot (predecessor for ALTER EXTENSION). Notice withheld so the copy stays unmodified."
   },
+  "postgres/sql/stannum--0.5.1.sql": {
+   "owner": "mixed",
+   "upstream_path": "postgres/src/lib.rs",
+   "upstream_revision": "300ad3afbcaae42a90ef963cb3eb445784c733b3",
+   "generated_from": [
+    "postgres/src/am.rs",
+    "postgres/src/score.rs",
+    "postgres/src/search.rs",
+    "postgres/src/operator.rs",
+    "postgres/src/highlight_udfs.rs",
+    "postgres/src/tool/highlight.rs",
+    "postgres/src/tool/diagnostics.rs",
+    "postgres/src/tool/capabilities.rs",
+    "postgres/src/udfs.rs",
+    "postgres/src/dict.rs",
+    "postgres/src/stopwords.rs",
+    "postgres/src/lib.rs"
+   ],
+   "evidence": "pgrx-generated SQL from inherited and Stannum Rust definitions, including support bindings and SQL wrappers. Catalog-identical to 0.5.0 (verified with extension_upgrade.normalized: 16146 bytes both); 0.5.1 changes the library only. Reapply notice after generation."
+  },
   "postgres/sql/stannum--0.5.0.sql": {
    "owner": "mixed",
    "upstream_path": "postgres/src/lib.rs",

@@ -1,0 +1,22 @@
+-- Copyright (C) 2026 Ben Weis <ben@springbird.app>
+-- Based on Lead, copyright (C) 2026 PlanetScale
+--
+-- See LICENSE in the repository root for license terms.
+
+-- Catalog delta vs 0.5.0:
+--   Created: none
+--   Altered: none
+--   Dropped: none
+-- The extension version moves to 0.5.1 and the library behind every existing
+-- object changes; no object is added, altered or dropped. 0.5.0->0.5.1 is
+-- therefore a no-op upgrade script, and every object keeps its identity so
+-- extension fingerprints survive it.
+--
+-- What actually changed is in the library, not the catalog: rel_pathlist_hook,
+-- installed when the library is dlopened, looked the stannum access method up
+-- with missing_ok = false. A database that had loaded the library without
+-- installing the extension — an extension script mid-install, or a LOAD, or a
+-- CREATE FUNCTION naming the library — could not plan any query at all.
+--
+-- Restart existing backends after replacing the shared library; ALTER
+-- EXTENSION does not unload a library already mapped into a backend.

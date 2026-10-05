@@ -8,6 +8,27 @@ result is listed.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-05
+
+Fixes a defect that made the library unusable in a database that had loaded it
+without the extension installed.
+
+### Fixed
+
+- Planning no longer fails with `access method "stannum" does not exist` in a
+  database where the library is loaded but the extension is not. Loading the
+  library installs the planner hook through `_PG_init`, and `_PG_init` runs
+  when the library is dlopened — by any `CREATE FUNCTION … AS 'stannum', …` or
+  `LOAD`, not only by `CREATE EXTENSION`. The hook then looked the access
+  method up as though its absence were an error, and an extension script
+  creates the amhandler function *before* the access method, so in that window
+  planning **any** query failed. The lookup now treats an absent method as
+  "no stannum indexes here", which is what it means. With the method present,
+  custom scan, bitmap and sequential paths are unchanged.
+  An upgrade from 0.5.0 changes no catalog object: the upgrade script is a
+  no-op and object identities are preserved. Restart existing backends after
+  replacing the shared library.
+
 ## [0.5.0] - 2026-10-01
 
 The first Stannum 0.5.0 cut (`stannum.version()` returns `0.5.0`), versioned
